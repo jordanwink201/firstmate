@@ -221,7 +221,7 @@ append_routing_ledger_record() {
   fi
   escalations=0
   if [ -f "$STATE/$ID.status" ]; then
-    escalations=$(grep -Ec '^(needs-decision|blocked|failed):' "$STATE/$ID.status" 2>/dev/null || true)
+    escalations=$(grep -Ec '^(needs-decision|needs-retier|blocked|failed):' "$STATE/$ID.status" 2>/dev/null || true)
   fi
   if command -v jq >/dev/null 2>&1; then
     json=$(jq -cn \
