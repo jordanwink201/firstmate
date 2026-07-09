@@ -147,13 +147,15 @@ The report is the only thing that survives, so anything worth keeping must be in
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, done, failed.
+   States: working, needs-retier, needs-decision, blocked, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
-   would act on and the needs-decision/blocked/done/failed states. No step-by-step
+   would act on and the needs-retier/needs-decision/blocked/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+7. If the investigation spans >2 subsystems or you cannot reach a confident root cause,
+   append \`needs-retier: investigation exceeds bounded scout tier\` and stop. Firstmate will respawn on opus.
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.

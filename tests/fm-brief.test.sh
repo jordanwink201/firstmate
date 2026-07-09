@@ -76,6 +76,24 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_scout_brief_includes_needs_retier_ratchet() {
+  local home id brief
+  home="$TMP_ROOT/scout-home"
+  mkdir -p "$home/data"
+  id="brief-scout-ratchet-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "States: working, needs-retier, needs-decision, blocked, done, failed." "$brief" \
+    "scout brief status list does not include needs-retier"
+  assert_grep "append \`needs-retier: investigation exceeds bounded scout tier\` and stop" "$brief" \
+    "scout brief missing needs-retier ratchet instruction"
+  assert_grep "Firstmate will respawn on opus." "$brief" \
+    "scout brief missing opus respawn handoff"
+  pass "fm-brief.sh: scout briefs include the needs-retier ratchet"
+}
+
 test_script_parses
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_scout_brief_includes_needs_retier_ratchet
