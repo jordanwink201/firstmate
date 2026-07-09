@@ -1293,16 +1293,16 @@ test_routing_ledger_harvests_codex_cumulative_tokens() {
 EOF
 
   set +e
-  FM_CODEX_SESSIONS_DIR="$case_dir/codex-sessions" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  FM_CODEX_SESSIONS_DIR="$case_dir/codex-sessions" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 0 "$rc" "routing-codex: teardown should succeed while harvesting codex tokens"
   ledger="$case_dir/data/routing-ledger.jsonl"
   assert_present "$ledger" "routing-codex: routing ledger was not written"
-  jq -e 'select(.id == "task-x1" and .tokens == "available" and .harness == "codex" and .rule == 5 and .in == 20 and .out == 4 and .cached == 11 and .reasoning_out == 2 and .total_tokens == 35 and .outcome == "abandoned")' "$ledger" >/dev/null \
+  jq -e 'select(.id == "task-x1" and .tokens == "available" and .harness == "codex" and .rule == 5 and .in == 20 and .out == 4 and .cached == 11 and .reasoning_out == 2 and .total_tokens == 35 and .outcome == "pushed")' "$ledger" >/dev/null \
     || fail "routing-codex: ledger did not capture the last cumulative codex token_count: $(cat "$ledger")"
-  pass "teardown harvests codex cumulative token_count totals into routing-ledger.jsonl before cleanup"
+  pass "normal allowed teardown harvests codex cumulative token_count totals into routing-ledger.jsonl before cleanup"
 }
 
 test_routing_ledger_harvests_claude_delta_tokens() {
