@@ -72,6 +72,12 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+enable_claude_ship_profile() {
+  local home=$1
+  printf '%s\n' '{"rules":[{"when":"hard trigger ship exception","use":{"harness":"claude","model":"opus"}}]}' \
+    > "$home/config/crew-dispatch.json"
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -84,7 +90,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  LC_ALL=C FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -103,6 +109,11 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+assert_meta_rule() {
+  local meta=$1 rule=$2
+  assert_grep "rule=$rule" "$meta" "meta missing rule=$rule"
 }
 
 test_no_profile_keeps_claude_launch_unchanged() {
@@ -172,6 +183,58 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
+}
+
+test_matching_dispatch_rule_records_rule_without_warning() {
+  local rec id out status
+  id=profile-rule-match-z17
+  rec=$(make_spawn_case profile-rule-match grok "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness grok --model grok-4 --effort high --rule 1)
+  status=$?
+  expect_code 0 "$status" "matching --rule tuple should not block spawn"
+  assert_not_contains "$out" "warning:" "matching --rule tuple should not warn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
+  assert_meta_rule "$HOME_DIR/state/$id.meta" 1
+  pass "matching dispatch rule records the consulted rule without warning"
+}
+
+test_ship_on_claude_warns_but_keeps_matching_rule() {
+  local rec id out status
+  id=profile-ship-claude-z18
+  rec=$(make_spawn_case profile-ship-claude claude "$id")
+  read_case_record "$rec"
+  enable_claude_ship_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus --rule 1)
+  status=$?
+  expect_code 0 "$status" "ship-on-claude warning should not block spawn"
+  assert_contains "$out" "warning: ships route to codex per rules 4-6; proceeding" \
+    "ship-on-claude warning was not emitted"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus default
+  assert_meta_rule "$HOME_DIR/state/$id.meta" 1
+  pass "ship tasks launched on claude warn but keep matching rule attribution"
+}
+
+test_mismatched_dispatch_rule_records_override() {
+  local rec id out status
+  id=profile-rule-override-z19
+  rec=$(make_spawn_case profile-rule-override codex "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --rule 1)
+  status=$?
+  expect_code 0 "$status" "mismatched --rule tuple should warn but still spawn"
+  assert_contains "$out" "recording rule=override" "mismatched tuple did not warn about rule override"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_meta_rule "$HOME_DIR/state/$id.meta" override
+  pass "mismatched dispatch rule records rule=override without blocking explicit overrides"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -390,6 +453,9 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_matching_dispatch_rule_records_rule_without_warning
+test_ship_on_claude_warns_but_keeps_matching_rule
+test_mismatched_dispatch_rule_records_override
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
