@@ -142,6 +142,214 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+routing_json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+routing_file_mtime() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || printf '0'
+}
+
+codex_tokens_for_worktree() {
+  local wt=$1 root file cwd mtime best_mtime best_file usage
+  root=${FM_CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -d "$root" ] || return 1
+  best_mtime=0
+  best_file=
+  while IFS= read -r -d '' file; do
+    if ! cwd=$(jq -r 'select(.type=="session_meta") | .payload.cwd // empty' "$file" 2>/dev/null | tail -1); then
+      continue
+    fi
+    [ "$cwd" = "$wt" ] || continue
+    mtime=$(routing_file_mtime "$file")
+    if [ "$mtime" -ge "$best_mtime" ]; then
+      best_mtime=$mtime
+      best_file=$file
+    fi
+  done < <(find "$root" -type f -name '*.jsonl' -print0 2>/dev/null)
+  [ -n "$best_file" ] || return 1
+  usage=$(jq -c 'select(.type=="event_msg" and .payload.type=="token_count") | .payload.info.total_token_usage // empty' "$best_file" 2>/dev/null | tail -1) || return 1
+  [ -n "$usage" ] || return 1
+  printf '%s\n' "$usage" | jq -e 'has("input_tokens") and has("output_tokens") and has("cached_input_tokens")' >/dev/null 2>&1 || return 1
+  printf '%s\n' "$usage" | jq -r '[.input_tokens, .output_tokens, .cached_input_tokens, (.reasoning_output_tokens // 0), (.total_tokens // 0)] | @tsv' 2>/dev/null
+}
+
+claude_worktree_slug() {
+  printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'
+}
+
+claude_tokens_for_worktree() {
+  local wt=$1 root dir file sums n fin fout fcached fcreation total_n total_in total_out total_cached total_creation
+  root=${FM_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}
+  dir="$root/$(claude_worktree_slug "$wt")"
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -d "$dir" ] || return 1
+  total_n=0
+  total_in=0
+  total_out=0
+  total_cached=0
+  total_creation=0
+  while IFS= read -r -d '' file; do
+    sums=$(jq -sr '
+      reduce (
+        .[]?
+        | select((.type? == "assistant") or (.message.role? == "assistant"))
+        | .message.usage? // empty
+      ) as $u (
+        {n:0, input:0, output:0, cached:0, creation:0};
+        {
+          n: (.n + 1),
+          input: (.input + ($u.input_tokens // 0)),
+          output: (.output + ($u.output_tokens // 0)),
+          cached: (.cached + ($u.cache_read_input_tokens // 0)),
+          creation: (.creation + ($u.cache_creation_input_tokens // 0))
+        }
+      )
+      | [.n, .input, .output, .cached, .creation] | @tsv
+    ' "$file" 2>/dev/null) || return 1
+    [ -n "$sums" ] || return 1
+    read -r n fin fout fcached fcreation <<EOF
+$sums
+EOF
+    total_n=$((total_n + n))
+    total_in=$((total_in + fin))
+    total_out=$((total_out + fout))
+    total_cached=$((total_cached + fcached))
+    total_creation=$((total_creation + fcreation))
+  done < <(find "$dir" -type f -name '*.jsonl' -print0 2>/dev/null)
+  [ "$total_n" -gt 0 ] || return 1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$total_in" "$total_out" "$total_cached" 0 0 "$total_creation"
+}
+
+routing_ledger_has_id() {
+  local ledger=$1 id=$2 escaped_id
+  [ -f "$ledger" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e --arg id "$id" 'select(.id == $id)' "$ledger" >/dev/null 2>&1
+    return $?
+  fi
+  escaped_id=$(routing_json_escape "$id")
+  grep -q "\"id\":\"$escaped_id\"" "$ledger" 2>/dev/null
+}
+
+append_routing_ledger_record() {
+  local tokens=$1 reason=$2 tin=$3 tout=$4 tcached=$5 treasoning=$6 ttotal=$7 tcreation=${8:-0}
+  local ledger ts project_name harness model effort rule outcome escalations json
+  ledger="$DATA/routing-ledger.jsonl"
+  mkdir -p "$DATA" 2>/dev/null || { echo "warning: routing ledger unavailable: cannot create $DATA" >&2; return 0; }
+  ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  project_name=$(basename "$PROJ")
+  harness=$(meta_value "$META" harness)
+  model=$(meta_value "$META" model)
+  effort=$(meta_value "$META" effort)
+  rule=$(meta_value "$META" rule)
+  [ -n "$model" ] || model=default
+  [ -n "$effort" ] || effort=default
+  if [ "$FORCE" = "--force" ]; then
+    outcome=abandoned
+  elif [ "$KIND" = scout ]; then
+    outcome=report
+  elif [ "$KIND" = secondmate ]; then
+    outcome=retired
+  elif [ "$MODE" = local-only ]; then
+    outcome=local-main
+  else
+    outcome=pushed
+  fi
+  escalations=0
+  if [ -f "$STATE/$ID.status" ]; then
+    escalations=$(grep -Ec '^(needs-decision|blocked|failed):' "$STATE/$ID.status" 2>/dev/null || true)
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    json=$(jq -cn \
+      --arg id "$ID" --arg ts "$ts" --arg kind "$KIND" --arg project "$project_name" \
+      --arg rule "$rule" --arg harness "$harness" --arg model "$model" --arg effort "$effort" \
+      --arg tokens "$tokens" --arg reason "$reason" --arg in "$tin" --arg out "$tout" \
+      --arg cached "$tcached" --arg reasoning "$treasoning" --arg total "$ttotal" \
+      --arg cache_creation "$tcreation" --arg outcome "$outcome" --arg escalations "$escalations" '
+      def maybe_num($v): if $v == "" then null else ($v | tonumber? // null) end;
+      def maybe_rule($v): if $v == "" then null elif ($v | test("^[0-9]+$")) then ($v | tonumber) else $v end;
+      {
+        id: $id,
+        ts: $ts,
+        kind: $kind,
+        project: $project,
+        rule: maybe_rule($rule),
+        harness: $harness,
+        model: $model,
+        effort: $effort,
+        out: maybe_num($out),
+        in: maybe_num($in),
+        cached: maybe_num($cached),
+        cache_creation: maybe_num($cache_creation),
+        reasoning_out: maybe_num($reasoning),
+        total_tokens: maybe_num($total),
+        tokens: $tokens,
+        token_reason: (if $reason == "" then null else $reason end),
+        wall_s: null,
+        escalations: maybe_num($escalations),
+        outcome: $outcome,
+        redo_of: null
+      }' 2>/dev/null) || json=
+  else
+    json=
+  fi
+  if [ -z "$json" ]; then
+    json='{"id":"'"$(routing_json_escape "$ID")"'","ts":"'"$(routing_json_escape "$ts")"'","kind":"'"$(routing_json_escape "$KIND")"'","project":"'"$(routing_json_escape "$project_name")"'","rule":null,"harness":"'"$(routing_json_escape "$harness")"'","model":"'"$(routing_json_escape "$model")"'","effort":"'"$(routing_json_escape "$effort")"'","out":null,"in":null,"cached":null,"cache_creation":null,"reasoning_out":null,"total_tokens":null,"tokens":"unavailable","token_reason":"jq_unavailable","wall_s":null,"escalations":'"$escalations"',"outcome":"'"$(routing_json_escape "$outcome")"'","redo_of":null}'
+  fi
+  printf '%s\n' "$json" >> "$ledger" || echo "warning: routing ledger unavailable: cannot append $ledger" >&2
+}
+
+warn_missing_routing_ledger_coverage() {
+  local ledger count_file count_id
+  ledger="$DATA/routing-ledger.jsonl"
+  [ -d "$STATE" ] || return 0
+  for count_file in "$STATE"/.count-fleet_fm-*; do
+    [ -e "$count_file" ] || continue
+    count_id=${count_file##*/.count-fleet_fm-}
+    routing_ledger_has_id "$ledger" "$count_id" && continue
+    echo "warning: routing ledger missing line for $count_id (coverage marker $count_file)" >&2
+  done
+}
+
+harvest_routing_tokens() {
+  local harness result tin tout tcached treasoning ttotal tcreation
+  harness=$(meta_value "$META" harness)
+  tin=
+  tout=
+  tcached=
+  treasoning=
+  ttotal=
+  tcreation=
+  case "$harness" in
+    codex*)
+      if result=$(codex_tokens_for_worktree "$WT" 2>/dev/null); then
+        read -r tin tout tcached treasoning ttotal <<EOF
+$result
+EOF
+        append_routing_ledger_record available "" "$tin" "$tout" "$tcached" "$treasoning" "$ttotal" 0
+      else
+        append_routing_ledger_record unavailable "codex_jsonl_missing_or_unreadable" "" "" "" "" "" 0
+      fi
+      ;;
+    claude*)
+      if result=$(claude_tokens_for_worktree "$WT" 2>/dev/null); then
+        read -r tin tout tcached treasoning ttotal tcreation <<EOF
+$result
+EOF
+        append_routing_ledger_record available "" "$tin" "$tout" "$tcached" "$treasoning" "$ttotal" "$tcreation"
+      else
+        append_routing_ledger_record unavailable "claude_jsonl_missing_or_unreadable" "" "" "" "" "" 0
+      fi
+      ;;
+    *)
+      append_routing_ledger_record unavailable "unsupported_harness" "" "" "" "" "" 0
+      ;;
+  esac
+  warn_missing_routing_ledger_coverage
+}
+
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -989,6 +1197,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+harvest_routing_tokens
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
