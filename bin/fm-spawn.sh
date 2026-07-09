@@ -502,8 +502,9 @@ dispatch_rule_tuple() {
   case "$rule" in
     ''|*[!0-9]*) return 2 ;;
   esac
-  [ "$rule" -gt 0 ] || return 2
-  idx=$((rule - 1))
+  idx=$((10#$rule))
+  [ "$idx" -gt 0 ] || return 2
+  idx=$((idx - 1))
   jq -er --argjson idx "$idx" '
     (.rules // [])[$idx].use? // empty
     | [(.harness // ""), (.model // "default"), (.effort // "default")]

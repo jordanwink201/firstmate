@@ -1339,6 +1339,7 @@ test_routing_ledger_unavailable_and_coverage_warn_are_soft() {
   session_dir="$case_dir/codex-sessions/2026/07/09"
   mkdir -p "$session_dir"
   printf 'not json\n' > "$session_dir/bad.jsonl"
+  printf 'needs-retier: investigation exceeds bounded scout tier\n' > "$case_dir/state/task-x1.status"
   touch "$case_dir/state/.count-fleet_fm-orphan-z9"
 
   set +e
@@ -1349,7 +1350,7 @@ test_routing_ledger_unavailable_and_coverage_warn_are_soft() {
   expect_code 0 "$rc" "routing-unavailable: token parse miss must not block teardown"
   ledger="$case_dir/data/routing-ledger.jsonl"
   assert_present "$ledger" "routing-unavailable: routing ledger was not written"
-  jq -e 'select(.id == "task-x1" and .tokens == "unavailable" and .token_reason == "codex_jsonl_missing_or_unreadable" and .in == null and .out == null and .cached == null)' "$ledger" >/dev/null \
+  jq -e 'select(.id == "task-x1" and .tokens == "unavailable" and .token_reason == "codex_jsonl_missing_or_unreadable" and .in == null and .out == null and .cached == null and .escalations == 1)' "$ledger" >/dev/null \
     || fail "routing-unavailable: ledger did not record tokens=unavailable: $(cat "$ledger")"
   grep -F 'warning: routing ledger missing line for orphan-z9' "$case_dir/stderr" >/dev/null \
     || fail "routing-unavailable: coverage gap warning was not printed: $(cat "$case_dir/stderr")"

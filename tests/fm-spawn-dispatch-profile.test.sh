@@ -78,6 +78,22 @@ enable_claude_ship_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+enable_eight_rule_profile() {
+  local home=$1
+  cat > "$home/config/crew-dispatch.json" <<'JSON'
+{"rules":[
+  {"when":"one","use":{"harness":"codex","model":"gpt-5","effort":"medium"}},
+  {"when":"two","use":{"harness":"codex","model":"gpt-5","effort":"high"}},
+  {"when":"three","use":{"harness":"claude","model":"haiku"}},
+  {"when":"four","use":{"harness":"claude","model":"sonnet"}},
+  {"when":"five","use":{"harness":"claude","model":"opus"}},
+  {"when":"six","use":{"harness":"codex","model":"gpt-5","effort":"xhigh"}},
+  {"when":"seven","use":{"harness":"grok","model":"grok-4","effort":"medium"}},
+  {"when":"eight","use":{"harness":"grok","model":"grok-4","effort":"high"}}
+]}
+JSON
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -200,6 +216,23 @@ test_matching_dispatch_rule_records_rule_without_warning() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
   assert_meta_rule "$HOME_DIR/state/$id.meta" 1
   pass "matching dispatch rule records the consulted rule without warning"
+}
+
+test_zero_padded_rule_index_uses_base_ten() {
+  local rec id out status
+  id=profile-rule-leading-zero-z20
+  rec=$(make_spawn_case profile-rule-leading-zero grok "$id")
+  read_case_record "$rec"
+  enable_eight_rule_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness grok --model grok-4 --effort high --rule 08)
+  status=$?
+  expect_code 0 "$status" "zero-padded --rule should be parsed as base ten"
+  assert_not_contains "$out" "recording rule=override" "zero-padded --rule 08 should not be treated as invalid octal"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
+  assert_meta_rule "$HOME_DIR/state/$id.meta" 08
+  pass "zero-padded dispatch rule indexes are parsed as base ten"
 }
 
 test_ship_on_claude_warns_but_keeps_matching_rule() {
@@ -454,6 +487,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_matching_dispatch_rule_records_rule_without_warning
+test_zero_padded_rule_index_uses_base_ten
 test_ship_on_claude_warns_but_keeps_matching_rule
 test_mismatched_dispatch_rule_records_override
 test_claude_threads_model_and_effort
