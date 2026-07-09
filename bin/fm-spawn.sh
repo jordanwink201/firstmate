@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--rule <n>] [--backend <name>] [--scout]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--rule <n>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --rule <n> records which 1-based config/crew-dispatch.json rule was consulted.
+#   It is advisory attribution: mismatches warn and record rule=override, never
+#   substituting a tier or blocking an explicit override.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   spawn. Without it, the script resolves FM_BACKEND, then config/backend, then
 #   runtime auto-detection (the runtime firstmate itself is executing inside -
@@ -92,11 +95,14 @@ KIND=ship
 HARNESS_ARG=
 MODEL=
 EFFORT=
+RULE=
 BACKEND_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+RULE_SET=0
 BACKEND_SET=0
+ROUTING_RULE_META=
 POS=()
 want_value=
 for a in "$@"; do
@@ -108,6 +114,7 @@ for a in "$@"; do
       harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
+      rule) RULE=$a; RULE_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -123,6 +130,8 @@ for a in "$@"; do
     --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
     --effort) want_value=effort ;;
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --rule) want_value=rule ;;
+    --rule=*) RULE=${a#--rule=}; RULE_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     *) POS+=("$a") ;;
@@ -132,6 +141,7 @@ done
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
+[ "$RULE_SET" -eq 0 ] || [ -n "$RULE" ] || { echo "error: --rule requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
@@ -202,6 +212,7 @@ orca_spawn_abort_cleanup() {
           echo "tasktmp=${TASK_TMP:-}"
           echo "model=${MODEL:-default}"
           echo "effort=${EFFORT:-default}"
+          [ -z "${ROUTING_RULE_META:-}" ] || echo "rule=$ROUTING_RULE_META"
           echo "backend=orca"
           echo "orca_worktree_id=$ORCA_WORKTREE_ID"
           [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -231,6 +242,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$RULE" ] || shared_args+=(--rule "$RULE")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
@@ -448,9 +460,71 @@ effort_flag_for_harness() {
   esac
 }
 
+dispatch_profile_label() {
+  local harness=$1 model=$2 effort=$3
+  printf '%s/%s/%s' "$harness" "${model:-default}" "${effort:-default}"
+}
+
+dispatch_rule_tuple() {
+  local rule=$1 file idx
+  file="$CONFIG/crew-dispatch.json"
+  command -v jq >/dev/null 2>&1 || return 2
+  [ -f "$file" ] || return 2
+  case "$rule" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  [ "$rule" -gt 0 ] || return 2
+  idx=$((rule - 1))
+  jq -er --argjson idx "$idx" '
+    (.rules // [])[$idx].use? // empty
+    | [(.harness // ""), (.model // "default"), (.effort // "default")]
+    | @tsv
+  ' "$file" 2>/dev/null
+}
+
+resolve_dispatch_rule_meta() {
+  local tuple expected_harness expected_model expected_effort actual_model actual_effort expected actual
+  ROUTING_RULE_META=
+  [ "$KIND" != secondmate ] || return 0
+  [ -f "$CONFIG/crew-dispatch.json" ] || {
+    if [ "$RULE_SET" -eq 1 ]; then
+      echo "warning: --rule $RULE supplied but config/crew-dispatch.json is absent; proceeding without rule attribution" >&2
+    fi
+    return 0
+  }
+
+  if [ "$RULE_SET" -eq 0 ]; then
+    ROUTING_RULE_META=override
+    echo "warning: config/crew-dispatch.json is active but no --rule was supplied; recording rule=override" >&2
+  elif tuple=$(dispatch_rule_tuple "$RULE"); then
+    read -r expected_harness expected_model expected_effort <<EOF
+$tuple
+EOF
+    actual_model=${MODEL:-default}
+    actual_effort=${EFFORT:-default}
+    expected=$(dispatch_profile_label "$expected_harness" "$expected_model" "$expected_effort")
+    actual=$(dispatch_profile_label "$HARNESS" "$actual_model" "$actual_effort")
+    if [ "$expected" = "$actual" ]; then
+      ROUTING_RULE_META=$RULE
+    else
+      ROUTING_RULE_META=override
+      echo "warning: --rule $RULE resolves to $expected, got $actual; recording rule=override" >&2
+    fi
+  else
+    ROUTING_RULE_META=override
+    echo "warning: --rule $RULE is not a valid dispatch rule; recording rule=override" >&2
+  fi
+
+  if [ "$KIND" = ship ] && [ "$HARNESS" = claude ]; then
+    echo "warning: ships route to codex per rules 4-6; proceeding" >&2
+  fi
+}
+
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
+
+resolve_dispatch_rule_meta
 
 resolved_existing_dir() {
   local path=$1
@@ -918,6 +992,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$ROUTING_RULE_META" ] || echo "rule=$ROUTING_RULE_META"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
