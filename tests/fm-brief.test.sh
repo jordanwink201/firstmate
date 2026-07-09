@@ -83,6 +83,25 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_scout_brief_includes_needs_retier_ratchet() {
+  local home id brief
+  home="$TMP_ROOT/scout-home"
+  mkdir -p "$home/data"
+  id="brief-scout-ratchet-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "States: working, needs-retier, needs-decision, blocked, paused, done, failed." "$brief" \
+    "scout brief status list does not include needs-retier"
+  assert_grep "append \`needs-retier: investigation exceeds bounded scout tier\` and stop" "$brief" \
+    "scout brief missing needs-retier ratchet instruction"
+  assert_grep "Firstmate will respawn on opus." "$brief" \
+    "scout brief missing opus respawn handoff"
+  assert_grep "Never stop, restart, or update the shared \`no-mistakes\` daemon" "$brief" \
+    "scout brief lost the shared no-mistakes daemon rule"
+  pass "fm-brief.sh: scout briefs include the needs-retier ratchet"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -252,8 +271,13 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
-      "$kind brief did not render the configured pause verb in its states list"
+    if [ "$kind" = scout ]; then
+      assert_grep "States: working, needs-retier, needs-decision, blocked, awaiting, done, failed." "$brief" \
+        "$kind brief did not render the configured pause verb in its states list"
+    else
+      assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
+        "$kind brief did not render the configured pause verb in its states list"
+    fi
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
     assert_grep 'Use `awaiting: {why}`' "$brief" \
       "$kind brief did not instruct the configured pause status"
@@ -270,6 +294,7 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_scout_brief_includes_needs_retier_ratchet
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
