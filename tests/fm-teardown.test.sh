@@ -734,7 +734,7 @@ EOF
   expect_code 0 "$rc" "routing-claude: teardown should succeed while harvesting claude tokens"
   ledger="$case_dir/data/routing-ledger.jsonl"
   assert_present "$ledger" "routing-claude: routing ledger was not written"
-  jq -e 'select(.id == "task-x1" and .tokens == "available" and .harness == "claude" and .rule == 2 and .in == 5 and .out == 18 and .cached == 24 and .cache_creation == 30)' "$ledger" >/dev/null \
+  jq -e 'select(.id == "task-x1" and .tokens == "available" and .harness == "claude" and .rule == 2 and .in == 5 and .out == 18 and .cached == 24 and .cache_creation == 30 and .total_tokens == 77)' "$ledger" >/dev/null \
     || fail "routing-claude: ledger did not sum claude per-message usage deltas: $(cat "$ledger")"
   pass "teardown harvests claude per-message usage deltas into routing-ledger.jsonl before cleanup"
 }

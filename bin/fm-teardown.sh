@@ -141,7 +141,7 @@ claude_worktree_slug() {
 }
 
 claude_tokens_for_worktree() {
-  local wt=$1 root dir file sums n fin fout fcached fcreation total_n total_in total_out total_cached total_creation
+  local wt=$1 root dir file sums n fin fout fcached fcreation total_n total_in total_out total_cached total_creation total_tokens
   root=${FM_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}
   dir="$root/$(claude_worktree_slug "$wt")"
   command -v jq >/dev/null 2>&1 || return 1
@@ -180,7 +180,8 @@ EOF
     total_creation=$((total_creation + fcreation))
   done < <(find "$dir" -type f -name '*.jsonl' -print0 2>/dev/null)
   [ "$total_n" -gt 0 ] || return 1
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$total_in" "$total_out" "$total_cached" 0 0 "$total_creation"
+  total_tokens=$((total_in + total_out + total_cached + total_creation))
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$total_in" "$total_out" "$total_cached" 0 "$total_tokens" "$total_creation"
 }
 
 routing_ledger_has_id() {
@@ -289,7 +290,7 @@ harvest_routing_tokens() {
         read -r tin tout tcached treasoning ttotal <<EOF
 $result
 EOF
-        append_routing_ledger_record available "" "$tin" "$tout" "$tcached" "$treasoning" "$ttotal" 0
+        append_routing_ledger_record available "" "$tin" "$tout" "$tcached" "$treasoning" "$ttotal" ""
       else
         append_routing_ledger_record unavailable "codex_jsonl_missing_or_unreadable" "" "" "" "" "" 0
       fi
