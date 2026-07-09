@@ -34,6 +34,9 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (r) token harvest records codex cumulative token_count totals before cleanup
+#   (s) token harvest records claude per-message usage deltas before cleanup
+#   (t) token harvest fail-softs as tokens=unavailable and warns on coverage gaps
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -55,7 +58,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -132,6 +135,16 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+}
+
+append_meta_profile() {
+  local case_dir=$1 harness=$2 model=$3 effort=$4 rule=${5:-}
+  {
+    printf 'harness=%s\n' "$harness"
+    printf 'model=%s\n' "$model"
+    printf 'effort=%s\n' "$effort"
+    [ -z "$rule" ] || printf 'rule=%s\n' "$rule"
+  } >> "$case_dir/state/task-x1.meta"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -261,7 +274,10 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_CODEX_SESSIONS_DIR="${FM_CODEX_SESSIONS_DIR:-$case_dir/codex-sessions-missing}" \
+  FM_CLAUDE_PROJECTS_DIR="${FM_CLAUDE_PROJECTS_DIR:-$case_dir/claude-projects-missing}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
 }
@@ -671,6 +687,84 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_routing_ledger_harvests_codex_cumulative_tokens() {
+  local case_dir session_dir ledger rc
+  case_dir=$(make_case routing-codex)
+  write_meta "$case_dir" no-mistakes ship
+  append_meta_profile "$case_dir" codex gpt-5.5 high 5
+  session_dir="$case_dir/codex-sessions/2026/07/09"
+  mkdir -p "$session_dir"
+  cat > "$session_dir/session.jsonl" <<EOF
+{"type":"session_meta","payload":{"cwd":"$case_dir/wt"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":2,"reasoning_output_tokens":1,"total_tokens":16}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":11,"output_tokens":4,"reasoning_output_tokens":2,"total_tokens":35}}}}
+EOF
+
+  set +e
+  FM_CODEX_SESSIONS_DIR="$case_dir/codex-sessions" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "routing-codex: teardown should succeed while harvesting codex tokens"
+  ledger="$case_dir/data/routing-ledger.jsonl"
+  assert_present "$ledger" "routing-codex: routing ledger was not written"
+  jq -e 'select(.id == "task-x1" and .tokens == "available" and .harness == "codex" and .rule == 5 and .in == 20 and .out == 4 and .cached == 11 and .reasoning_out == 2 and .total_tokens == 35 and .outcome == "pushed")' "$ledger" >/dev/null \
+    || fail "routing-codex: ledger did not capture the last cumulative codex token_count: $(cat "$ledger")"
+  pass "normal allowed teardown harvests codex cumulative token_count totals into routing-ledger.jsonl before cleanup"
+}
+
+test_routing_ledger_harvests_claude_delta_tokens() {
+  local case_dir slug session_dir ledger rc
+  case_dir=$(make_case routing-claude)
+  write_meta "$case_dir" no-mistakes ship
+  append_meta_profile "$case_dir" claude opus high 2
+  slug=$(printf '%s' "$case_dir/wt" | sed 's/[^a-zA-Z0-9]/-/g')
+  session_dir="$case_dir/claude-projects/$slug"
+  mkdir -p "$session_dir"
+  cat > "$session_dir/session.jsonl" <<'EOF'
+{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":7,"cache_creation_input_tokens":11}}}
+{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":2,"output_tokens":13,"cache_read_input_tokens":17,"cache_creation_input_tokens":19}}}
+EOF
+
+  set +e
+  FM_CLAUDE_PROJECTS_DIR="$case_dir/claude-projects" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "routing-claude: teardown should succeed while harvesting claude tokens"
+  ledger="$case_dir/data/routing-ledger.jsonl"
+  assert_present "$ledger" "routing-claude: routing ledger was not written"
+  jq -e 'select(.id == "task-x1" and .tokens == "available" and .harness == "claude" and .rule == 2 and .in == 5 and .out == 18 and .cached == 24 and .cache_creation == 30 and .total_tokens == 77)' "$ledger" >/dev/null \
+    || fail "routing-claude: ledger did not sum claude per-message usage deltas: $(cat "$ledger")"
+  pass "teardown harvests claude per-message usage deltas into routing-ledger.jsonl before cleanup"
+}
+
+test_routing_ledger_unavailable_and_coverage_warn_are_soft() {
+  local case_dir session_dir ledger rc
+  case_dir=$(make_case routing-unavailable)
+  write_meta "$case_dir" no-mistakes ship
+  append_meta_profile "$case_dir" codex gpt-5.5 high 5
+  session_dir="$case_dir/codex-sessions/2026/07/09"
+  mkdir -p "$session_dir"
+  printf 'not json\n' > "$session_dir/bad.jsonl"
+  printf 'needs-retier: investigation exceeds bounded scout tier\n' > "$case_dir/state/task-x1.status"
+  touch "$case_dir/state/.count-fleet_fm-orphan-z9"
+
+  set +e
+  FM_CODEX_SESSIONS_DIR="$case_dir/codex-sessions" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "routing-unavailable: token parse miss must not block teardown"
+  ledger="$case_dir/data/routing-ledger.jsonl"
+  assert_present "$ledger" "routing-unavailable: routing ledger was not written"
+  jq -e 'select(.id == "task-x1" and .tokens == "unavailable" and .token_reason == "codex_jsonl_missing_or_unreadable" and .in == null and .out == null and .cached == null and .escalations == 1)' "$ledger" >/dev/null \
+    || fail "routing-unavailable: ledger did not record tokens=unavailable: $(cat "$ledger")"
+  grep -F 'warning: routing ledger missing line for orphan-z9' "$case_dir/stderr" >/dev/null \
+    || fail "routing-unavailable: coverage gap warning was not printed: $(cat "$case_dir/stderr")"
+  pass "teardown token harvest fail-softs and warns about coverage markers without ledger rows"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
@@ -690,3 +784,6 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_routing_ledger_harvests_codex_cumulative_tokens
+test_routing_ledger_harvests_claude_delta_tokens
+test_routing_ledger_unavailable_and_coverage_warn_are_soft
