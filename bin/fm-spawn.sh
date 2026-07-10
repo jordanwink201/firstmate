@@ -565,9 +565,12 @@ resolve_dispatch_rule_meta() {
     return 0
   }
 
+  # Provenance matters: override collapses three distinct causes. Record which
+  # one so the ledger can distinguish "captain never passed --rule" from "passed
+  # but the tuple disagreed" from "passed a bad rule number".
   if [ "$RULE_SET" -eq 0 ]; then
-    ROUTING_RULE_META=override
-    echo "warning: config/crew-dispatch.json is active but no --rule was supplied; recording rule=override" >&2
+    ROUTING_RULE_META=override_missing
+    echo "warning: config/crew-dispatch.json is active but no --rule was supplied; recording rule=override_missing" >&2
   elif tuple=$(dispatch_rule_tuple "$RULE"); then
     read -r expected_harness expected_model expected_effort <<EOF
 $tuple
@@ -579,16 +582,23 @@ EOF
     if [ "$expected" = "$actual" ]; then
       ROUTING_RULE_META=$RULE
     else
-      ROUTING_RULE_META=override
-      echo "warning: --rule $RULE resolves to $expected, got $actual; recording rule=override" >&2
+      ROUTING_RULE_META=override_mismatch
+      echo "warning: --rule $RULE resolves to $expected, got $actual; recording rule=override_mismatch" >&2
     fi
   else
-    ROUTING_RULE_META=override
-    echo "warning: --rule $RULE is not a valid dispatch rule; recording rule=override" >&2
+    ROUTING_RULE_META=override_invalid
+    echo "warning: --rule $RULE is not a valid dispatch rule; recording rule=override_invalid" >&2
   fi
 
+  # Ship-on-claude is only suspicious when unexplained. crew-dispatch rule 1
+  # legitimately routes security/arch/hard-to-reverse implementation to
+  # claude/opus/high, so a matched rule (numeric ROUTING_RULE_META) is intended —
+  # warn only when the route has no matched-rule provenance.
   if [ "$KIND" = ship ] && [ "$HARNESS" = claude ]; then
-    echo "warning: ships route to codex per rules 4-6; proceeding" >&2
+    case "$ROUTING_RULE_META" in
+      override*|'')
+        echo "warning: ship on claude without a matched dispatch rule (rule=${ROUTING_RULE_META:-unset}); rule 1 may permit this — confirm intended" >&2 ;;
+    esac
   fi
 }
 
