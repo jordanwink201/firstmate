@@ -247,7 +247,7 @@ append_routing_ledger_record() {
   if ! mkdir "$_rlock" 2>/dev/null; then
     return 0
   fi
-  trap 'rmdir "$_rlock" 2>/dev/null || true' RETURN
+  trap 'rmdir "${_rlock:-}" 2>/dev/null || true; trap - RETURN' RETURN
   if routing_ledger_has_id "$ledger" "$ID"; then
     return 0
   fi
