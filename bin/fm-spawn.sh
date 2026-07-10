@@ -440,6 +440,48 @@ shell_quote() {
   printf "'"
 }
 
+spawn_clean_title() {
+  local s
+  s=$(printf '%s\n' "${1:-}" | sed 's/\*\*//g; s/__//g; s/`//g; s/^#[[:space:]]*//')
+  printf '%s\n' "$s" | awk '{$1=$1; print}'
+}
+
+spawn_backlog_title() {
+  local id=$1 line title
+  [ -f "$DATA/backlog.md" ] || return 0
+  line=$(awk -v id="$id" '
+    BEGIN {
+      p1 = "- [ ] " id " - "
+      p2 = "- [x] " id " - "
+      p3 = "- [X] " id " - "
+    }
+    index($0, p1) == 1 { print substr($0, length(p1) + 1); exit }
+    index($0, p2) == 1 { print substr($0, length(p2) + 1); exit }
+    index($0, p3) == 1 { print substr($0, length(p3) + 1); exit }
+  ' "$DATA/backlog.md")
+  [ -n "$line" ] || return 0
+  title=$(printf '%s\n' "$line" | sed -E 's/[[:space:]]+\((repo:|kind:|since |done )[^)]*\)//g')
+  spawn_clean_title "$title"
+}
+
+spawn_brief_title() {
+  local brief=$1 title
+  [ -n "$brief" ] && [ -f "$brief" ] || return 0
+  title=$(awk '
+    /^# Task[[:space:]]*$/ { in_task = 1; next }
+    in_task && /^#/ { exit }
+    in_task && NF { print; exit }
+  ' "$brief")
+  spawn_clean_title "$title"
+}
+
+spawn_task_title() {
+  local id=$1 brief=$2 title
+  title=$(spawn_backlog_title "$id")
+  [ -n "$title" ] || title=$(spawn_brief_title "$brief")
+  printf '%s' "${title:-$id}"
+}
+
 model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
@@ -1065,10 +1107,12 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+TASK_TITLE=$(spawn_task_title "$ID" "$BRIEF")
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  echo "title=$TASK_TITLE"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"
