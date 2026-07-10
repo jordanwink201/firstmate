@@ -239,6 +239,18 @@ append_routing_ledger_record() {
   local ledger ts project_name harness model effort rule outcome escalations json
   ledger="$DATA/routing-ledger.jsonl"
   mkdir -p "$DATA" 2>/dev/null || { echo "warning: routing ledger unavailable: cannot create $DATA" >&2; return 0; }
+  # Idempotency: teardown/harvest can fire more than once for a task. mkdir is
+  # atomic, so a concurrent second teardown loses the race and skips; the has_id
+  # check then covers the sequential re-teardown case. Lock lives in $DATA (not
+  # $STATE, which teardown wipes) and is released on function return.
+  local _rlock="$DATA/.routing-ledger.$ID.lock"
+  if ! mkdir "$_rlock" 2>/dev/null; then
+    return 0
+  fi
+  trap 'rmdir "$_rlock" 2>/dev/null || true' RETURN
+  if routing_ledger_has_id "$ledger" "$ID"; then
+    return 0
+  fi
   ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
   project_name=$(basename "$PROJ")
   harness=$(meta_value "$META" harness)
@@ -271,7 +283,17 @@ append_routing_ledger_record() {
       --arg cache_creation "$tcreation" --arg outcome "$outcome" --arg escalations "$escalations" '
       def maybe_num($v): if $v == "" then null else ($v | tonumber? // null) end;
       def maybe_rule($v): if $v == "" then null elif ($v | test("^[0-9]+$")) then ($v | tonumber) else $v end;
-      {
+      # Normalized, harness-agnostic token fields (schema 2). Raw .in is kept for
+      # back-compat but is ambiguous: codex .in already includes cached input,
+      # claude .in is uncached-only. input_total/input_uncached/cache_read mean
+      # the same thing for every harness so consumers never have to branch.
+      (maybe_num($in) // 0) as $rin
+      | (maybe_num($cached) // 0) as $rcached
+      | (maybe_num($cache_creation) // 0) as $rcreation
+      | (if $harness | test("codex") then $rin else ($rin + $rcached + $rcreation) end) as $intotal
+      | (if $harness | test("codex") then ($rin - $rcached) else $rin end) as $inuncached
+      | {
+        schema: 2,
         id: $id,
         ts: $ts,
         kind: $kind,
@@ -286,6 +308,9 @@ append_routing_ledger_record() {
         cache_creation: maybe_num($cache_creation),
         reasoning_out: maybe_num($reasoning),
         total_tokens: maybe_num($total),
+        input_total: (if $tokens == "available" then $intotal else null end),
+        input_uncached: (if $tokens == "available" then $inuncached else null end),
+        cache_read: (if $tokens == "available" then $rcached else null end),
         tokens: $tokens,
         token_reason: (if $reason == "" then null else $reason end),
         wall_s: null,
@@ -297,7 +322,7 @@ append_routing_ledger_record() {
     json=
   fi
   if [ -z "$json" ]; then
-    json='{"id":"'"$(routing_json_escape "$ID")"'","ts":"'"$(routing_json_escape "$ts")"'","kind":"'"$(routing_json_escape "$KIND")"'","project":"'"$(routing_json_escape "$project_name")"'","rule":null,"harness":"'"$(routing_json_escape "$harness")"'","model":"'"$(routing_json_escape "$model")"'","effort":"'"$(routing_json_escape "$effort")"'","out":null,"in":null,"cached":null,"cache_creation":null,"reasoning_out":null,"total_tokens":null,"tokens":"unavailable","token_reason":"jq_unavailable","wall_s":null,"escalations":'"$escalations"',"outcome":"'"$(routing_json_escape "$outcome")"'","redo_of":null}'
+    json='{"schema":2,"id":"'"$(routing_json_escape "$ID")"'","ts":"'"$(routing_json_escape "$ts")"'","kind":"'"$(routing_json_escape "$KIND")"'","project":"'"$(routing_json_escape "$project_name")"'","rule":null,"harness":"'"$(routing_json_escape "$harness")"'","model":"'"$(routing_json_escape "$model")"'","effort":"'"$(routing_json_escape "$effort")"'","out":null,"in":null,"cached":null,"cache_creation":null,"reasoning_out":null,"total_tokens":null,"input_total":null,"input_uncached":null,"cache_read":null,"tokens":"unavailable","token_reason":"jq_unavailable","wall_s":null,"escalations":'"$escalations"',"outcome":"'"$(routing_json_escape "$outcome")"'","redo_of":null}'
   fi
   printf '%s\n' "$json" >> "$ledger" || echo "warning: routing ledger unavailable: cannot append $ledger" >&2
 }
