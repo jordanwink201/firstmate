@@ -20,8 +20,9 @@ if [ ! -s "$LEDGER" ]; then
   echo "ledger is empty: $LEDGER" >&2; exit 0
 fi
 
-# Slurp the JSONL once; every section is a jq query over $rows.
-rows=$(jq -s '.' "$LEDGER")
+# Slurp the JSONL once; dedupe by id (teardown may double-log — keep latest ts).
+# every section is a jq query over $rows.
+rows=$(jq -s 'group_by(.id) | map(max_by(.ts))' "$LEDGER")
 
 emit() { jq -rn --argjson r "$rows" "$1"; }
 
@@ -94,11 +95,16 @@ emit '
 
 echo
 echo "── Cache (rows with input data) ──"
+# NOTE: .in has different semantics per harness — codex .in already includes cached;
+# claude .in is uncached-only (cache_read + cache_creation are separate). Normalize
+# total_input per harness so the rate is meaningful (cached / total_input).
 emit '
+  def total_input: if (.harness|test("codex")) then (.in // 0)
+                   else ((.in // 0) + (.cached // 0) + (.cache_creation // 0)) end;
   ($r | map(select(.tokens=="available" and .in != null and .in > 0))) as $c
   | if ($c|length)==0 then "  (no input/cache data yet)" else
-      ($c | (map(.cached // 0)|add) as $ca | (map(.in)|add) as $in
-        | "  aggregate cache rate: \(if $in>0 then (($ca*100/$in)|floor) else 0 end)%  over \($c|length) rows")
+      ($c | (map(.cached // 0)|add) as $ca | (map(total_input)|add) as $ti
+        | "  aggregate cache rate: \(if $ti>0 then (($ca*100/$ti)|floor) else 0 end)%  over \($c|length) rows  (harness-normalized)")
     end
 '
 
