@@ -50,6 +50,8 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
+| `fm-dashboard-probe.sh`  | Read-only fleet-dashboard data probe for card, station, and replay-source snapshots |
+| `fm-dashboard-server.sh` | Private localhost read-only dashboard server with cached snapshot and report APIs    |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |
@@ -74,3 +76,25 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-x-dismiss.sh`        | Dismiss a skipped X-mode mention at the relay without replying                       |
 | `fm-x-link.sh`           | Link a spawned task to its originating X-mode mention in task meta                   |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for an X-mode-linked task                |
+
+## Dashboard Server Runtime
+
+`bin/fm-dashboard-server.sh` starts the read-only dashboard at `http://127.0.0.1:8765` by default.
+Use `--port <n>` to choose a different port, including `--port 0` for an OS-assigned test port.
+Use `--host <addr>` only when deliberately changing the bind address; the default is localhost-only.
+
+`/api/snapshot` serves the raw JSON shape emitted by `bin/fm-dashboard-probe.sh --json`, but browser polling does not run that probe directly.
+The server starts one background snapshot refresh on boot, then schedules the next refresh only after the previous probe finishes.
+While a refresh is running, the endpoint returns the cached last-good snapshot immediately.
+
+Runtime knobs:
+
+- `FM_DASHBOARD_PROBE_BIN` overrides the probe path.
+- `FM_DASHBOARD_REFRESH_MS` controls the background snapshot interval after each completed probe; default `10000`.
+- `FM_DASHBOARD_PROBE_TIMEOUT_MS` bounds each probe run; default `20000`.
+
+Snapshot responses include `x-firstmate-cache`, `x-firstmate-captured-at`, and `x-firstmate-refreshing`; failed refreshes also include `x-firstmate-error`.
+With no cache, a failed initial probe returns `503` JSON.
+With a last-good cache, a failed refresh keeps returning `200` raw snapshot JSON with the error headers so the UI can show last-good data.
+
+`/api/report` remains on-demand and keeps its single-flight/cache behavior; it is not part of the live browser polling path.

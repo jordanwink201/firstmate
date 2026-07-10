@@ -302,6 +302,57 @@ append_routing_ledger_record() {
   printf '%s\n' "$json" >> "$ledger" || echo "warning: routing ledger unavailable: cannot append $ledger" >&2
 }
 
+append_dashboard_arrival_record() {
+  local ledger arrived_at display_title latest_status branch commit_short project_name json
+  [ "$KIND" = ship ] || return 0
+  [ "$FORCE" != "--force" ] || return 0
+  ledger="$DATA/dashboard-arrivals.jsonl"
+  mkdir -p "$DATA" 2>/dev/null || { echo "warning: dashboard arrival ledger unavailable: cannot create $DATA" >&2; return 0; }
+  arrived_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  display_title=$(meta_value "$META" title)
+  [ -n "$display_title" ] || display_title=$(meta_value "$META" display_title)
+  [ -n "$display_title" ] || display_title=$ID
+  latest_status=
+  if [ -f "$STATE/$ID.status" ]; then
+    latest_status=$(sed '/^[[:space:]]*$/d' "$STATE/$ID.status" 2>/dev/null | tail -1 || true)
+  fi
+  branch=
+  commit_short=
+  if [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    [ "$branch" = HEAD ] && branch=
+    commit_short=$(git -C "$WT" rev-parse --short=9 HEAD 2>/dev/null || true)
+  fi
+  project_name=
+  [ -n "$PROJ" ] && project_name=$(basename "$PROJ")
+  if command -v jq >/dev/null 2>&1; then
+    json=$(jq -cn \
+      --arg task_id "$ID" --arg arrived_at "$arrived_at" --arg display_title "$display_title" \
+      --arg latest_status "$latest_status" --arg pr_url "$PR_URL" --arg branch "$branch" \
+      --arg commit_short "$commit_short" --arg project "$project_name" --arg worktree "$WT" \
+      --arg mode "$MODE" '
+      {
+        task_id: $task_id,
+        arrived_at: $arrived_at,
+        display_title: $display_title,
+        latest_status: $latest_status,
+        pr_url: $pr_url,
+        branch: $branch,
+        commit_short: $commit_short,
+        project: $project,
+        worktree: $worktree,
+        mode: $mode,
+        source: "teardown"
+      }' 2>/dev/null) || json=
+  else
+    json=
+  fi
+  if [ -z "$json" ]; then
+    json='{"task_id":"'"$(routing_json_escape "$ID")"'","arrived_at":"'"$(routing_json_escape "$arrived_at")"'","display_title":"'"$(routing_json_escape "$display_title")"'","latest_status":"'"$(routing_json_escape "$latest_status")"'","pr_url":"'"$(routing_json_escape "$PR_URL")"'","branch":"'"$(routing_json_escape "$branch")"'","commit_short":"'"$(routing_json_escape "$commit_short")"'","project":"'"$(routing_json_escape "$project_name")"'","worktree":"'"$(routing_json_escape "$WT")"'","mode":"'"$(routing_json_escape "$MODE")"'","source":"teardown"}'
+  fi
+  printf '%s\n' "$json" >> "$ledger" || echo "warning: dashboard arrival ledger unavailable: cannot append $ledger" >&2
+}
+
 warn_missing_routing_ledger_coverage() {
   local ledger count_file count_id
   ledger="$DATA/routing-ledger.jsonl"
@@ -1200,6 +1251,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 harvest_routing_tokens
+append_dashboard_arrival_record
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

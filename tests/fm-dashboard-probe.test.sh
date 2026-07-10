@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+# Behavior tests for bin/fm-dashboard-probe.sh.
+#
+# The probe is dashboard prep only: it reads temp Firstmate state, maps live
+# tasks into dashboard stations, and exposes approximate replay inputs without
+# touching the real fleet.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+PROBE="$ROOT/bin/fm-dashboard-probe.sh"
+TMP_ROOT=$(fm_test_tmproot fm-dashboard-probe)
+
+make_case() {
+  local name=$1 dir
+  dir="$TMP_ROOT/$name"
+  mkdir -p "$dir/state" "$dir/data" "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = display-message ]; then
+  target=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -t) target=${2:-}; shift 2; continue ;;
+    esac
+    shift
+  done
+  case "$target" in
+    *alive*) printf '%%1\n'; exit 0 ;;
+  esac
+fi
+exit 1
+SH
+  cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  validate-t1) printf 'state: working · source: run-step · validating (running tests)\n' ;;
+  pane-t2) printf 'state: working · source: pane · harness busy\n' ;;
+  decision-t3) printf 'state: unknown · source: none · no current-state source available\n' ;;
+  done-t4) printf 'state: unknown · source: none · backend target gone\n' ;;
+  cast-t5) printf 'state: unknown · source: none · no current-state source available\n' ;;
+  missing-t6) printf 'state: unknown · source: none · worktree gone (torn down?)\n' ;;
+  dead-t7) printf 'state: unknown · source: none · backend target gone: sess:dead-target\n' ;;
+  currentdone-t8) printf 'state: done · source: run-step · checks green: PR ready for review\n' ;;
+  parked-t9) printf 'state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: captain decision)\n' ;;
+  git-t1) printf 'state: working · source: pane · implementing the dashboard detail panel\n' ;;
+  *) printf 'state: unknown · source: none · fake default\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/fm-crew-state.sh"
+  printf '%s\n' "$dir"
+}
+
+run_probe_json() {
+  local dir=$1 out=$2
+  PATH="$dir/fakebin:$PATH" \
+    FM_HOME="$dir" \
+    FM_STATE_OVERRIDE="$dir/state" \
+    FM_DATA_OVERRIDE="$dir/data" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    "$PROBE" > "$out"
+  jq -e . "$out" >/dev/null || fail "probe did not emit valid JSON: $(cat "$out")"
+}
+
+jq_value() {
+  jq -r "$1" "$2"
+}
+
+assert_jq_true() {
+  local expr=$1 file=$2 msg=$3
+  jq -e "$expr" "$file" >/dev/null || fail "$msg: $(cat "$file")"
+}
+
+test_fleet_meta_and_station_mapping() {
+  local dir state out wt
+  dir=$(make_case mapping)
+  state="$dir/state"
+  out="$dir/out.json"
+
+  for wt in wt-validate wt-pane wt-decision wt-done wt-cast wt-dead wt-currentdone wt-parked; do
+    mkdir -p "$dir/$wt"
+  done
+
+  fm_write_meta "$state/validate-t1.meta" \
+    "window=sess:alive-validate" \
+    "worktree=$dir/wt-validate" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "harness=codex" \
+    "model=gpt-5.5" \
+    "effort=high"
+  fm_write_meta "$state/pane-t2.meta" \
+    "window=sess:alive-pane" \
+    "worktree=$dir/wt-pane" \
+    "project=$dir/projects/tc" \
+    "kind=ship" \
+    "mode=direct-PR"
+  fm_write_meta "$state/decision-t3.meta" \
+    "window=sess:alive-decision" \
+    "worktree=$dir/wt-decision" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working: setup\nneeds-decision: choose the UI copy\n' > "$state/decision-t3.status"
+  fm_write_meta "$state/done-t4.meta" \
+    "window=sess:dead-done" \
+    "worktree=$dir/wt-done" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: PR checks green\n' > "$state/done-t4.status"
+  fm_write_meta "$state/cast-t5.meta" \
+    "window=sess:alive-cast" \
+    "worktree=$dir/wt-cast" \
+    "project=$dir/projects/cad" \
+    "kind=scout" \
+    "mode=report"
+  fm_write_meta "$state/missing-t6.meta" \
+    "window=sess:alive-missing" \
+    "worktree=$dir/no-such-worktree" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$state/dead-t7.meta" \
+    "window=sess:dead-target" \
+    "worktree=$dir/wt-dead" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$state/currentdone-t8.meta" \
+    "window=sess:alive-currentdone" \
+    "worktree=$dir/wt-currentdone" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$state/parked-t9.meta" \
+    "window=sess:alive-parked" \
+    "worktree=$dir/wt-parked" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  run_probe_json "$dir" "$out"
+
+  assert_jq_true '.fleet | length == 9' "$out" "fleet did not include all meta-backed tasks"
+  [ "$(jq_value '.fleet[] | select(.task_id == "validate-t1") | .backend' "$out")" = tmux ] \
+    || fail "absent backend= did not normalize to tmux"
+  [ "$(jq_value '.fleet[] | select(.task_id == "validate-t1") | .project' "$out")" = "$dir/projects/cad" ] \
+    || fail "project metadata was not parsed"
+  [ "$(jq_value '.fleet[] | select(.task_id == "validate-t1") | .current_state.source' "$out")" = run-step ] \
+    || fail "current state source was not parsed from fm-crew-state output"
+  [ "$(jq_value '.fleet[] | select(.task_id == "validate-t1") | .backend_liveness' "$out")" = alive ] \
+    || fail "live backend target was not marked alive"
+  [ "$(jq_value '.fleet[] | select(.task_id == "dead-t7") | .backend_liveness' "$out")" = dead ] \
+    || fail "dead backend target was not marked dead"
+
+  [ "$(jq_value '.stations[] | select(.task_id == "validate-t1") | .station' "$out")" = gate_run ] \
+    || fail "validating run-step did not map to gate_run"
+  [ "$(jq_value '.stations[] | select(.task_id == "pane-t2") | .station' "$out")" = underway ] \
+    || fail "busy pane did not map to underway"
+  [ "$(jq_value '.stations[] | select(.task_id == "decision-t3") | .station' "$out")" = needs_captain ] \
+    || fail "needs-decision status did not map to needs_captain"
+  [ "$(jq_value '.stations[] | select(.task_id == "done-t4") | .station' "$out")" = arrived_today ] \
+    || fail "done status did not map to arrived_today"
+  [ "$(jq_value '.stations[] | select(.task_id == "currentdone-t8") | .station' "$out")" = arrived_today ] \
+    || fail "done current state did not map to arrived_today"
+  [ "$(jq_value '.stations[] | select(.task_id == "parked-t9") | .station' "$out")" = needs_captain ] \
+    || fail "parked current state did not map to needs_captain"
+  [ "$(jq_value '.stations[] | select(.task_id == "cast-t5") | .station' "$out")" = casting_off ] \
+    || fail "live meta without strong state did not map to casting_off"
+  [ "$(jq_value '.stations[] | select(.task_id == "missing-t6") | .station' "$out")" = unknown ] \
+    || fail "missing worktree did not map to unknown"
+  [ "$(jq_value '.stations[] | select(.task_id == "dead-t7") | .station' "$out")" = unknown ] \
+    || fail "dead backend target did not map to unknown"
+  [ "$(jq_value '.fleet[] | select(.task_id == "decision-t3") | .attention' "$out")" = needs_action ] \
+    || fail "needs-decision task did not expose needs_action attention"
+  [ "$(jq_value '.fleet[] | select(.task_id == "done-t4") | .attention' "$out")" = "done" ] \
+    || fail "done task did not expose done attention"
+  [ "$(jq_value '.fleet[] | select(.task_id == "pane-t2") | .attention' "$out")" = normal ] \
+    || fail "ordinary working task did not expose normal attention"
+  pass "fleet JSON parses meta/current-state/liveness and station mapping"
+}
+
+test_display_title_precedence_and_subtitle() {
+  local dir state data out
+  dir=$(make_case titles)
+  state="$dir/state"
+  data="$dir/data"
+  out="$dir/out.json"
+
+  cat > "$data/backlog.md" <<'EOF'
+# Backlog
+- [ ] title-meta-t1 - Backlog title should lose (repo: tc) (kind: ship) (since 2026-07-08)
+- [ ] title-backlog-t2 - Backlog title wins (repo: cad) (kind: scout) (since 2026-07-08)
+EOF
+  mkdir -p "$data/title-meta-t1" "$data/title-backlog-t2" "$data/title-brief-t3"
+  cat > "$data/title-meta-t1/brief.md" <<'EOF'
+# Task
+Brief title should lose.
+EOF
+  cat > "$data/title-brief-t3/brief.md" <<'EOF'
+Intro line.
+
+# Task
+Brief **task** title wins.
+EOF
+
+  fm_write_meta "$state/title-meta-t1.meta" \
+    "window=sess:alive-title-meta" \
+    "title=Meta title wins" \
+    "project=$dir/projects/tc"
+  printf 'working: Status title should lose\n' > "$state/title-meta-t1.status"
+  fm_write_meta "$state/title-backlog-t2.meta" \
+    "window=sess:alive-title-backlog" \
+    "project=$dir/projects/cad"
+  fm_write_meta "$state/title-brief-t3.meta" \
+    "window=sess:alive-title-brief" \
+    "project=$dir/projects/cad"
+  fm_write_meta "$state/title-status-t4.meta" \
+    "window=sess:alive-title-status" \
+    "project=$dir/projects/cad"
+  printf 'working: Latest status note wins\n' > "$state/title-status-t4.status"
+  fm_write_meta "$state/title-id-t5.meta" \
+    "window=sess:alive-title-id" \
+    "project=$dir/projects/cad"
+
+  run_probe_json "$dir" "$out"
+
+  [ "$(jq_value '.fleet[] | select(.task_id == "title-meta-t1") | .display_title' "$out")" = "Meta title wins" ] \
+    || fail "meta title did not win display_title precedence"
+  [ "$(jq_value '.fleet[] | select(.task_id == "title-backlog-t2") | .display_title' "$out")" = "Backlog title wins" ] \
+    || fail "backlog line did not provide display_title"
+  [ "$(jq_value '.fleet[] | select(.task_id == "title-brief-t3") | .display_title' "$out")" = "Brief task title wins." ] \
+    || fail "brief # Task did not provide display_title"
+  [ "$(jq_value '.fleet[] | select(.task_id == "title-status-t4") | .display_title' "$out")" = "Latest status note wins" ] \
+    || fail "latest status note did not provide display_title"
+  [ "$(jq_value '.fleet[] | select(.task_id == "title-id-t5") | .display_title' "$out")" = title-id-t5 ] \
+    || fail "task id was not the final display_title fallback"
+  [ "$(jq_value '.fleet[] | select(.task_id == "title-status-t4") | .display_subtitle' "$out")" = "Latest status note wins" ] \
+    || fail "status note did not provide display_subtitle when current detail was generic"
+  pass "display title precedence derives meta, backlog, brief, status, and id fallbacks"
+}
+
+test_git_and_pr_fields_are_extracted() {
+  local dir state out wt expected_commit
+  dir=$(make_case git-pr)
+  state="$dir/state"
+  out="$dir/out.json"
+  wt="$dir/worktree"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/dashboard-branch
+  expected_commit=$(git -C "$wt" rev-parse --short=9 HEAD)
+
+  fm_write_meta "$state/git-t1.meta" \
+    "window=sess:alive-git" \
+    "worktree=$wt" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "pr=https://github.com/example/project/pull/44"
+  printf 'working: status has a different PR https://github.com/example/project/pull/99\n' > "$state/git-t1.status"
+  fm_write_meta "$state/status-pr-t2.meta" \
+    "window=sess:alive-status-pr" \
+    "worktree=$wt" \
+    "project=$dir/projects/cad"
+  printf 'done: PR https://github.com/example/project/pull/55 checks green\n' > "$state/status-pr-t2.status"
+
+  run_probe_json "$dir" "$out"
+
+  [ "$(jq_value '.fleet[] | select(.task_id == "git-t1") | .branch' "$out")" = "fm/dashboard-branch" ] \
+    || fail "git branch was not extracted from worktree"
+  [ "$(jq_value '.fleet[] | select(.task_id == "git-t1") | .commit_short' "$out")" = "$expected_commit" ] \
+    || fail "git commit_short was not extracted from worktree"
+  [ "$(jq_value '.fleet[] | select(.task_id == "git-t1") | .pr_url' "$out")" = "https://github.com/example/project/pull/44" ] \
+    || fail "meta pr did not win over status PR URL"
+  [ "$(jq_value '.fleet[] | select(.task_id == "status-pr-t2") | .pr_url' "$out")" = "https://github.com/example/project/pull/55" ] \
+    || fail "status PR URL was not extracted"
+  pass "branch, commit_short, and PR URL fields are extracted read-only"
+}
+
+test_empty_fleet_output() {
+  local dir out
+  dir=$(make_case empty)
+  out="$dir/out.json"
+  run_probe_json "$dir" "$out"
+  assert_jq_true '.fleet == [] and .stations == []' "$out" "empty state did not produce empty fleet and stations arrays"
+  pass "empty fleet emits empty fleet and station arrays"
+}
+
+test_arrival_ledger_keeps_landed_ships_visible_today() {
+  local dir data out today yesterday
+  dir=$(make_case arrivals)
+  data="$dir/data"
+  out="$dir/out.json"
+  today=$(date '+%Y-%m-%d')
+  yesterday=$(date -v-1d '+%Y-%m-%d' 2>/dev/null || date -d yesterday '+%Y-%m-%d')
+  cat > "$data/dashboard-arrivals.jsonl" <<EOF
+{"task_id":"landed-t1","arrived_at":"${today}T12:00:00Z","display_title":"Landed task","latest_status":"done: landed cleanly","pr_url":"https://github.com/example/repo/pull/1","branch":"fm/landed-t1","commit_short":"abc123def","project":"repo","worktree":"/tmp/wt","mode":"no-mistakes","source":"teardown"}
+{"task_id":"old-t1","arrived_at":"${yesterday}T12:00:00Z","display_title":"Old task","latest_status":"done: old","source":"teardown"}
+EOF
+
+  run_probe_json "$dir" "$out"
+  assert_jq_true '.fleet[] | select(.task_id == "landed-t1" and .backend_liveness == "archived" and .current_state.source == "arrival-ledger")' \
+    "$out" "same-day arrival ledger row did not appear as archived fleet item"
+  [ "$(jq_value '.stations[] | select(.task_id == "landed-t1") | .station' "$out")" = arrived_today ] \
+    || fail "same-day arrival did not map to arrived_today"
+  assert_jq_true '[.fleet[] | select(.task_id == "old-t1")] | length == 0' \
+    "$out" "previous-day arrival ledger row was not filtered out"
+  pass "arrival ledger keeps same-day landed ships visible and filters old rows"
+}
+
+test_replay_sources_are_extracted() {
+  local dir state data out ledger
+  dir=$(make_case replay)
+  state="$dir/state"
+  data="$dir/data"
+  out="$dir/out.json"
+  ledger="$data/task-ledger.md"
+
+  printf 'working: setup\nfailed: tests failed\n' > "$state/replay-t1.status"
+  printf '[2026-07-08T10:11:12-0500] absorbed benign signal: replay-t1.status\n' > "$state/.watch-triage.log"
+  printf '111\t1\tsignal\treplay-t1.status\tsignal: replay-t1.status\n' > "$state/.wake-queue"
+  cat > "$ledger" <<'EOF'
+| date | id | kind | project | harness | duration | escalation count | tokens | outcome | friction |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-08 | replay-t1 | ship | cad | codex/gpt-5.5/high | 12m | 1 | codex out=52k | failed | tests failed |
+EOF
+
+  run_probe_json "$dir" "$out"
+
+  [ "$(jq_value '.replay_sources.quality' "$out")" = approximate ] \
+    || fail "replay quality was not marked approximate"
+  [ "$(jq_value '.replay_sources.status_files[] | select(.task_id == "replay-t1") | .verb' "$out")" = failed ] \
+    || fail "status replay source did not expose the latest status verb"
+  [ "$(jq_value '.replay_sources.watch_triage_log[0].timestamp' "$out")" = "2026-07-08T10:11:12-0500" ] \
+    || fail "watch triage timestamp was not extracted"
+  [ "$(jq_value '.replay_sources.wake_queue[0].epoch' "$out")" = 111 ] \
+    || fail "wake queue epoch was not extracted"
+  [ "$(jq_value '.replay_sources.task_ledger[0].task_id' "$out")" = replay-t1 ] \
+    || fail "task ledger row was not extracted"
+  assert_jq_true '.replay_sources.file_mtimes | map(.type) | index("status") and index("watch-triage") and index("wake-queue") and index("task-ledger")' \
+    "$out" "file mtimes did not include replay inputs"
+  assert_jq_true '.replay_sources.minimum_event_ledger.implemented == true and (.replay_sources.minimum_event_ledger.files[] | contains("dashboard-arrivals.jsonl"))' \
+    "$out" "minimum event ledger fields changed"
+  pass "replay sources include status mtimes, watcher timestamps, wake epochs, task ledger, and ledger recommendation"
+}
+
+test_report_output() {
+  local dir out
+  dir=$(make_case report)
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" "$PROBE" --report)
+  assert_contains "$out" "Mockup A live update:" "report missing Mockup A section"
+  assert_contains "$out" "Mockup D replay:" "report missing Mockup D section"
+  assert_contains "$out" "timestamp" "report missing ledger fields"
+  pass "report mode prints the dashboard findings template"
+}
+
+test_fleet_meta_and_station_mapping
+test_display_title_precedence_and_subtitle
+test_git_and_pr_fields_are_extracted
+test_empty_fleet_output
+test_arrival_ledger_keeps_landed_ships_visible_today
+test_replay_sources_are_extracted
+test_report_output
