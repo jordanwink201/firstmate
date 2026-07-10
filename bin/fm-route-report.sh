@@ -116,21 +116,32 @@ emit '
     + (if ($miss|length)>0 then "  [" + ($miss|map(.id)|join(", ")) + "]" else "" end)
 '
 emit '
-  # over-tier candidates: high effort/opus but tiny output + high cache
+  # over-tier candidates: high effort/opus but tiny output + high cache.
+  # cache rate must use harness-normalized total_input (codex .in incl cached;
+  # claude .in uncached-only) — raw .cached/.in is wrong for claude rows.
+  def total_input: if (.harness|test("codex")) then (.in // 0)
+                   else ((.in // 0) + (.cached // 0) + (.cache_creation // 0)) end;
   ($r | map(select(.tokens=="available" and .in != null and .in>0
         and ((.out // 0) < 20000)
-        and (((.cached // 0)*100 / .in) > 92)
+        and (total_input > 0)
+        and (((.cached // 0)*100 / total_input) > 92)
         and ((.effort=="high" or .effort=="xhigh") or (.model=="opus"))))) as $ot
   | if ($ot|length)==0 then "  over-tier candidates: none" else
       "  over-tier candidates (>92% cache, <20k out, high/xhigh/opus):",
-      ($ot[] | "    \(.id): \(.harness)/\(.model)/\(.effort // "-")  out=\(.out)  cache=\(((.cached*100/.in))|floor)%")
+      ($ot[] | "    \(.id): \(.harness)/\(.model)/\(.effort // "-")  out=\(.out)  cache=\((((.cached // 0)*100/total_input))|floor)%")
     end
 '
 emit '
-  ($r | map(select(.kind=="ship" and (.harness|test("claude"))))) as $leak
-  | if ($leak|length)>0 then
-      "  🚩 ship-on-claude (R3 leak class): " + ($leak|map(.id)|join(", "))
-    else "  ship-on-claude leaks: none ✓" end
+  # Ship-on-claude is NOT a blanket leak: crew-dispatch rule 1 legitimately routes
+  # security/arch/hard-to-reverse implementation to claude/opus/high. Without rule
+  # provenance in the ledger (override collapses missing/mismatch/invalid), we can
+  # only surface these for review, not assert a leak. The opus/high shape MAY be a
+  # valid rule-1 route.
+  ($r | map(select(.kind=="ship" and (.harness|test("claude"))))) as $ships
+  | if ($ships|length)==0 then "  ship-on-claude: none" else
+      "  ship-on-claude (confirm intended — rule 1 allows opus/high ships; provenance not yet in ledger):",
+      ($ships[] | "    \(.id): \(.model)/\(.effort // "-")  rule=\(.rule)  out=\(.out)")
+    end
 '
 echo
 echo "ledger: $LEDGER"
