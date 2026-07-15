@@ -197,11 +197,9 @@ fi
 # unknown and treated as non-codex (the safe default that keeps the fast path).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
-# Do not add a separate passive liveness preflight here. Active send paths own
-# backend readiness: herdr, for example, must route through its session-aware
-# target_ready path before sending, while zellij verifies pane labels in its
-# send implementation. A failed backend send is still surfaced below as a hard
-# error with the attempted resolution attached.
+# Text sends also run a readiness preflight before mutating the composer. This
+# is stricter than target existence: a live endpoint with a busy turn or pending
+# input is not ready for a new literal instruction.
 
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
@@ -212,6 +210,11 @@ else
   MESSAGE=$*
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     fm_message_mark_from_firstmate "$MESSAGE" MESSAGE
+  fi
+  readiness=$(fm_backend_send_readiness "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
+  if [ "$readiness" != ready ]; then
+    echo "error: target not ready for text send: $readiness (tried $RESOLUTION_TRIED)" >&2
+    exit 1
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
