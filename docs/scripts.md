@@ -52,6 +52,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-dashboard-probe.sh`  | Read-only fleet-dashboard data probe for card, station, and replay-source snapshots |
 | `fm-dashboard-server.sh` | Private localhost read-only dashboard server with cached snapshot and report APIs    |
+| `fm-route-report.sh`     | Read-only routing-economics summary of `data/routing-ledger.jsonl` (ratios, spend, cache rates, over-tier candidates) |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls and local secondmate syncs       |

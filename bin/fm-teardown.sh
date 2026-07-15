@@ -4,6 +4,11 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# Before cleanup, teardown appends one idempotent per-task record of the crew
+# session's token usage and routing profile (harness/model/effort, rule= attribution,
+# outcome) to data/routing-ledger.jsonl - summarized by bin/fm-route-report.sh - and,
+# for non-forced ship tasks, an arrival record to data/dashboard-arrivals.jsonl for
+# the read-only dashboard (bin/fm-dashboard-probe.sh).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
