@@ -4,6 +4,16 @@
 # Emits a normalized JSON snapshot proving what Mockup A can live-update from
 # current Firstmate state, plus the approximate replay sources available for a
 # Mockup D timeline. No AI calls, no writes.
+#
+# Each fleet and station task row also carries a backward-compatible "pipeline"
+# object: profile (cad_no_mistakes, direct_pr, local_only, scout_report,
+# secondmate, or unknown fallback), main_stage, stage_label, next_human_action,
+# source_confidence (live, approximate, or unknown; teardown-sourced and
+# archived rows are approximate), and an evidence array. Only cad_no_mistakes
+# rows get a non-null validation_branch (no-mistakes step, status, findings,
+# pr_url, superseded_status_log); every other profile emits validation_branch
+# null. Missing worktrees, stale or superseded status logs, and landed/history
+# arrival rows degrade confidence or stage gracefully instead of erroring.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -270,6 +280,304 @@ station_for() {
   printf 'casting_off|live metadata exists but no strong current state is available yet'
 }
 
+stage_label_for() {
+  case "${1:-}" in
+    intake) printf 'Intake' ;;
+    mirror) printf 'Mirror' ;;
+    spawn) printf 'Spawn' ;;
+    run_work) printf 'Run Work' ;;
+    validation_gate) printf 'Validation Gate' ;;
+    review_ready) printf 'Review Ready' ;;
+    landed) printf 'Landed' ;;
+    human_followthrough) printf 'Human Followthrough' ;;
+    *) printf 'Unknown' ;;
+  esac
+}
+
+pipeline_profile_for() {
+  local kind=$1 mode=$2
+  if [ "$kind" = secondmate ] || [ "$mode" = secondmate ]; then
+    printf 'secondmate'
+    return
+  fi
+  if [ "$kind" = scout ]; then
+    printf 'scout_report'
+    return
+  fi
+  case "$mode" in
+    no-mistakes) printf 'cad_no_mistakes' ;;
+    direct-PR) printf 'direct_pr' ;;
+    local-only) printf 'local_only' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+text_has() {
+  printf '%s\n' "${1:-}" | grep -Eiq "$2"
+}
+
+pipeline_findings_count() {
+  printf '%s\n' "${1:-}" | sed -nE 's/.*[^0-9]([0-9]+) finding\(s\).*/\1/p' | head -1
+}
+
+validation_step_from_detail() {
+  local detail=$1 step
+  step=$(printf '%s\n' "$detail" | sed -nE 's/.*parked at ([^:() ]+).*/\1/p' | head -1)
+  if [ -n "$step" ]; then
+    printf '%s' "$step"
+    return
+  fi
+  if text_has "$detail" '(^|[^[:alpha:]])ci([^[:alpha:]]|$)|checks green|PR ready'; then
+    printf 'ci'
+  elif text_has "$detail" 'review'; then
+    printf 'review'
+  elif text_has "$detail" 'test|lint|typecheck|build'; then
+    printf 'test'
+  elif text_has "$detail" 'validat|gate|run active|run completed|run passed|run failed'; then
+    printf 'validation'
+  fi
+}
+
+validation_status_for() {
+  local current_state=$1 detail=$2
+  case "$current_state" in
+    parked) printf 'awaiting_approval'; return ;;
+    failed)
+      if text_has "$detail" 'cancelled'; then printf 'cancelled'; else printf 'failed'; fi
+      return
+      ;;
+    done)
+      if text_has "$detail" 'checks green|PR ready'; then
+        printf 'checks-passed'
+      elif text_has "$detail" 'passed|merged|closed|landed'; then
+        printf 'passed'
+      else
+        printf 'completed'
+      fi
+      return
+      ;;
+  esac
+  if text_has "$detail" 'validating \(fixing\)|run active \(fixing\)'; then
+    printf 'fixing'
+  elif text_has "$detail" 'validating \(running\)|validating \(background run\)|ci running|run active \(running\)|run active'; then
+    printf 'running'
+  else
+    printf '%s' "${current_state:-unknown}"
+  fi
+}
+
+pipeline_source_confidence_for() {
+  local source=$1 current_source=$2 current_state=$3 worktree=$4 liveness=$5 target=$6 stage=$7
+  if [ "$source" = teardown ] || [ "$liveness" = archived ]; then
+    printf 'approximate'
+    return
+  fi
+  case "$stage" in
+    landed|review_ready)
+      case "$current_source" in
+        run-step|pane) printf 'live'; return ;;
+        status-log) printf 'approximate'; return ;;
+      esac
+      ;;
+  esac
+  if [ "$current_state" != "done" ]; then
+    if [ -z "$worktree" ] || [ ! -d "$worktree" ] || [ -z "$target" ] || [ "$liveness" != alive ]; then
+      printf 'unknown'
+      return
+    fi
+  fi
+  case "$current_source" in
+    run-step|pane) printf 'live' ;;
+    status-log) printf 'approximate' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+pipeline_stage_for() {
+  local profile=$1 station=$2 current_state=$3 current_detail=$4 status_verb=$5 status_note=$6 pr_url=$7 source=$8
+  local text="$current_detail $status_note"
+  if [ "$source" = teardown ]; then
+    printf 'landed'
+    return
+  fi
+  if [ "$station" = unknown ]; then
+    printf 'unknown'
+    return
+  fi
+  case "$profile" in
+    cad_no_mistakes)
+      if [ "$current_state" = "done" ] || [ "$status_verb" = "done" ] || [ "$station" = arrived_today ]; then
+        if text_has "$text" 'checks green|PR ready'; then
+          printf 'review_ready'
+        elif text_has "$text" 'passed|merged|closed|landed'; then
+          printf 'landed'
+        else
+          printf 'review_ready'
+        fi
+      elif [ "$current_state" = parked ] || [ "$current_state" = failed ] || [ "$station" = gate_run ]; then
+        printf 'validation_gate'
+      elif [ "$station" = needs_captain ]; then
+        printf 'validation_gate'
+      elif [ "$station" = casting_off ]; then
+        printf 'spawn'
+      else
+        printf 'run_work'
+      fi
+      ;;
+    direct_pr)
+      if [ "$station" = arrived_today ] && text_has "$text" 'landed|merged|closed'; then
+        printf 'landed'
+      elif [ -n "$pr_url" ] || [ "$current_state" = "done" ] || [ "$status_verb" = "done" ]; then
+        printf 'review_ready'
+      elif [ "$station" = needs_captain ]; then
+        printf 'human_followthrough'
+      elif [ "$station" = casting_off ]; then
+        printf 'spawn'
+      else
+        printf 'run_work'
+      fi
+      ;;
+    local_only)
+      if [ "$station" = arrived_today ] && text_has "$text" 'landed|merged|local main'; then
+        printf 'landed'
+      elif [ "$current_state" = "done" ] || [ "$status_verb" = "done" ]; then
+        printf 'review_ready'
+      elif [ "$station" = needs_captain ]; then
+        printf 'human_followthrough'
+      elif [ "$station" = casting_off ]; then
+        printf 'spawn'
+      else
+        printf 'run_work'
+      fi
+      ;;
+    scout_report)
+      if [ "$current_state" = "done" ] || [ "$status_verb" = "done" ]; then
+        printf 'review_ready'
+      elif [ "$station" = arrived_today ]; then
+        printf 'review_ready'
+      elif [ "$station" = needs_captain ]; then
+        printf 'human_followthrough'
+      elif [ "$station" = casting_off ]; then
+        printf 'spawn'
+      else
+        printf 'run_work'
+      fi
+      ;;
+    secondmate)
+      if [ "$station" = unknown ]; then printf 'unknown'; else printf 'run_work'; fi
+      ;;
+    *)
+      if [ "$station" = casting_off ]; then printf 'spawn'; else printf 'unknown'; fi
+      ;;
+  esac
+}
+
+pipeline_next_action_for() {
+  local profile=$1 stage=$2 current_state=$3 status_verb=$4 confidence=$5 superseded=$6
+  local needs_attention=false
+  case "$current_state:$status_verb" in
+    parked:*|failed:*|blocked:*|*:needs-decision|*:blocked|*:failed) needs_attention=true ;;
+  esac
+  if [ "$stage" = unknown ]; then
+    printf 'monitor only'
+    return
+  fi
+  if [ "$confidence" = unknown ] && [ "$needs_attention" != true ]; then
+    printf 'monitor only'
+    return
+  fi
+  case "$profile:$stage" in
+    cad_no_mistakes:validation_gate)
+      if [ "$superseded" = true ]; then
+        printf 'wait for validation'
+      elif [ "$needs_attention" = true ]; then
+        printf 'answer gate finding'
+      else
+        printf 'wait for validation'
+      fi
+      ;;
+    cad_no_mistakes:review_ready|direct_pr:review_ready) printf 'review PR' ;;
+    local_only:review_ready) printf 'review local branch' ;;
+    scout_report:review_ready) printf 'review scout report' ;;
+    *:landed|*:human_followthrough) printf 'move/comment in Basecamp' ;;
+    *:run_work|*:spawn|*:intake|*:mirror) printf 'monitor only' ;;
+    *) printf 'monitor only' ;;
+  esac
+}
+
+set_pipeline_fields() {
+  local kind=$1 mode=$2 station=$3 current_state=$4 current_source=$5 current_detail=$6 status_verb=$7 status_note=$8 worktree=$9
+  local liveness=${10} target=${11} pr_url=${12} source=${13}
+  PIPE_PROFILE=$(pipeline_profile_for "$kind" "$mode")
+  PIPE_MAIN_STAGE=$(pipeline_stage_for "$PIPE_PROFILE" "$station" "$current_state" "$current_detail" "$status_verb" "$status_note" "$pr_url" "$source")
+  PIPE_STAGE_LABEL=$(stage_label_for "$PIPE_MAIN_STAGE")
+  PIPE_SOURCE_CONFIDENCE=$(pipeline_source_confidence_for "$source" "$current_source" "$current_state" "$worktree" "$liveness" "$target" "$PIPE_MAIN_STAGE")
+  PIPE_VALIDATION_STEP=
+  PIPE_VALIDATION_STATUS=
+  PIPE_VALIDATION_FINDINGS=
+  PIPE_VALIDATION_PR_URL=$pr_url
+  PIPE_VALIDATION_SUPERSEDED=false
+  PIPE_EVIDENCE=()
+  [ -n "$kind" ] && PIPE_EVIDENCE+=("meta.kind=$kind")
+  [ -n "$mode" ] && PIPE_EVIDENCE+=("meta.mode=$mode")
+  [ -n "$source" ] && PIPE_EVIDENCE+=("source=$source")
+  [ -n "$current_state" ] && PIPE_EVIDENCE+=("current_state.state=$current_state")
+  [ -n "$current_source" ] && PIPE_EVIDENCE+=("current_state.source=$current_source")
+  [ -n "$station" ] && PIPE_EVIDENCE+=("station=$station")
+  [ -n "$status_verb" ] && PIPE_EVIDENCE+=("status.verb=$status_verb")
+  [ -n "$pr_url" ] && PIPE_EVIDENCE+=("pr_url=present")
+  if [ -z "$worktree" ] || { [ -n "$worktree" ] && [ ! -d "$worktree" ]; }; then
+    PIPE_EVIDENCE+=("worktree=missing")
+  fi
+  if [ -n "$target" ] && [ "$liveness" != alive ] && [ "$liveness" != archived ]; then
+    PIPE_EVIDENCE+=("backend_liveness=$liveness")
+  fi
+  if text_has "$current_detail" 'status-log superseded'; then
+    PIPE_VALIDATION_SUPERSEDED=true
+  fi
+  PIPE_NEXT_HUMAN_ACTION=$(pipeline_next_action_for "$PIPE_PROFILE" "$PIPE_MAIN_STAGE" "$current_state" "$status_verb" "$PIPE_SOURCE_CONFIDENCE" "$PIPE_VALIDATION_SUPERSEDED")
+  if [ "$PIPE_PROFILE" = cad_no_mistakes ]; then
+    PIPE_VALIDATION_STEP=$(validation_step_from_detail "$current_detail")
+    PIPE_VALIDATION_STATUS=$(validation_status_for "$current_state" "$current_detail")
+    PIPE_VALIDATION_FINDINGS=$(pipeline_findings_count "$current_detail")
+  fi
+}
+
+print_pipeline_evidence_json() {
+  local first=1 item
+  printf '['
+  for item in "${PIPE_EVIDENCE[@]:-}"; do
+    [ -n "$item" ] || continue
+    [ "$first" -eq 1 ] || printf ', '
+    first=0
+    json_string "$item"
+  done
+  printf ']'
+}
+
+print_pipeline_json() {
+  printf '      "pipeline": {\n'
+  printf '        "profile": %s,\n' "$(json_string "$PIPE_PROFILE")"
+  printf '        "main_stage": %s,\n' "$(json_string "$PIPE_MAIN_STAGE")"
+  printf '        "stage_label": %s,\n' "$(json_string "$PIPE_STAGE_LABEL")"
+  printf '        "next_human_action": %s,\n' "$(json_string "$PIPE_NEXT_HUMAN_ACTION")"
+  printf '        "source_confidence": %s,\n' "$(json_string "$PIPE_SOURCE_CONFIDENCE")"
+  printf '        "evidence": %s,\n' "$(print_pipeline_evidence_json)"
+  if [ "$PIPE_PROFILE" = cad_no_mistakes ]; then
+    printf '        "validation_branch": {\n'
+    printf '          "name": "no-mistakes",\n'
+    printf '          "step": %s,\n' "$(json_string "$PIPE_VALIDATION_STEP")"
+    printf '          "status": %s,\n' "$(json_string "$PIPE_VALIDATION_STATUS")"
+    printf '          "findings": %s,\n' "$(json_number_or_null "$PIPE_VALIDATION_FINDINGS")"
+    printf '          "pr_url": %s,\n' "$(json_string "$PIPE_VALIDATION_PR_URL")"
+    printf '          "superseded_status_log": %s\n' "$PIPE_VALIDATION_SUPERSEDED"
+    printf '        }\n'
+  else
+    printf '        "validation_branch": null\n'
+  fi
+  printf '      }'
+}
+
 task_id_seen() {
   local needle=$1 id
   for id in "${STATION_IDS[@]:-}"; do
@@ -308,6 +616,7 @@ EOF
     status_verb=$(status_verb_of "$latest_status")
     status_note=$(status_note_of "$latest_status")
     [ -n "$mode" ] || mode=no-mistakes
+    set_pipeline_fields ship "$mode" arrived_today "done" arrival-ledger "successful ship teardown" "$status_verb" "$status_note" "$worktree" archived "" "$pr_url" teardown
     STATION_IDS+=("$id")
     STATION_VALUES+=("arrived_today")
     STATION_REASONS+=("archived successful ship teardown from today's arrival ledger")
@@ -348,7 +657,9 @@ EOF
     printf '        "verb": %s,\n' "$(json_string "$status_verb")"
     printf '        "note": %s,\n' "$(json_string "$status_note")"
     printf '        "raw": %s\n' "$(json_string "$latest_status")"
-    printf '      }\n'
+    printf '      },\n'
+    print_pipeline_json
+    printf '\n'
     printf '    }'
   done < "$ARRIVALS"
 }
@@ -424,6 +735,7 @@ print_fleet_and_station_arrays() {
       [ -n "$pr_head" ] && commit_short=${pr_head:0:9}
     fi
     pr_url=$(pr_url_for "$meta" "$status_line")
+    set_pipeline_fields "$kind" "$mode" "$station" "$current_state" "$current_source" "$current_detail" "$status_verb" "$status_note" "$worktree" "$liveness" "$target" "$pr_url" meta
     STATION_IDS+=("$id")
     STATION_VALUES+=("$station")
     STATION_REASONS+=("$reason")
@@ -462,7 +774,9 @@ print_fleet_and_station_arrays() {
     printf '        "verb": %s,\n' "$(json_string "$status_verb")"
     printf '        "note": %s,\n' "$(json_string "$status_note")"
     printf '        "raw": %s\n' "$(json_string "$status_line")"
-    printf '      }\n'
+    printf '      },\n'
+    print_pipeline_json
+    printf '\n'
     printf '    }'
   done
   print_arrival_fleet_rows

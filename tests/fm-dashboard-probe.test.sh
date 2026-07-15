@@ -47,6 +47,17 @@ case "${1:-}" in
   currentdone-t8) printf 'state: done · source: run-step · checks green: PR ready for review\n' ;;
   parked-t9) printf 'state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: captain decision)\n' ;;
   git-t1) printf 'state: working · source: pane · implementing the dashboard detail panel\n' ;;
+  nm-run-t1) printf 'state: working · source: run-step · validating (running)\n' ;;
+  nm-parked-t2) printf 'state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: captain decision)\n' ;;
+  nm-ready-t3) printf 'state: done · source: run-step · checks green: PR ready for review\n' ;;
+  nm-landed-t4) printf 'state: done · source: run-step · run passed: PR merged/closed\n' ;;
+  nm-failed-t5) printf 'state: failed · source: run-step · run failed\n' ;;
+  nm-super-t6) printf 'state: working · source: run-step · validating (running) · status-log superseded by active run\n' ;;
+  direct-t7) printf 'state: working · source: pane · PR opened\n' ;;
+  local-t8) printf 'state: done · source: status-log · ready in local branch\n' ;;
+  scout-t9) printf 'state: done · source: status-log · report written\n' ;;
+  second-t10) printf 'state: working · source: pane · idle and supervising routed work\n' ;;
+  missing-pipe-t11) printf 'state: unknown · source: none · worktree gone (torn down?)\n' ;;
   *) printf 'state: unknown · source: none · fake default\n' ;;
 esac
 SH
@@ -313,6 +324,130 @@ EOF
   pass "arrival ledger keeps same-day landed ships visible and filters old rows"
 }
 
+test_pipeline_snapshot_profiles_and_stages() {
+  local dir state data out wt
+  dir=$(make_case pipeline)
+  state="$dir/state"
+  data="$dir/data"
+  out="$dir/out.json"
+
+  for wt in wt-nm-run wt-nm-parked wt-nm-ready wt-nm-landed wt-nm-failed wt-nm-super wt-direct wt-local wt-scout wt-second; do
+    mkdir -p "$dir/$wt"
+  done
+
+  fm_write_meta "$state/nm-run-t1.meta" \
+    "window=sess:alive-nm-run" \
+    "worktree=$dir/wt-nm-run" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$state/nm-parked-t2.meta" \
+    "window=sess:alive-nm-parked" \
+    "worktree=$dir/wt-nm-parked" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'needs-decision: review gate\n' > "$state/nm-parked-t2.status"
+  fm_write_meta "$state/nm-ready-t3.meta" \
+    "window=sess:alive-nm-ready" \
+    "worktree=$dir/wt-nm-ready" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=https://github.com/example/cad/pull/3"
+  fm_write_meta "$state/nm-landed-t4.meta" \
+    "window=sess:alive-nm-landed" \
+    "worktree=$dir/wt-nm-landed" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$state/nm-failed-t5.meta" \
+    "window=sess:alive-nm-failed" \
+    "worktree=$dir/wt-nm-failed" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$state/nm-super-t6.meta" \
+    "window=sess:alive-nm-super" \
+    "worktree=$dir/wt-nm-super" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'needs-decision: stale gate question\n' > "$state/nm-super-t6.status"
+  fm_write_meta "$state/direct-t7.meta" \
+    "window=sess:alive-direct" \
+    "worktree=$dir/wt-direct" \
+    "project=$dir/projects/tc" \
+    "kind=ship" \
+    "mode=direct-PR" \
+    "pr=https://github.com/example/tc/pull/7"
+  fm_write_meta "$state/local-t8.meta" \
+    "window=sess:alive-local" \
+    "worktree=$dir/wt-local" \
+    "project=$dir/projects/local" \
+    "kind=ship" \
+    "mode=local-only"
+  fm_write_meta "$state/scout-t9.meta" \
+    "window=sess:alive-scout" \
+    "worktree=$dir/wt-scout" \
+    "project=$dir/projects/cad" \
+    "kind=scout" \
+    "mode=report"
+  fm_write_meta "$state/second-t10.meta" \
+    "window=sess:alive-second" \
+    "worktree=$dir/wt-second" \
+    "project=$dir/projects/cad" \
+    "kind=secondmate" \
+    "mode=secondmate"
+  fm_write_meta "$state/missing-pipe-t11.meta" \
+    "window=sess:alive-missing-pipe" \
+    "worktree=$dir/no-such-worktree" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  fm_write_meta "$state/nm-parked-gone-t13.meta" \
+    "window=sess:alive-nm-parked-gone" \
+    "worktree=$dir/no-such-parked-worktree" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'needs-decision: review gate\n' > "$state/nm-parked-gone-t13.status"
+
+  cat > "$data/dashboard-arrivals.jsonl" <<EOF
+{"task_id":"landed-history-t12","arrived_at":"$(date '+%Y-%m-%d')T12:00:00Z","display_title":"History landed","latest_status":"done: landed cleanly","pr_url":"https://github.com/example/repo/pull/12","branch":"fm/landed-history-t12","commit_short":"abc123def","project":"repo","worktree":"/tmp/wt","mode":"no-mistakes","source":"teardown"}
+EOF
+
+  run_probe_json "$dir" "$out"
+
+  assert_jq_true '.fleet[] | select(.task_id == "nm-run-t1" and .pipeline.profile == "cad_no_mistakes" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "wait for validation" and .pipeline.source_confidence == "live" and .pipeline.validation_branch.name == "no-mistakes" and .pipeline.validation_branch.step == "validation" and .pipeline.validation_branch.status == "running")' \
+    "$out" "running no-mistakes task did not expose validation pipeline"
+  assert_jq_true '.fleet[] | select(.task_id == "nm-parked-t2" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and .pipeline.validation_branch.step == "review" and .pipeline.validation_branch.status == "awaiting_approval" and .pipeline.validation_branch.findings == 2)' \
+    "$out" "parked no-mistakes task did not expose ask-user gate details"
+  assert_jq_true '.fleet[] | select(.task_id == "nm-ready-t3" and .pipeline.main_stage == "review_ready" and .pipeline.next_human_action == "review PR" and .pipeline.validation_branch.status == "checks-passed" and .pipeline.validation_branch.pr_url == "https://github.com/example/cad/pull/3")' \
+    "$out" "checks-passed no-mistakes task did not map to review_ready"
+  assert_jq_true '.fleet[] | select(.task_id == "nm-landed-t4" and .pipeline.main_stage == "landed" and .pipeline.next_human_action == "move/comment in Basecamp" and .pipeline.validation_branch.status == "passed")' \
+    "$out" "passed no-mistakes task did not map to landed"
+  assert_jq_true '.fleet[] | select(.task_id == "nm-failed-t5" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and .pipeline.validation_branch.status == "failed")' \
+    "$out" "failed no-mistakes task did not stay in validation gate"
+  assert_jq_true '.fleet[] | select(.task_id == "nm-super-t6" and .pipeline.validation_branch.superseded_status_log == true and .pipeline.next_human_action == "wait for validation")' \
+    "$out" "superseded stale status did not change the next operator action"
+  assert_jq_true '.fleet[] | select(.task_id == "direct-t7" and .pipeline.profile == "direct_pr" and .pipeline.main_stage == "review_ready" and .pipeline.next_human_action == "review PR" and .pipeline.validation_branch == null)' \
+    "$out" "direct-PR task did not expose review-ready fallback pipeline"
+  assert_jq_true '.fleet[] | select(.task_id == "local-t8" and .pipeline.profile == "local_only" and .pipeline.main_stage == "review_ready" and .pipeline.next_human_action == "review local branch")' \
+    "$out" "local-only task did not expose local review fallback pipeline"
+  assert_jq_true '.fleet[] | select(.task_id == "scout-t9" and .pipeline.profile == "scout_report" and .pipeline.main_stage == "review_ready" and .pipeline.next_human_action == "review scout report")' \
+    "$out" "scout task did not expose report review fallback pipeline"
+  assert_jq_true '.fleet[] | select(.task_id == "second-t10" and .pipeline.profile == "secondmate" and .pipeline.main_stage == "run_work" and .pipeline.next_human_action == "monitor only")' \
+    "$out" "secondmate task did not expose monitor-only fallback pipeline"
+  assert_jq_true '.fleet[] | select(.task_id == "missing-pipe-t11" and .pipeline.main_stage == "unknown" and .pipeline.source_confidence == "unknown" and (.pipeline.evidence | index("worktree=missing")))' \
+    "$out" "missing worktree did not expose unknown pipeline confidence"
+  assert_jq_true '.fleet[] | select(.task_id == "landed-history-t12" and .pipeline.profile == "cad_no_mistakes" and .pipeline.main_stage == "landed" and .pipeline.source_confidence == "approximate" and (.pipeline.evidence | index("source=teardown")))' \
+    "$out" "arrival-ledger row did not expose landed pipeline history"
+  assert_jq_true '.fleet[] | select(.task_id == "nm-parked-gone-t13" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and .pipeline.source_confidence == "unknown" and (.pipeline.evidence | index("worktree=missing")))' \
+    "$out" "needs-attention task with missing worktree did not keep human next action"
+  pass "pipeline snapshot maps no-mistakes, fallback profiles, stale status, missing worktree, and landed history"
+}
+
 test_replay_sources_are_extracted() {
   local dir state data out ledger
   dir=$(make_case replay)
@@ -365,5 +500,6 @@ test_display_title_precedence_and_subtitle
 test_git_and_pr_fields_are_extracted
 test_empty_fleet_output
 test_arrival_ledger_keeps_landed_ships_visible_today
+test_pipeline_snapshot_profiles_and_stages
 test_replay_sources_are_extracted
 test_report_output

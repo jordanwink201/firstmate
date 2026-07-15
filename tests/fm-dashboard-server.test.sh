@@ -54,6 +54,22 @@ make_case() {
       "effort": "high",
       "backend": "tmux",
       "backend_liveness": "alive",
+      "pipeline": {
+        "profile": "cad_no_mistakes",
+        "main_stage": "validation_gate",
+        "stage_label": "Validation Gate",
+        "next_human_action": "answer gate finding",
+        "source_confidence": "live",
+        "evidence": ["meta.mode=no-mistakes", "current_state.source=run-step"],
+        "validation_branch": {
+          "name": "no-mistakes",
+          "step": "review",
+          "status": "awaiting_approval",
+          "findings": 2,
+          "pr_url": "https://github.com/example/alpha/pull/12",
+          "superseded_status_log": false
+        }
+      },
       "current_state": {"state": "working", "source": "run-step", "detail": "validating", "raw": "state: working"},
       "latest_status": {"path": "/tmp/state/alpha-t1.status", "verb": "working", "note": "validating", "raw": "working: validating"}
     }
@@ -211,6 +227,12 @@ test_routes_and_methods() {
   assert_grep 'attention-badge' "$body" "dashboard HTML does not include needs-action badge markup"
   assert_grep 'Arrived Today' "$body" "dashboard HTML does not expose Arrived Today lane"
   assert_grep 'What matters' "$body" "dashboard detail does not prioritize captain-facing fields"
+  assert_grep 'Pipeline' "$body" "dashboard detail does not render the pipeline rail section"
+  assert_grep 'pipelineRailHtml' "$body" "dashboard HTML does not include pipeline rail renderer"
+  assert_grep 'No-mistakes' "$body" "dashboard detail does not render the no-mistakes sub-rail section"
+  assert_grep 'validationBranchHtml' "$body" "dashboard HTML does not include validation branch renderer"
+  assert_grep 'Validation detail not tracked for this profile.' "$body" "dashboard HTML does not include fallback copy for non-no-mistakes profiles"
+  assert_grep 'Validation detail unavailable for this task.' "$body" "dashboard HTML does not include unavailable copy for no-mistakes rows without validation detail"
   assert_grep 'Operational refs' "$body" "dashboard detail does not de-emphasize operational fields"
   assert_grep 'Needs you' "$body" "dashboard detail does not expose the action state"
   assert_no_grep '>At Port<' "$body" "dashboard still renders the old At Port lane"
@@ -219,7 +241,7 @@ test_routes_and_methods() {
   headers="$dir/snapshot.headers"
   code=$(http_request_with_headers GET "$base" /api/snapshot "$body" "$headers")
   [ "$code" = 200 ] || fail "/api/snapshot returned HTTP $code: $(cat "$body")"
-  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .stations[0].station == "gate_run"' "$body" >/dev/null \
+  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .stations[0].station == "gate_run"' "$body" >/dev/null \
     || fail "/api/snapshot did not return valid probe JSON: $(cat "$body")"
   [ "$(header_value "$headers" x-firstmate-cache)" = fresh ] \
     || fail "/api/snapshot did not mark a fresh cache response: $(cat "$headers")"

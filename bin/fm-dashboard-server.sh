@@ -6,6 +6,12 @@
 #   /api/snapshot  cached JSON from a background fm-dashboard-probe.sh --json loop
 #   /api/report    on-demand text report from fm-dashboard-probe.sh --report
 #   /healthz       tiny JSON health check
+#
+# /api/snapshot is the sole data source the dashboard UI polls. The detail
+# panel renders the selected task's main pipeline rail from the snapshot's
+# per-task "pipeline" object (with a client-side fallback when a row lacks
+# one) and shows the no-mistakes validation sub-rail only for the
+# cad_no_mistakes profile.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -517,6 +523,66 @@ const html = String.raw`<!doctype html>
       gap: 10px;
       min-width: 0;
     }
+    .pipeline-section {
+      border-bottom: 1px solid rgba(215, 208, 194, 0.78);
+      padding-bottom: 14px;
+    }
+    .pipeline-rail,
+    .validation-rail {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+      gap: 6px;
+      min-width: 0;
+    }
+    .rail-step {
+      min-height: 54px;
+      border: 1px solid rgba(104, 114, 118, 0.24);
+      border-radius: 8px;
+      padding: 7px;
+      display: grid;
+      align-content: center;
+      gap: 3px;
+      background: rgba(255, 253, 248, 0.72);
+      color: var(--muted);
+      overflow: hidden;
+    }
+    .rail-step[data-state="done"] {
+      border-color: rgba(46, 125, 79, 0.28);
+      background: rgba(46, 125, 79, 0.06);
+      color: var(--green);
+    }
+    .rail-step[data-state="active"] {
+      border-color: rgba(29, 118, 111, 0.42);
+      background: rgba(29, 118, 111, 0.1);
+      color: var(--ink);
+    }
+    .rail-step[data-state="unknown"] {
+      border-color: rgba(180, 61, 50, 0.28);
+      background: rgba(180, 61, 50, 0.07);
+      color: var(--red);
+    }
+    .rail-step strong,
+    .rail-step span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .rail-step strong {
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .rail-step span {
+      font-size: 12px;
+      color: inherit;
+    }
+    .pipeline-note {
+      border: 1px dashed rgba(104, 114, 118, 0.36);
+      border-radius: 8px;
+      padding: 10px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
     .detail-section-title,
     .detail-section summary {
       color: var(--muted);
@@ -632,6 +698,23 @@ const html = String.raw`<!doctype html>
       { id: 'needs_captain', label: 'Needs Captain' },
       { id: 'arrived_today', label: 'Arrived Today' },
       { id: 'unknown', label: 'Unknown' }
+    ];
+    var pipelineStages = [
+      { id: 'intake', label: 'Intake' },
+      { id: 'mirror', label: 'Mirror' },
+      { id: 'spawn', label: 'Spawn' },
+      { id: 'run_work', label: 'Run Work' },
+      { id: 'validation_gate', label: 'Validation' },
+      { id: 'review_ready', label: 'Review' },
+      { id: 'landed', label: 'Landed' },
+      { id: 'human_followthrough', label: 'Followthrough' },
+      { id: 'unknown', label: 'Unknown' }
+    ];
+    var validationStages = [
+      { id: 'intent', label: 'Intent' },
+      { id: 'review', label: 'Review' },
+      { id: 'push', label: 'Push' },
+      { id: 'ci', label: 'CI' }
     ];
     var selectPriority = ['needs_captain', 'gate_run', 'underway', 'casting_off', 'unknown', 'arrived_today'];
     var state = {
@@ -760,6 +843,100 @@ const html = String.raw`<!doctype html>
       return 'Monitor only.';
     }
 
+    function titleize(value) {
+      return String(value || 'unknown')
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, function(letter) { return letter.toUpperCase(); });
+    }
+
+    function fallbackProfile(ship) {
+      if (!ship) return 'unknown';
+      if (ship.kind === 'secondmate' || ship.mode === 'secondmate') return 'secondmate';
+      if (ship.kind === 'scout') return 'scout_report';
+      if (ship.mode === 'no-mistakes') return 'cad_no_mistakes';
+      if (ship.mode === 'direct-PR') return 'direct_pr';
+      if (ship.mode === 'local-only') return 'local_only';
+      return 'unknown';
+    }
+
+    function fallbackPipelineStage(ship, station) {
+      if (station === 'gate_run') return 'validation_gate';
+      if (station === 'arrived_today') return 'landed';
+      if (station === 'underway') return 'run_work';
+      if (station === 'casting_off') return 'spawn';
+      if (station === 'needs_captain') return 'human_followthrough';
+      return 'unknown';
+    }
+
+    function pipelineOf(ship, station) {
+      if (ship && ship.pipeline) return ship.pipeline;
+      var stage = fallbackPipelineStage(ship, station);
+      return {
+        profile: fallbackProfile(ship),
+        main_stage: stage,
+        stage_label: titleize(stage),
+        next_human_action: nextStepText(ship, station),
+        source_confidence: 'unknown',
+        evidence: [],
+        validation_branch: null
+      };
+    }
+
+    function profileLabel(profile) {
+      if (profile === 'cad_no_mistakes') return 'CAD / no-mistakes';
+      if (profile === 'direct_pr') return 'Direct PR';
+      if (profile === 'local_only') return 'Local only';
+      if (profile === 'scout_report') return 'Scout report';
+      if (profile === 'secondmate') return 'Secondmate';
+      return 'Unknown profile';
+    }
+
+    function pipelineRailHtml(pipeline) {
+      var active = (pipeline && pipeline.main_stage) || 'unknown';
+      var activeIndex = pipelineStages.findIndex(function(step) { return step.id === active; });
+      return '<div class="pipeline-rail" aria-label="Pipeline">' + pipelineStages.map(function(step, index) {
+        var stateName = 'pending';
+        if (step.id === active) stateName = active === 'unknown' ? 'unknown' : 'active';
+        else if (activeIndex > -1 && index < activeIndex && active !== 'unknown') stateName = 'done';
+        return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
+          '<strong>' + escapeHtml(step.label) + '</strong>' +
+          '<span>' + escapeHtml(stateName === 'active' ? 'Now' : (stateName === 'done' ? 'Done' : '')) + '</span>' +
+        '</div>';
+      }).join('') + '</div>';
+    }
+
+    function validationRailHtml(branch) {
+      var stepId = (branch && branch.step) || 'validation';
+      var stages = validationStages.slice();
+      if (!stages.some(function(step) { return step.id === stepId; })) {
+        stages.push({ id: stepId, label: titleize(stepId) });
+      }
+      return '<div class="validation-rail" aria-label="No-mistakes validation">' + stages.map(function(step) {
+        var stateName = step.id === stepId ? 'active' : 'pending';
+        return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
+          '<strong>' + escapeHtml(step.label) + '</strong>' +
+          '<span>' + escapeHtml(step.id === stepId ? (branch.status || 'Current') : '') + '</span>' +
+        '</div>';
+      }).join('') + '</div>';
+    }
+
+    function validationBranchHtml(pipeline) {
+      var branch = pipeline && pipeline.validation_branch;
+      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') {
+        return '<div class="pipeline-note">Validation detail not tracked for this profile.</div>';
+      }
+      if (!branch) {
+        return '<div class="pipeline-note">Validation detail unavailable for this task.</div>';
+      }
+      return validationRailHtml(branch) +
+        '<dl class="detail-facts">' +
+          kvRow('Step', branch.step || '', false, true, false) +
+          kvRow('Status', branch.status || '', false, true, false) +
+          kvRow('Findings', branch.findings == null ? '-' : String(branch.findings), false, true, false) +
+          kvRow('Superseded', branch.superseded_status_log ? 'yes' : 'no', false, true, branch.superseded_status_log ? false : true) +
+        '</dl>';
+    }
+
     function actionState(ship, station) {
       if (ship && ship.attention === 'needs_action') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'needs_captain') return { label: 'Needs you', tone: 'needs_action' };
@@ -874,15 +1051,16 @@ const html = String.raw`<!doctype html>
       }
       var station = stationOf(ship.task_id);
       var branchCommit = [ship.branch, ship.commit_short].filter(Boolean).join(' @ ');
+      var pipeline = pipelineOf(ship, station);
       var action = actionState(ship, station);
       var reason = stationReason(ship.task_id);
       var update = humanUpdate(ship, station);
-      var nextStep = nextStepText(ship, station);
+      var nextStep = pipeline.next_human_action || nextStepText(ship, station);
       var current = currentStateText(ship);
       detail.innerHTML = '<div class="detail-head">' +
         '<span class="station-chip" data-station="' + escapeHtml(station) + '">' + escapeHtml(stationLabel(station)) + '</span>' +
         '<h2>' + escapeHtml(displayTitle(ship)) + '</h2>' +
-        '<div class="detail-meta"><span class="task-id">' + escapeHtml(ship.task_id) + '</span>' + attentionBadge(ship) + '</div>' +
+        '<div class="detail-meta"><span class="task-id">' + escapeHtml(ship.task_id) + '</span><span class="pill">' + escapeHtml(profileLabel(pipeline.profile)) + '</span>' + attentionBadge(ship) + '</div>' +
       '</div>' +
       '<div class="detail-body">' +
         '<section class="detail-summary">' +
@@ -895,6 +1073,18 @@ const html = String.raw`<!doctype html>
             kvRow('Next', nextStep, false, false, false) +
             kvRow('Update', update, false, false, false) +
           '</dl>' +
+        '</section>' +
+        '<section class="detail-section pipeline-section">' +
+          '<div class="detail-section-title">Pipeline</div>' +
+          pipelineRailHtml(pipeline) +
+          '<dl class="detail-facts">' +
+            kvRow('Stage', pipeline.stage_label || titleize(pipeline.main_stage), false, true, false) +
+            kvRow('Confidence', pipeline.source_confidence || 'unknown', false, true, pipeline.source_confidence !== 'live') +
+          '</dl>' +
+        '</section>' +
+        '<section class="detail-section pipeline-section">' +
+          '<div class="detail-section-title">No-mistakes</div>' +
+          validationBranchHtml(pipeline) +
         '</section>' +
         '<details class="detail-section">' +
           '<summary>Operational refs</summary>' +
