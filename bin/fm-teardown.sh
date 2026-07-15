@@ -158,9 +158,7 @@ codex_tokens_for_worktree() {
   best_mtime=0
   best_file=
   while IFS= read -r -d '' file; do
-    if ! cwd=$(jq -r 'select(.type=="session_meta") | .payload.cwd // empty' "$file" 2>/dev/null | tail -1); then
-      continue
-    fi
+    cwd=$(head -n 1 "$file" 2>/dev/null | jq -r 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null) || continue
     [ "$cwd" = "$wt" ] || continue
     mtime=$(routing_file_mtime "$file")
     if [ "$mtime" -ge "$best_mtime" ]; then
@@ -243,9 +241,19 @@ append_routing_ledger_record() {
   # atomic, so a concurrent second teardown loses the race and skips; the has_id
   # check then covers the sequential re-teardown case. Lock lives in $DATA (not
   # $STATE, which teardown wipes) and is released on function return.
-  local _rlock="$DATA/.routing-ledger.$ID.lock"
+  local _rlock="$DATA/.routing-ledger.$ID.lock" _lock_mtime _lock_age
   if ! mkdir "$_rlock" 2>/dev/null; then
-    return 0
+    _lock_mtime=$(routing_file_mtime "$_rlock")
+    _lock_age=$(( $(date +%s) - _lock_mtime ))
+    if [ "$_lock_age" -lt 600 ]; then
+      echo "warning: routing ledger append for $ID skipped: lock held ($_rlock)" >&2
+      return 0
+    fi
+    rmdir "$_rlock" 2>/dev/null || true
+    if ! mkdir "$_rlock" 2>/dev/null; then
+      echo "warning: routing ledger append for $ID skipped: lock contention ($_rlock)" >&2
+      return 0
+    fi
   fi
   trap 'rmdir "${_rlock:-}" 2>/dev/null || true; trap - RETURN' RETURN
   if routing_ledger_has_id "$ledger" "$ID"; then

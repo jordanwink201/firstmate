@@ -73,10 +73,12 @@ const { spawn } = require('node:child_process');
 const host = process.env.FM_DASHBOARD_HOST || '127.0.0.1';
 const port = Number(process.env.FM_DASHBOARD_PORT || '8765');
 const probeBin = process.env.FM_DASHBOARD_PROBE_BIN;
-const probeTimeoutMs = Number(process.env.FM_DASHBOARD_PROBE_TIMEOUT_MS || '20000');
+const probeTimeoutMsRaw = Number(process.env.FM_DASHBOARD_PROBE_TIMEOUT_MS || '20000');
+const probeTimeoutMs = Number.isFinite(probeTimeoutMsRaw) && probeTimeoutMsRaw > 0 ? probeTimeoutMsRaw : 20000;
 const refreshMsRaw = Number(process.env.FM_DASHBOARD_REFRESH_MS || '10000');
 const refreshMs = Number.isFinite(refreshMsRaw) && refreshMsRaw > 0 ? refreshMsRaw : 10000;
-const maxOutputBytes = Number(process.env.FM_DASHBOARD_PROBE_MAX_OUTPUT_BYTES || String(4 * 1024 * 1024));
+const maxOutputBytesRaw = Number(process.env.FM_DASHBOARD_PROBE_MAX_OUTPUT_BYTES || String(4 * 1024 * 1024));
+const maxOutputBytes = Number.isFinite(maxOutputBytesRaw) && maxOutputBytesRaw > 0 ? maxOutputBytesRaw : 4 * 1024 * 1024;
 
 const cache = {
   snapshot: null,
@@ -1049,6 +1051,7 @@ function runProbe(kind) {
     }
 
     function append(which, chunk) {
+      if (outputTooLarge) return;
       if (which === 'stdout') stdout += chunk;
       else stderr += chunk;
       if (stdout.length + stderr.length > maxOutputBytes) {
