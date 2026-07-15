@@ -24,7 +24,8 @@ Spawn fails closed if the runtime is not ready.
 The first spawn against a given project also auto-registers that project's repo in Orca (`orca repo add --path`) if it is not already registered - no manual registration step is needed.
 
 Watching and attaching: Orca owns both the worktree and the terminal for its tasks, so there is nothing to attach to outside the Orca app itself - open the app and find the terminal for the task (recorded as `terminal=<handle>` in the task's meta, with `window=fm-<id>` as the shared firstmate alias).
-You do not need to open the app for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's terminal without opening Orca, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home (the stable `fm-<id>` alias also works; Enter and Ctrl-C are supported; Escape is not).
+You do not need to open the app for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's terminal without opening Orca, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> --key <key>` steers keys unless `FM_HOME` is already set to the active firstmate home (the stable `fm-<id>` alias also works; Enter and Ctrl-C are supported; Escape is not).
+Text sends through `fm-send.sh` currently refuse before typing: Orca has no busy/composer readiness probe yet, so `fm_backend_send_readiness` (`bin/fm-backend.sh`) reports a conservative `unknown` for a live Orca target and `fm-send.sh` requires an affirmative `ready`.
 
 Verify it works by spawning a trivial task with `--backend orca` and confirming the task's meta records `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`; the Orca app should show a new terminal for the task.
 
@@ -77,7 +78,8 @@ Spawn:
 Operation routing:
 
 - `fm-peek.sh` captures with `orca terminal read`.
-- `fm-send.sh` types text with `orca terminal send --text ...`, submits with Enter, and verifies the composer row cleared before returning; when Orca reports a limited page, the verifier follows `oldestCursor` and preserves the current tail so older text cannot hide still-pending composer input.
+- `fm-send.sh` text sends fail closed before typing: `fm_backend_send_readiness` reports a conservative `unknown` for a live Orca target (no readiness probe yet), and `fm-send.sh` requires `ready`. The adapter's verified submit path below still backs non-gated sends such as the spawn-time harness launch.
+- The adapter's text-submit path types with `orca terminal send --text ...`, submits with Enter, and verifies the composer row cleared before returning; when Orca reports a limited page, the verifier follows `oldestCursor` and preserves the current tail so older text cannot hide still-pending composer input.
   A slash-command popup that closes by filling an argument-hint placeholder still reads as pending, so the retry loop sends the required second Enter rather than treating the first Enter as a submission.
   The bordered row is classified through the shared composer classifier; a bare shell prompt has no genuine composer row and reads `unknown`, not confirmed empty.
 - `fm-send.sh --key Enter` and `--key C-c` are supported.
@@ -95,6 +97,7 @@ Teardown:
 ## Limitations
 
 - `--secondmate` spawns still refuse `backend=orca`; secondmate-home semantics need a separate design.
+- `fm-send.sh` text sends fail closed: Orca has no busy/composer send-readiness probe, so `fm_backend_send_readiness` stays a conservative `unknown` for a live target and only `--key` sends pass the preflight.
 - Escape is unsupported because the current Orca terminal send primitive exposes Enter and interrupt-style input but no verified Escape operation.
 - Orca is explicit-only and is not selected by runtime auto-detection.
 - Orca currently exposes no stable CLI version or protocol marker. Unlike the herdr/zellij/cmux docs, this backend intentionally gates spawn support on runtime reachability from `orca status --json` rather than a version floor.
@@ -111,7 +114,7 @@ Fake-Orca tests cover:
 - rejection of undocumented terminal-handle result shapes;
 - runtime readiness gating through `orca status --json`;
 - `fm-spawn.sh --backend orca` metadata creation and harness launch;
-- `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` routing through recorded Orca metadata;
+- `fm-peek.sh` and `fm-crew-state.sh` routing through recorded Orca metadata, and `fm-send.sh` refusing a text send with readiness `unknown` before typing;
 - slash-command popup placeholder handling that requires a second Enter before `fm-send.sh` reports submission;
 - scout teardown releasing an Orca worktree through `orca worktree rm`;
 - ship teardown failing closed when the recorded Orca worktree id is missing, cannot resolve to a path, or resolves to a different path than `worktree=`.
@@ -122,4 +125,5 @@ Run the focused suite with:
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
+tests/fm-send-readiness.test.sh
 ```
