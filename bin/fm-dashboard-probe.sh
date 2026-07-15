@@ -419,8 +419,6 @@ pipeline_stage_for() {
         printf 'landed'
       elif [ -n "$pr_url" ] || [ "$current_state" = "done" ] || [ "$status_verb" = "done" ]; then
         printf 'review_ready'
-      elif [ "$station" = arrived_today ]; then
-        printf 'landed'
       elif [ "$station" = needs_captain ]; then
         printf 'human_followthrough'
       elif [ "$station" = casting_off ]; then
@@ -434,8 +432,6 @@ pipeline_stage_for() {
         printf 'landed'
       elif [ "$current_state" = "done" ] || [ "$status_verb" = "done" ]; then
         printf 'review_ready'
-      elif [ "$station" = arrived_today ]; then
-        printf 'landed'
       elif [ "$station" = needs_captain ]; then
         printf 'human_followthrough'
       elif [ "$station" = casting_off ]; then
@@ -478,7 +474,7 @@ pipeline_next_action_for() {
         printf 'wait for validation'
       else
         case "$current_state:$status_verb" in
-          parked:*|failed:*|*:needs-decision|*:blocked|*:failed) printf 'answer gate finding' ;;
+          parked:*|failed:*|blocked:*|*:needs-decision|*:blocked|*:failed) printf 'answer gate finding' ;;
           *) printf 'wait for validation' ;;
         esac
       fi
