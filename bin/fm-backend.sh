@@ -348,6 +348,34 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
+# fm_backend_send_readiness: prove a direct text send can safely type into the
+# target before mutating its composer. The vocabulary is deliberately small and
+# stable for callers: ready|busy|pending|unknown|missing. A passive target
+# existence check runs first for every backend so a gone endpoint is classified
+# as missing instead of blending into an adapter-specific unknown.
+fm_backend_send_readiness() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 expected_label=${3:-}
+  if ! fm_backend_target_exists "$backend" "$target" "$expected_label"; then
+    printf 'missing'
+    return 0
+  fi
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    tmux)
+      fm_backend_tmux_send_readiness "$target"
+      ;;
+    herdr)
+      fm_backend_herdr_send_readiness "$target"
+      ;;
+    orca|zellij)
+      printf 'unknown'
+      ;;
+    *)
+      printf 'unknown'
+      ;;
+  esac
+}
+
 # fm_backend_kill: remove the task's session endpoint (best-effort; a
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
@@ -424,7 +452,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       session=${target%%:*}
       pane=${target#*:}
       [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] || return 1
-      HERDR_SESSION="$session" herdr pane get "$pane" >/dev/null 2>&1
+      fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
       ;;
     zellij)
       fm_backend_source zellij || return 1

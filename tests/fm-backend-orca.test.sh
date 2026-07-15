@@ -683,7 +683,7 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
 }
 
 test_peek_send_and_crew_state_route_through_orca_meta() {
-  local wt state id out neutral
+  local wt state id out neutral status
   id="orcaiopathz2"
   wt="$TMP_ROOT/io-wt"
   fm_git_init_commit "$wt"
@@ -698,11 +698,15 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
   [ "$out" = ready ] || fail "fm-peek should read through Orca metadata, got '$out'"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/4.out"
-  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/2.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca"
-  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/5.out"
+    "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-send text should fail closed for Orca readiness=unknown"
+  assert_contains "$out" "target not ready for text send: unknown" \
+    "fm-send text should report conservative Orca readiness as unknown"
+  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
   assert_contains "$out" "state: unknown" "crew-state should fall back cleanly for an idle Orca scout"
@@ -710,11 +714,9 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
     "peek/crew-state did not read the recorded Orca terminal"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f'"fm-$id" \
     "crew-state should not read the stable Orca alias as a terminal handle"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f''hello orca'$'\x1f''--json' \
-    "send did not type through the recorded Orca terminal"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
-    "send did not submit Enter through the recorded Orca terminal"
-  pass "fm-peek/fm-send/fm-crew-state route through backend=orca metadata"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f''hello orca'$'\x1f''--json' \
+    "fm-send text must not type through Orca until readiness can be proven"
+  pass "fm-peek/fm-send readiness/fm-crew-state route through backend=orca metadata"
 }
 
 test_peek_and_crew_state_fail_closed_on_orca_error_json() {

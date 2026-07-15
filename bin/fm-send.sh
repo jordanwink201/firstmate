@@ -85,6 +85,11 @@ esac
 if [ "${1:-}" = "--key" ]; then
   fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"
 else
+  readiness=$(fm_backend_send_readiness "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
+  if [ "$readiness" != ready ]; then
+    echo "error: target not ready for text send: $readiness" >&2
+    exit 1
+  fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
   # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`

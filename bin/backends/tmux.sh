@@ -52,6 +52,23 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# fm_backend_tmux_send_readiness: prove a text send can safely type into the
+# pane without mutating an active turn or pending composer. Only a structurally
+# empty composer on a non-busy pane is ready.
+fm_backend_tmux_send_readiness() {  # <target>
+  local state
+  if fm_pane_is_busy "$1"; then
+    printf 'busy'
+    return 0
+  fi
+  state=$(fm_tmux_composer_state "$1")
+  case "$state" in
+    empty) printf 'ready' ;;
+    pending) printf 'pending' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_tmux_container_ensure: reuse the current tmux session when
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
