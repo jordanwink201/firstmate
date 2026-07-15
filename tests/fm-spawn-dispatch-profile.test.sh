@@ -235,7 +235,7 @@ test_zero_padded_rule_index_uses_base_ten() {
   pass "zero-padded dispatch rule indexes are parsed as base ten"
 }
 
-test_ship_on_claude_warns_but_keeps_matching_rule() {
+test_ship_on_claude_matching_rule_does_not_warn() {
   local rec id out status
   id=profile-ship-claude-z18
   rec=$(make_spawn_case profile-ship-claude claude "$id")
@@ -245,12 +245,32 @@ test_ship_on_claude_warns_but_keeps_matching_rule() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" --harness claude --model opus --rule 1)
   status=$?
-  expect_code 0 "$status" "ship-on-claude warning should not block spawn"
-  assert_contains "$out" "warning: ships route to codex per rules 4-6; proceeding" \
-    "ship-on-claude warning was not emitted"
+  expect_code 0 "$status" "matched ship-on-claude rule should not block spawn"
+  assert_not_contains "$out" "ship on claude without a matched dispatch rule" \
+    "matched ship-on-claude rule should not warn"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus default
   assert_meta_rule "$HOME_DIR/state/$id.meta" 1
-  pass "ship tasks launched on claude warn but keep matching rule attribution"
+  pass "ship tasks launched on claude with matching rule keep quiet attribution"
+}
+
+test_ship_on_claude_without_rule_warns_and_records_override() {
+  local rec id out status
+  id=profile-ship-claude-missing-rule-z21
+  rec=$(make_spawn_case profile-ship-claude-missing-rule claude "$id")
+  read_case_record "$rec"
+  enable_claude_ship_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus)
+  status=$?
+  expect_code 0 "$status" "ship-on-claude missing-rule warning should not block spawn"
+  assert_contains "$out" "recording rule=override_missing" \
+    "missing dispatch rule did not record override_missing"
+  assert_contains "$out" "ship on claude without a matched dispatch rule" \
+    "ship-on-claude missing matched rule warning was not emitted"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus default
+  assert_meta_rule "$HOME_DIR/state/$id.meta" override_missing
+  pass "ship tasks launched on claude without matched rule warn and record override_missing"
 }
 
 test_mismatched_dispatch_rule_records_override() {
@@ -266,8 +286,8 @@ test_mismatched_dispatch_rule_records_override() {
   expect_code 0 "$status" "mismatched --rule tuple should warn but still spawn"
   assert_contains "$out" "recording rule=override" "mismatched tuple did not warn about rule override"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
-  assert_meta_rule "$HOME_DIR/state/$id.meta" override
-  pass "mismatched dispatch rule records rule=override without blocking explicit overrides"
+  assert_meta_rule "$HOME_DIR/state/$id.meta" override_mismatch
+  pass "mismatched dispatch rule records rule=override_mismatch without blocking explicit overrides"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -488,7 +508,8 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_matching_dispatch_rule_records_rule_without_warning
 test_zero_padded_rule_index_uses_base_ten
-test_ship_on_claude_warns_but_keeps_matching_rule
+test_ship_on_claude_matching_rule_does_not_warn
+test_ship_on_claude_without_rule_warns_and_records_override
 test_mismatched_dispatch_rule_records_override
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
