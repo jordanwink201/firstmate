@@ -53,7 +53,7 @@ json_string() {
   s=${s//$'\t'/\\t}
   if [[ $s == *[$'\x01'-$'\x1f']* ]]; then
     for _cc_i in 1 2 3 4 5 6 7 8 11 12 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do
-      printf -v _cc_char "\\$(printf '%03o' "$_cc_i")"
+      printf -v _cc_char '%b' "\\0$(printf '%03o' "$_cc_i")"
       printf -v _cc_esc '\\u%04x' "$_cc_i"
       s=${s//"$_cc_char"/$_cc_esc}
     done
