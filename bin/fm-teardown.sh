@@ -560,12 +560,32 @@ pr_is_merged() {
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# first, then 3-way merges the default branch with HEAD when supported: when HEAD
+# introduces nothing the default branch does not already contain (e.g. its change
+# landed via squash) the merged tree equals the default branch's tree. On older Git
+# without `merge-tree --write-tree`, use a temporary index to check whether the
+# branch patch can be reverse-applied from the default branch without touching the
+# worktree. Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
+content_patch_in_default() {
+  local ref=$1 base tmp_index patch_file rc
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  tmp_index=$(mktemp "${TMPDIR:-/tmp}/fm-content-index.XXXXXX") || return 1
+  patch_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-patch.XXXXXX") || { rm -f "$tmp_index"; return 1; }
+  rm -f "$tmp_index"
+  rc=1
+  if git -C "$WT" diff --binary "$base" HEAD > "$patch_file" 2>/dev/null; then
+    if [ ! -s "$patch_file" ]; then
+      rc=0
+    elif GIT_INDEX_FILE=$tmp_index git -C "$WT" read-tree "$ref" >/dev/null 2>&1 &&
+      GIT_INDEX_FILE=$tmp_index git -C "$WT" apply --cached --reverse --check "$patch_file" >/dev/null 2>&1; then
+      rc=0
+    fi
+  fi
+  rm -f "$tmp_index" "$patch_file"
+  return "$rc"
+}
+
 content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1
@@ -579,9 +599,12 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  if merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null); then
+    merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+    [ "$merged_tree" = "$default_tree" ]
+    return $?
+  fi
+  content_patch_in_default "$ref"
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
