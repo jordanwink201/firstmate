@@ -35,16 +35,20 @@ case "${1:-}" in
     exit 0 ;;
   display-message)
     target=
+    cursor=0
     while [ $# -gt 0 ]; do
       case "$1" in
         -t) target=$2; shift 2 ;;
+        *cursor_y*) cursor=1; shift ;;
         *) shift ;;
       esac
     done
     if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
       exit 1
     fi
-    printf '%%1\n'
+    # cursor_y feeds the readiness composer probe: a numeric row keeps the
+    # bordered-empty capture below classifying as ready.
+    if [ "$cursor" = 1 ]; then printf '0\n'; else printf '%%1\n'; fi
     exit 0 ;;
   capture-pane)
     printf '\xe2\x94\x82 \xe2\x94\x82\n'
