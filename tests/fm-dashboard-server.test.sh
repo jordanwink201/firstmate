@@ -232,6 +232,7 @@ test_routes_and_methods() {
   assert_grep 'No-mistakes' "$body" "dashboard detail does not render the no-mistakes sub-rail section"
   assert_grep 'validationBranchHtml' "$body" "dashboard HTML does not include validation branch renderer"
   assert_grep 'Validation detail not tracked for this profile.' "$body" "dashboard HTML does not include fallback copy for non-no-mistakes profiles"
+  assert_grep 'Validation detail unavailable for this task.' "$body" "dashboard HTML does not include unavailable copy for no-mistakes rows without validation detail"
   assert_grep 'Operational refs' "$body" "dashboard detail does not de-emphasize operational fields"
   assert_grep 'Needs you' "$body" "dashboard detail does not expose the action state"
   assert_no_grep '>At Port<' "$body" "dashboard still renders the old At Port lane"

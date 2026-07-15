@@ -474,7 +474,15 @@ pipeline_stage_for() {
 
 pipeline_next_action_for() {
   local profile=$1 stage=$2 current_state=$3 status_verb=$4 confidence=$5 superseded=$6
-  if [ "$confidence" = unknown ] || [ "$stage" = unknown ]; then
+  local needs_attention=false
+  case "$current_state:$status_verb" in
+    parked:*|failed:*|blocked:*|*:needs-decision|*:blocked|*:failed) needs_attention=true ;;
+  esac
+  if [ "$stage" = unknown ]; then
+    printf 'monitor only'
+    return
+  fi
+  if [ "$confidence" = unknown ] && [ "$needs_attention" != true ]; then
     printf 'monitor only'
     return
   fi
@@ -482,11 +490,10 @@ pipeline_next_action_for() {
     cad_no_mistakes:validation_gate)
       if [ "$superseded" = true ]; then
         printf 'wait for validation'
+      elif [ "$needs_attention" = true ]; then
+        printf 'answer gate finding'
       else
-        case "$current_state:$status_verb" in
-          parked:*|failed:*|blocked:*|*:needs-decision|*:blocked|*:failed) printf 'answer gate finding' ;;
-          *) printf 'wait for validation' ;;
-        esac
+        printf 'wait for validation'
       fi
       ;;
     cad_no_mistakes:review_ready|direct_pr:review_ready) printf 'review PR' ;;
@@ -540,6 +547,7 @@ print_pipeline_evidence_json() {
   local first=1 item
   printf '['
   for item in "${PIPE_EVIDENCE[@]:-}"; do
+    [ -n "$item" ] || continue
     [ "$first" -eq 1 ] || printf ', '
     first=0
     json_string "$item"

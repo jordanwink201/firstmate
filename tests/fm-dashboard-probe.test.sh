@@ -405,6 +405,13 @@ test_pipeline_snapshot_profiles_and_stages() {
     "project=$dir/projects/cad" \
     "kind=ship" \
     "mode=no-mistakes"
+  fm_write_meta "$state/nm-parked-gone-t13.meta" \
+    "window=sess:alive-nm-parked-gone" \
+    "worktree=$dir/no-such-parked-worktree" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'needs-decision: review gate\n' > "$state/nm-parked-gone-t13.status"
 
   cat > "$data/dashboard-arrivals.jsonl" <<EOF
 {"task_id":"landed-history-t12","arrived_at":"$(date '+%Y-%m-%d')T12:00:00Z","display_title":"History landed","latest_status":"done: landed cleanly","pr_url":"https://github.com/example/repo/pull/12","branch":"fm/landed-history-t12","commit_short":"abc123def","project":"repo","worktree":"/tmp/wt","mode":"no-mistakes","source":"teardown"}
@@ -436,6 +443,8 @@ EOF
     "$out" "missing worktree did not expose unknown pipeline confidence"
   assert_jq_true '.fleet[] | select(.task_id == "landed-history-t12" and .pipeline.profile == "cad_no_mistakes" and .pipeline.main_stage == "landed" and .pipeline.source_confidence == "approximate" and (.pipeline.evidence | index("source=teardown")))' \
     "$out" "arrival-ledger row did not expose landed pipeline history"
+  assert_jq_true '.fleet[] | select(.task_id == "nm-parked-gone-t13" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and .pipeline.source_confidence == "unknown" and (.pipeline.evidence | index("worktree=missing")))' \
+    "$out" "needs-attention task with missing worktree did not keep human next action"
   pass "pipeline snapshot maps no-mistakes, fallback profiles, stale status, missing worktree, and landed history"
 }
 

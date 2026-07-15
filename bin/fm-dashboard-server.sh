@@ -922,8 +922,11 @@ const html = String.raw`<!doctype html>
 
     function validationBranchHtml(pipeline) {
       var branch = pipeline && pipeline.validation_branch;
-      if (!pipeline || pipeline.profile !== 'cad_no_mistakes' || !branch) {
+      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') {
         return '<div class="pipeline-note">Validation detail not tracked for this profile.</div>';
+      }
+      if (!branch) {
+        return '<div class="pipeline-note">Validation detail unavailable for this task.</div>';
       }
       return validationRailHtml(branch) +
         '<dl class="detail-facts">' +
