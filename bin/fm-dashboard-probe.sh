@@ -4,6 +4,16 @@
 # Emits a normalized JSON snapshot proving what Mockup A can live-update from
 # current Firstmate state, plus the approximate replay sources available for a
 # Mockup D timeline. No AI calls, no writes.
+#
+# Each fleet and station task row also carries a backward-compatible "pipeline"
+# object: profile (cad_no_mistakes, direct_pr, local_only, scout_report,
+# secondmate, or unknown fallback), main_stage, stage_label, next_human_action,
+# source_confidence (live, approximate, or unknown; teardown-sourced and
+# archived rows are approximate), and an evidence array. Only cad_no_mistakes
+# rows get a non-null validation_branch (no-mistakes step, status, findings,
+# pr_url, superseded_status_log); every other profile emits validation_branch
+# null. Missing worktrees, stale or superseded status logs, and landed/history
+# arrival rows degrade confidence or stage gracefully instead of erroring.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

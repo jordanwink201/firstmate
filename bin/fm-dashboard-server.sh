@@ -6,6 +6,12 @@
 #   /api/snapshot  cached JSON from a background fm-dashboard-probe.sh --json loop
 #   /api/report    on-demand text report from fm-dashboard-probe.sh --report
 #   /healthz       tiny JSON health check
+#
+# /api/snapshot is the sole data source the dashboard UI polls. The detail
+# panel renders the selected task's main pipeline rail from the snapshot's
+# per-task "pipeline" object (with a client-side fallback when a row lacks
+# one) and shows the no-mistakes validation sub-rail only for the
+# cad_no_mistakes profile.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
