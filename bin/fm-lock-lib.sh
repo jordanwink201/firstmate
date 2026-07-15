@@ -39,6 +39,7 @@ fm_lock_lsof_holder() {
   else
     status=$?
   fi
+  output=$(printf '%s\n' "$output" | sed '/^bash: warning: setlocale:/d')
   if [ "$status" -eq 1 ] && [ -z "$output" ]; then
     return 1
   fi

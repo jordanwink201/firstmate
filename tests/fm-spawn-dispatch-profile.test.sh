@@ -72,6 +72,28 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+enable_claude_ship_profile() {
+  local home=$1
+  printf '%s\n' '{"rules":[{"when":"hard trigger ship exception","use":{"harness":"claude","model":"opus"}}]}' \
+    > "$home/config/crew-dispatch.json"
+}
+
+enable_eight_rule_profile() {
+  local home=$1
+  cat > "$home/config/crew-dispatch.json" <<'JSON'
+{"rules":[
+  {"when":"one","use":{"harness":"codex","model":"gpt-5","effort":"medium"}},
+  {"when":"two","use":{"harness":"codex","model":"gpt-5","effort":"high"}},
+  {"when":"three","use":{"harness":"claude","model":"haiku"}},
+  {"when":"four","use":{"harness":"claude","model":"sonnet"}},
+  {"when":"five","use":{"harness":"claude","model":"opus"}},
+  {"when":"six","use":{"harness":"codex","model":"gpt-5","effort":"xhigh"}},
+  {"when":"seven","use":{"harness":"grok","model":"grok-4","effort":"medium"}},
+  {"when":"eight","use":{"harness":"grok","model":"grok-4","effort":"high"}}
+]}
+JSON
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -84,7 +106,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  LC_ALL=C FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -103,6 +125,11 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+assert_meta_rule() {
+  local meta=$1 rule=$2
+  assert_grep "rule=$rule" "$meta" "meta missing rule=$rule"
 }
 
 test_no_profile_keeps_claude_launch_unchanged() {
@@ -172,6 +199,95 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
+}
+
+test_matching_dispatch_rule_records_rule_without_warning() {
+  local rec id out status
+  id=profile-rule-match-z17
+  rec=$(make_spawn_case profile-rule-match grok "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness grok --model grok-4 --effort high --rule 1)
+  status=$?
+  expect_code 0 "$status" "matching --rule tuple should not block spawn"
+  assert_not_contains "$out" "warning:" "matching --rule tuple should not warn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
+  assert_meta_rule "$HOME_DIR/state/$id.meta" 1
+  pass "matching dispatch rule records the consulted rule without warning"
+}
+
+test_zero_padded_rule_index_uses_base_ten() {
+  local rec id out status
+  id=profile-rule-leading-zero-z20
+  rec=$(make_spawn_case profile-rule-leading-zero grok "$id")
+  read_case_record "$rec"
+  enable_eight_rule_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness grok --model grok-4 --effort high --rule 08)
+  status=$?
+  expect_code 0 "$status" "zero-padded --rule should be parsed as base ten"
+  assert_not_contains "$out" "recording rule=override" "zero-padded --rule 08 should not be treated as invalid octal"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
+  assert_meta_rule "$HOME_DIR/state/$id.meta" 08
+  pass "zero-padded dispatch rule indexes are parsed as base ten"
+}
+
+test_ship_on_claude_matching_rule_does_not_warn() {
+  local rec id out status
+  id=profile-ship-claude-z18
+  rec=$(make_spawn_case profile-ship-claude claude "$id")
+  read_case_record "$rec"
+  enable_claude_ship_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus --rule 1)
+  status=$?
+  expect_code 0 "$status" "matched ship-on-claude rule should not block spawn"
+  assert_not_contains "$out" "ship on claude without a matched dispatch rule" \
+    "matched ship-on-claude rule should not warn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus default
+  assert_meta_rule "$HOME_DIR/state/$id.meta" 1
+  pass "ship tasks launched on claude with matching rule keep quiet attribution"
+}
+
+test_ship_on_claude_without_rule_warns_and_records_override() {
+  local rec id out status
+  id=profile-ship-claude-missing-rule-z21
+  rec=$(make_spawn_case profile-ship-claude-missing-rule claude "$id")
+  read_case_record "$rec"
+  enable_claude_ship_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus)
+  status=$?
+  expect_code 0 "$status" "ship-on-claude missing-rule warning should not block spawn"
+  assert_contains "$out" "recording rule=override_missing" \
+    "missing dispatch rule did not record override_missing"
+  assert_contains "$out" "ship on claude without a matched dispatch rule" \
+    "ship-on-claude missing matched rule warning was not emitted"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus default
+  assert_meta_rule "$HOME_DIR/state/$id.meta" override_missing
+  pass "ship tasks launched on claude without matched rule warn and record override_missing"
+}
+
+test_mismatched_dispatch_rule_records_override() {
+  local rec id out status
+  id=profile-rule-override-z19
+  rec=$(make_spawn_case profile-rule-override codex "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --rule 1)
+  status=$?
+  expect_code 0 "$status" "mismatched --rule tuple should warn but still spawn"
+  assert_contains "$out" "recording rule=override" "mismatched tuple did not warn about rule override"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_meta_rule "$HOME_DIR/state/$id.meta" override_mismatch
+  pass "mismatched dispatch rule records rule=override_mismatch without blocking explicit overrides"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -390,6 +506,11 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
+test_matching_dispatch_rule_records_rule_without_warning
+test_zero_padded_rule_index_uses_base_ten
+test_ship_on_claude_matching_rule_does_not_warn
+test_ship_on_claude_without_rule_warns_and_records_override
+test_mismatched_dispatch_rule_records_override
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

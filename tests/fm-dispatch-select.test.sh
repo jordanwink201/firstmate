@@ -6,6 +6,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+# The selector under test needs the real jq; make it resolvable regardless of
+# where it is installed (Homebrew, Nix profile bins, etc.), which the bare
+# BASE_PATH above does not cover.
+JQ_DIR=$(command -v jq 2>/dev/null) && JQ_DIR=$(dirname "$JQ_DIR") || JQ_DIR=
+[ -n "$JQ_DIR" ] && BASE_PATH="$JQ_DIR:$BASE_PATH"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-select-tests)
 mkdir -p "$TMP_ROOT"
 

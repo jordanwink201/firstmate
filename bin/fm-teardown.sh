@@ -4,6 +4,11 @@
 # clear volatile state, refresh/prune the project's clone for PR-based ship
 # tasks, then print a backlog-refresh reminder for ship and scout teardowns
 # (a secondmate teardown prints none, since secondmates are not backlog items).
+# Before cleanup, teardown appends one idempotent per-task record of the crew
+# session's token usage and routing profile (harness/model/effort, rule= attribution,
+# outcome) to data/routing-ledger.jsonl - summarized by bin/fm-route-report.sh - and,
+# for non-forced ship tasks, an arrival record to data/dashboard-arrivals.jsonl for
+# the read-only dashboard (bin/fm-dashboard-probe.sh).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -142,6 +147,299 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+routing_json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+routing_file_mtime() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || printf '0'
+}
+
+codex_tokens_for_worktree() {
+  local wt=$1 root file cwd mtime best_mtime best_file usage
+  root=${FM_CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -d "$root" ] || return 1
+  best_mtime=0
+  best_file=
+  while IFS= read -r -d '' file; do
+    cwd=$(head -n 1 "$file" 2>/dev/null | jq -r 'select(.type=="session_meta") | .payload.cwd // empty' 2>/dev/null) || continue
+    [ "$cwd" = "$wt" ] || continue
+    mtime=$(routing_file_mtime "$file")
+    if [ "$mtime" -ge "$best_mtime" ]; then
+      best_mtime=$mtime
+      best_file=$file
+    fi
+  done < <(find "$root" -type f -name '*.jsonl' -print0 2>/dev/null)
+  [ -n "$best_file" ] || return 1
+  usage=$(jq -c 'select(.type=="event_msg" and .payload.type=="token_count") | .payload.info.total_token_usage // empty' "$best_file" 2>/dev/null | tail -1) || return 1
+  [ -n "$usage" ] || return 1
+  printf '%s\n' "$usage" | jq -e 'has("input_tokens") and has("output_tokens") and has("cached_input_tokens")' >/dev/null 2>&1 || return 1
+  printf '%s\n' "$usage" | jq -r '[.input_tokens, .output_tokens, .cached_input_tokens, (.reasoning_output_tokens // 0), (.total_tokens // 0)] | @tsv' 2>/dev/null
+}
+
+claude_worktree_slug() {
+  printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'
+}
+
+claude_tokens_for_worktree() {
+  local wt=$1 root dir file sums n fin fout fcached fcreation total_n total_in total_out total_cached total_creation total_tokens
+  root=${FM_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}
+  dir="$root/$(claude_worktree_slug "$wt")"
+  command -v jq >/dev/null 2>&1 || return 1
+  [ -d "$dir" ] || return 1
+  total_n=0
+  total_in=0
+  total_out=0
+  total_cached=0
+  total_creation=0
+  while IFS= read -r -d '' file; do
+    sums=$(jq -sr '
+      reduce (
+        .[]?
+        | select((.type? == "assistant") or (.message.role? == "assistant"))
+        | .message.usage? // empty
+      ) as $u (
+        {n:0, input:0, output:0, cached:0, creation:0};
+        {
+          n: (.n + 1),
+          input: (.input + ($u.input_tokens // 0)),
+          output: (.output + ($u.output_tokens // 0)),
+          cached: (.cached + ($u.cache_read_input_tokens // 0)),
+          creation: (.creation + ($u.cache_creation_input_tokens // 0))
+        }
+      )
+      | [.n, .input, .output, .cached, .creation] | @tsv
+    ' "$file" 2>/dev/null) || return 1
+    [ -n "$sums" ] || return 1
+    read -r n fin fout fcached fcreation <<EOF
+$sums
+EOF
+    total_n=$((total_n + n))
+    total_in=$((total_in + fin))
+    total_out=$((total_out + fout))
+    total_cached=$((total_cached + fcached))
+    total_creation=$((total_creation + fcreation))
+  done < <(find "$dir" -type f -name '*.jsonl' -print0 2>/dev/null)
+  [ "$total_n" -gt 0 ] || return 1
+  total_tokens=$((total_in + total_out + total_cached + total_creation))
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$total_in" "$total_out" "$total_cached" 0 "$total_tokens" "$total_creation"
+}
+
+routing_ledger_has_id() {
+  local ledger=$1 id=$2 escaped_id
+  [ -f "$ledger" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e --arg id "$id" 'select(.id == $id)' "$ledger" >/dev/null 2>&1
+    return $?
+  fi
+  escaped_id=$(routing_json_escape "$id")
+  grep -q "\"id\":\"$escaped_id\"" "$ledger" 2>/dev/null
+}
+
+append_routing_ledger_record() {
+  local tokens=$1 reason=$2 tin=$3 tout=$4 tcached=$5 treasoning=$6 ttotal=$7 tcreation=${8:-0}
+  local ledger ts project_name harness model effort rule outcome escalations json
+  ledger="$DATA/routing-ledger.jsonl"
+  mkdir -p "$DATA" 2>/dev/null || { echo "warning: routing ledger unavailable: cannot create $DATA" >&2; return 0; }
+  # Idempotency: teardown/harvest can fire more than once for a task. mkdir is
+  # atomic, so a concurrent second teardown loses the race and skips; the has_id
+  # check then covers the sequential re-teardown case. Lock lives in $DATA (not
+  # $STATE, which teardown wipes) and is released on function return.
+  local _rlock="$DATA/.routing-ledger.$ID.lock" _lock_mtime _lock_age
+  if ! mkdir "$_rlock" 2>/dev/null; then
+    _lock_mtime=$(routing_file_mtime "$_rlock")
+    _lock_age=$(( $(date +%s) - _lock_mtime ))
+    if [ "$_lock_age" -lt 600 ]; then
+      echo "warning: routing ledger append for $ID skipped: lock held ($_rlock)" >&2
+      return 0
+    fi
+    rmdir "$_rlock" 2>/dev/null || true
+    if ! mkdir "$_rlock" 2>/dev/null; then
+      echo "warning: routing ledger append for $ID skipped: lock contention ($_rlock)" >&2
+      return 0
+    fi
+  fi
+  trap 'rmdir "${_rlock:-}" 2>/dev/null || true; trap - RETURN' RETURN
+  if routing_ledger_has_id "$ledger" "$ID"; then
+    return 0
+  fi
+  ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  project_name=$(basename "$PROJ")
+  harness=$(meta_value "$META" harness)
+  model=$(meta_value "$META" model)
+  effort=$(meta_value "$META" effort)
+  rule=$(meta_value "$META" rule)
+  [ -n "$model" ] || model=default
+  [ -n "$effort" ] || effort=default
+  if [ "$FORCE" = "--force" ]; then
+    outcome=abandoned
+  elif [ "$KIND" = scout ]; then
+    outcome=report
+  elif [ "$KIND" = secondmate ]; then
+    outcome=retired
+  elif [ "$MODE" = local-only ]; then
+    outcome=local-main
+  else
+    outcome=pushed
+  fi
+  escalations=0
+  if [ -f "$STATE/$ID.status" ]; then
+    escalations=$(grep -Ec '^(needs-decision|needs-retier|blocked|failed):' "$STATE/$ID.status" 2>/dev/null || true)
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    json=$(jq -cn \
+      --arg id "$ID" --arg ts "$ts" --arg kind "$KIND" --arg project "$project_name" \
+      --arg rule "$rule" --arg harness "$harness" --arg model "$model" --arg effort "$effort" \
+      --arg tokens "$tokens" --arg reason "$reason" --arg in "$tin" --arg out "$tout" \
+      --arg cached "$tcached" --arg reasoning "$treasoning" --arg total "$ttotal" \
+      --arg cache_creation "$tcreation" --arg outcome "$outcome" --arg escalations "$escalations" '
+      def maybe_num($v): if $v == "" then null else ($v | tonumber? // null) end;
+      def maybe_rule($v): if $v == "" then null elif ($v | test("^[0-9]+$")) then ($v | tonumber) else $v end;
+      # Normalized, harness-agnostic token fields (schema 2). Raw .in is kept for
+      # back-compat but is ambiguous: codex .in already includes cached input,
+      # claude .in is uncached-only. input_total/input_uncached/cache_read mean
+      # the same thing for every harness so consumers never have to branch.
+      (maybe_num($in) // 0) as $rin
+      | (maybe_num($cached) // 0) as $rcached
+      | (maybe_num($cache_creation) // 0) as $rcreation
+      | (if $harness | test("codex") then $rin else ($rin + $rcached + $rcreation) end) as $intotal
+      | (if $harness | test("codex") then ($rin - $rcached) else $rin end) as $inuncached
+      | {
+        schema: 2,
+        id: $id,
+        ts: $ts,
+        kind: $kind,
+        project: $project,
+        rule: maybe_rule($rule),
+        harness: $harness,
+        model: $model,
+        effort: $effort,
+        out: maybe_num($out),
+        in: maybe_num($in),
+        cached: maybe_num($cached),
+        cache_creation: maybe_num($cache_creation),
+        reasoning_out: maybe_num($reasoning),
+        total_tokens: maybe_num($total),
+        input_total: (if $tokens == "available" then $intotal else null end),
+        input_uncached: (if $tokens == "available" then $inuncached else null end),
+        cache_read: (if $tokens == "available" then $rcached else null end),
+        tokens: $tokens,
+        token_reason: (if $reason == "" then null else $reason end),
+        wall_s: null,
+        escalations: maybe_num($escalations),
+        outcome: $outcome,
+        redo_of: null
+      }' 2>/dev/null) || json=
+  else
+    json=
+  fi
+  if [ -z "$json" ]; then
+    json='{"schema":2,"id":"'"$(routing_json_escape "$ID")"'","ts":"'"$(routing_json_escape "$ts")"'","kind":"'"$(routing_json_escape "$KIND")"'","project":"'"$(routing_json_escape "$project_name")"'","rule":null,"harness":"'"$(routing_json_escape "$harness")"'","model":"'"$(routing_json_escape "$model")"'","effort":"'"$(routing_json_escape "$effort")"'","out":null,"in":null,"cached":null,"cache_creation":null,"reasoning_out":null,"total_tokens":null,"input_total":null,"input_uncached":null,"cache_read":null,"tokens":"unavailable","token_reason":"jq_unavailable","wall_s":null,"escalations":'"$escalations"',"outcome":"'"$(routing_json_escape "$outcome")"'","redo_of":null}'
+  fi
+  printf '%s\n' "$json" >> "$ledger" || echo "warning: routing ledger unavailable: cannot append $ledger" >&2
+}
+
+append_dashboard_arrival_record() {
+  local ledger arrived_at display_title latest_status branch commit_short project_name json
+  [ "$KIND" = ship ] || return 0
+  [ "$FORCE" != "--force" ] || return 0
+  ledger="$DATA/dashboard-arrivals.jsonl"
+  mkdir -p "$DATA" 2>/dev/null || { echo "warning: dashboard arrival ledger unavailable: cannot create $DATA" >&2; return 0; }
+  arrived_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  display_title=$(meta_value "$META" title)
+  [ -n "$display_title" ] || display_title=$(meta_value "$META" display_title)
+  [ -n "$display_title" ] || display_title=$ID
+  latest_status=
+  if [ -f "$STATE/$ID.status" ]; then
+    latest_status=$(sed '/^[[:space:]]*$/d' "$STATE/$ID.status" 2>/dev/null | tail -1 || true)
+  fi
+  branch=
+  commit_short=
+  if [ -d "$WT" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    [ "$branch" = HEAD ] && branch=
+    commit_short=$(git -C "$WT" rev-parse --short=9 HEAD 2>/dev/null || true)
+  fi
+  project_name=
+  [ -n "$PROJ" ] && project_name=$(basename "$PROJ")
+  if command -v jq >/dev/null 2>&1; then
+    json=$(jq -cn \
+      --arg task_id "$ID" --arg arrived_at "$arrived_at" --arg display_title "$display_title" \
+      --arg latest_status "$latest_status" --arg pr_url "$PR_URL" --arg branch "$branch" \
+      --arg commit_short "$commit_short" --arg project "$project_name" --arg worktree "$WT" \
+      --arg mode "$MODE" '
+      {
+        task_id: $task_id,
+        arrived_at: $arrived_at,
+        display_title: $display_title,
+        latest_status: $latest_status,
+        pr_url: $pr_url,
+        branch: $branch,
+        commit_short: $commit_short,
+        project: $project,
+        worktree: $worktree,
+        mode: $mode,
+        source: "teardown"
+      }' 2>/dev/null) || json=
+  else
+    json=
+  fi
+  if [ -z "$json" ]; then
+    json='{"task_id":"'"$(routing_json_escape "$ID")"'","arrived_at":"'"$(routing_json_escape "$arrived_at")"'","display_title":"'"$(routing_json_escape "$display_title")"'","latest_status":"'"$(routing_json_escape "$latest_status")"'","pr_url":"'"$(routing_json_escape "$PR_URL")"'","branch":"'"$(routing_json_escape "$branch")"'","commit_short":"'"$(routing_json_escape "$commit_short")"'","project":"'"$(routing_json_escape "$project_name")"'","worktree":"'"$(routing_json_escape "$WT")"'","mode":"'"$(routing_json_escape "$MODE")"'","source":"teardown"}'
+  fi
+  printf '%s\n' "$json" >> "$ledger" || echo "warning: dashboard arrival ledger unavailable: cannot append $ledger" >&2
+}
+
+warn_missing_routing_ledger_coverage() {
+  local ledger count_file count_id
+  ledger="$DATA/routing-ledger.jsonl"
+  [ -d "$STATE" ] || return 0
+  for count_file in "$STATE"/.count-fleet_fm-*; do
+    [ -e "$count_file" ] || continue
+    count_id=${count_file##*/.count-fleet_fm-}
+    routing_ledger_has_id "$ledger" "$count_id" && continue
+    echo "warning: routing ledger missing line for $count_id (coverage marker $count_file)" >&2
+  done
+}
+
+harvest_routing_tokens() {
+  local harness result tin tout tcached treasoning ttotal tcreation
+  harness=$(meta_value "$META" harness)
+  tin=
+  tout=
+  tcached=
+  treasoning=
+  ttotal=
+  tcreation=
+  case "$harness" in
+    codex*)
+      if result=$(codex_tokens_for_worktree "$WT" 2>/dev/null); then
+        read -r tin tout tcached treasoning ttotal <<EOF
+$result
+EOF
+        append_routing_ledger_record available "" "$tin" "$tout" "$tcached" "$treasoning" "$ttotal" ""
+      else
+        append_routing_ledger_record unavailable "codex_jsonl_missing_or_unreadable" "" "" "" "" "" 0
+      fi
+      ;;
+    claude*)
+      if result=$(claude_tokens_for_worktree "$WT" 2>/dev/null); then
+        read -r tin tout tcached treasoning ttotal tcreation <<EOF
+$result
+EOF
+        append_routing_ledger_record available "" "$tin" "$tout" "$tcached" "$treasoning" "$ttotal" "$tcreation"
+      else
+        append_routing_ledger_record unavailable "claude_jsonl_missing_or_unreadable" "" "" "" "" "" 0
+      fi
+      ;;
+    *)
+      append_routing_ledger_record unavailable "unsupported_harness" "" "" "" "" "" 0
+      ;;
+  esac
+  warn_missing_routing_ledger_coverage
+}
+
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -275,12 +573,32 @@ pr_is_merged() {
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# first, then 3-way merges the default branch with HEAD when supported: when HEAD
+# introduces nothing the default branch does not already contain (e.g. its change
+# landed via squash) the merged tree equals the default branch's tree. On older Git
+# without `merge-tree --write-tree`, use a temporary index to check whether the
+# branch patch can be reverse-applied from the default branch without touching the
+# worktree. Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
+content_patch_in_default() {
+  local ref=$1 base tmp_index patch_file rc
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  tmp_index=$(mktemp "${TMPDIR:-/tmp}/fm-content-index.XXXXXX") || return 1
+  patch_file=$(mktemp "${TMPDIR:-/tmp}/fm-content-patch.XXXXXX") || { rm -f "$tmp_index"; return 1; }
+  rm -f "$tmp_index"
+  rc=1
+  if git -C "$WT" diff --binary "$base" HEAD > "$patch_file" 2>/dev/null; then
+    if [ ! -s "$patch_file" ]; then
+      rc=0
+    elif GIT_INDEX_FILE=$tmp_index git -C "$WT" read-tree "$ref" >/dev/null 2>&1 &&
+      GIT_INDEX_FILE=$tmp_index git -C "$WT" apply --cached --reverse --check "$patch_file" >/dev/null 2>&1; then
+      rc=0
+    fi
+  fi
+  rm -f "$tmp_index" "$patch_file"
+  return "$rc"
+}
+
 content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1
@@ -294,9 +612,12 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  if merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null); then
+    merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+    [ "$merged_tree" = "$default_tree" ]
+    return $?
+  fi
+  content_patch_in_default "$ref"
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -989,6 +1310,9 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+harvest_routing_tokens
+append_dashboard_arrival_record
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

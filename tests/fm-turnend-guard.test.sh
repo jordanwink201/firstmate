@@ -713,7 +713,7 @@ printf 'guard-fired\n' >&2
 exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
-  out=$(PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
@@ -919,8 +919,16 @@ test_codex_hook_invokes_shared_guard
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_forces_followup
-test_opencode_plugin_anchors_guard_to_worktree
+if fm_test_node_imports js; then
+  test_opencode_plugin_anchors_guard_to_worktree
+else
+  echo "skip: node cannot import extensionless-ESM plugins (OpenCode dynamic-import test)"
+fi
 test_pi_extension_forces_followup
-test_pi_extension_injects_once_per_logical_agent_run
-test_pi_extension_retries_after_followup_delivery_failure
+if fm_test_node_imports ts; then
+  test_pi_extension_injects_once_per_logical_agent_run
+  test_pi_extension_retries_after_followup_delivery_failure
+else
+  echo "skip: node cannot import TypeScript extensions (Pi dynamic-import tests)"
+fi
 test_grok_hook_invokes_adapter

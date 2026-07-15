@@ -427,7 +427,10 @@ test_watch_restart_reports_healthy_peer_without_attaching() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # A TERM-resistant peer. Deliberately not `node -e ...`: a version-manager
+  # shim (e.g. Volta) makes $! the shim process, which dies on TERM even though
+  # the real node child ignores it, silently breaking the peer-survives premise.
+  bash -c 'trap "" TERM; while :; do sleep 1; done' &
   peer=$!
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"

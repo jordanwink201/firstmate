@@ -34,6 +34,24 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Normalize an inherited locale the host does not ship (e.g. LC_ALL=C.UTF-8 on
+# macOS). Every spawned bash/perl would otherwise print a setlocale warning to
+# stderr, breaking the suites that assert clean or exact stderr/stdout. A
+# UTF-8 locale must remap to another UTF-8 locale (not plain C): the composer
+# classifiers strip multibyte prompt glyphs with character-width parameter
+# expansion, which byte-oriented C collation would silently break.
+if [ -n "${LC_ALL:-}" ] && ! locale -a 2>/dev/null | grep -qix -- "$LC_ALL"; then
+  FM_TEST_LOCALE=C
+  case "$LC_ALL" in
+    *[Uu][Tt][Ff]*)
+      if locale -a 2>/dev/null | grep -qix 'en_US.UTF-8'; then
+        FM_TEST_LOCALE=en_US.UTF-8
+      fi ;;
+  esac
+  export LC_ALL="$FM_TEST_LOCALE" LANG="$FM_TEST_LOCALE" LC_CTYPE="$FM_TEST_LOCALE"
+  unset FM_TEST_LOCALE
+fi
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
@@ -98,6 +116,29 @@ exit 0
 SH
     chmod +x "$fakebin/$tool"
   done
+}
+
+# --- node import-capability probes -------------------------------------------
+#
+# The tracked .opencode plugins are extensionless-ESM .js (no package.json) and
+# the .pi extensions are TypeScript; importing either from a test needs Node's
+# module-syntax detection (>=22.7) and type stripping (>=22.18) respectively.
+# Suites that dynamically import them should probe and skip on older Nodes,
+# mirroring the existing "skip: tsc not found" pattern.
+
+fm_test_node_imports() {
+  local flavor=$1 dir rc
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-node-probe.XXXXXX") || return 1
+  case "$flavor" in
+    ts) printf 'export const ok: number = 1;\n' > "$dir/probe.ts" ;;
+    *) printf 'export const ok = 1;\n' > "$dir/probe.js"; flavor=js ;;
+  esac
+  NODE_NO_WARNINGS=1 node --input-type=module -e \
+    'const { pathToFileURL } = await import("node:url"); await import(pathToFileURL(process.argv[1]).href);' \
+    "$dir/probe.$flavor" >/dev/null 2>&1
+  rc=$?
+  rm -rf "$dir"
+  return "$rc"
 }
 
 # --- deterministic git identity and fixtures --------------------------------
