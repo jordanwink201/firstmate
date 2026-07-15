@@ -50,7 +50,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
-| `fm-dashboard-probe.sh`  | Read-only fleet-dashboard data probe for card, station, per-task pipeline, and replay-source snapshots |
+| `fm-dashboard-probe.sh`  | Read-only fleet-dashboard data probe for card, station, and replay-source snapshots |
 | `fm-dashboard-server.sh` | Private localhost read-only dashboard server with cached snapshot and report APIs    |
 | `fm-route-report.sh`     | Read-only routing-economics summary of `data/routing-ledger.jsonl` (ratios, spend, cache rates, over-tier candidates) |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
