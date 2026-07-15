@@ -677,7 +677,8 @@ test_send_conformance_old_vs_new() {
     "fm-send plain text did not passively prove the tmux target exists before typing"
   assert_contains "$(cat "$log_new")" $'\x1f''capture-pane'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-S'$'\x1f''-40' \
     "fm-send plain text did not inspect the pane for a busy footer before typing"
-  assert_log_order "$log_new" $'\x1f''#{pane_id}' $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
+  assert_log_order "$log_new" $'\x1f''capture-pane'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-S'$'\x1f''-40' \
+    $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send plain text readiness check must happen before literal typing"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send did not send the literal text with send-keys -l"
@@ -691,7 +692,8 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  assert_log_order "$log_new" $'\x1f''#{pane_id}' $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''/some-skill' \
+  assert_log_order "$log_new" $'\x1f''capture-pane'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-S'$'\x1f''-40' \
+    $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''/some-skill' \
     "fm-send /skill readiness check must happen before literal typing"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''/some-skill' \
     "fm-send /skill did not send the literal text with send-keys -l after readiness"

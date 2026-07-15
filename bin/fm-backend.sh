@@ -583,6 +583,9 @@ fm_backend_send_readiness() {  # <backend> <target> [expected-label]
     herdr)
       fm_backend_herdr_send_readiness "$target"
       ;;
+    cmux)
+      fm_backend_cmux_send_readiness "$target" "$expected_label"
+      ;;
     orca|zellij)
       printf 'unknown'
       ;;

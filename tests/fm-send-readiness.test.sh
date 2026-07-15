@@ -266,6 +266,57 @@ test_herdr_readiness_maps_native_and_composer_states() {
   pass "fm_backend_send_readiness: herdr maps native busy and structural composer states"
 }
 
+make_cmux_readiness_fakebin() {  # <dir> -> echoes fakebin
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/cmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+mode=${FM_CMUX_READINESS_MODE:-ready}
+case "${1:-}" in
+  list-panes)
+    if [ "$mode" = missing ]; then
+      printf '{"panes":[]}\n'
+    else
+      printf '{"panes":[{"surface_ids":["sf-1"]}]}\n'
+    fi
+    exit 0
+    ;;
+  read-screen)
+    case "$mode" in
+      capture-unknown) exit 1 ;;
+      busy) printf '{"text":"tool output\\nesc to interrupt"}\n' ;;
+      pending) printf '{"text":"\xe2\x94\x82 > typed already \xe2\x94\x82"}\n' ;;
+      composer-unknown) printf '{"text":"no composer row here"}\n' ;;
+      *) printf '{"text":"\xe2\x94\x82 > \xe2\x94\x82"}\n' ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/cmux"
+  printf '%s\n' "$fb"
+}
+
+readiness_for_cmux_mode() {  # <mode>
+  local mode=$1 dir fb
+  dir="$TMP_ROOT/readiness-cmux-$mode"; mkdir -p "$dir"
+  fb=$(make_cmux_readiness_fakebin "$dir")
+  PATH="$fb:$PATH" FM_CMUX_READINESS_MODE="$mode" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_send_readiness cmux ws-1:sf-1' "$ROOT"
+}
+
+test_cmux_readiness_maps_busy_footer_and_composer_states() {
+  [ "$(readiness_for_cmux_mode ready)" = ready ] || fail "cmux empty composer should map to ready"
+  [ "$(readiness_for_cmux_mode busy)" = busy ] || fail "cmux busy footer should map to busy"
+  [ "$(readiness_for_cmux_mode pending)" = pending ] || fail "cmux pending composer should map to pending"
+  [ "$(readiness_for_cmux_mode capture-unknown)" = unknown ] || fail "cmux unreadable surface should map to unknown"
+  [ "$(readiness_for_cmux_mode composer-unknown)" = unknown ] || fail "cmux borderless capture should map to unknown"
+  [ "$(readiness_for_cmux_mode missing)" = missing ] || fail "cmux missing target should map to missing"
+  pass "fm_backend_send_readiness: cmux maps busy-footer and structural composer states"
+}
+
 make_zellij_readiness_fakebin() {  # <dir> -> echoes fakebin
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -340,4 +391,5 @@ test_key_path_bypasses_readiness
 test_secondmate_marker_still_prepended_when_ready
 test_tmux_readiness_maps_states
 test_herdr_readiness_maps_native_and_composer_states
+test_cmux_readiness_maps_busy_footer_and_composer_states
 test_orca_and_zellij_readiness_are_conservative
