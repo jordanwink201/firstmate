@@ -288,6 +288,7 @@ print_arrival_fleet_rows() {
   [ -f "$ARRIVALS" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   today=$(date '+%Y-%m-%d')
+  # shellcheck disable=SC2094 # This function writes JSON to stdout, not to the arrivals file it reads.
   while IFS= read -r row || [ -n "$row" ]; do
     [ -n "$row" ] || continue
     fields=$(printf '%s\n' "$row" | jq -r '[.task_id // .id // "", .arrived_at // "", .display_title // (.task_id // .id // ""), .latest_status // "", .pr_url // "", .branch // "", .commit_short // "", .project // "", .worktree // "", .mode // ""] | @tsv' 2>/dev/null) || continue

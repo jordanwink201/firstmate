@@ -5,6 +5,7 @@
 #
 # Usage: bin/fm-route-report.sh [ledger-path]
 #   default ledger: $FM_ROOT/data/routing-ledger.jsonl (or ./data/routing-ledger.jsonl)
+# shellcheck disable=SC2016  # jq programs below are intentionally single-quoted.
 set -euo pipefail
 
 usage() {
