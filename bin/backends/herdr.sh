@@ -996,6 +996,25 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   done
 }
 
+# fm_backend_herdr_send_readiness: combine herdr's native agent state with the
+# structural composer-row check used by submit verification. Native busy or an
+# unproven native state blocks before looking at the composer.
+fm_backend_herdr_send_readiness() {  # <target>
+  local busy state
+  busy=$(fm_backend_herdr_busy_state "$1")
+  case "$busy" in
+    busy) printf 'busy'; return 0 ;;
+    idle) : ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  state=$(fm_backend_herdr_composer_state "$1")
+  case "$state" in
+    empty) printf 'ready' ;;
+    pending) printf 'pending' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
 # tmux-kill-window's `|| true` contract). Verified: closing a tab's only pane
 # closes the tab too, so a separate tab close is unnecessary.

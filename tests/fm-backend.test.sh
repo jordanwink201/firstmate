@@ -621,6 +621,15 @@ SH
   printf '%s\n' "$fb"
 }
 
+assert_log_order() {  # <log-file> <before-substring> <after-substring> <msg>
+  local log=$1 before=$2 after=$3 msg=$4 before_line after_line
+  before_line=$(grep -anF -- "$before" "$log" | head -1 | cut -d: -f1)
+  after_line=$(grep -anF -- "$after" "$log" | head -1 | cut -d: -f1)
+  [ -n "$before_line" ] || fail "$msg (missing before call: '$before')"
+  [ -n "$after_line" ] || fail "$msg (missing after call: '$after')"
+  [ "$before_line" -lt "$after_line" ] || fail "$msg"
+}
+
 run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
   local bin=$1 fb=$2 log=$3 home=$4; shift 4
   [ "${1:-}" = -- ] && shift
@@ -664,10 +673,13 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" hello captain
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send plain text: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-plain.txt" 2>&1 \
-    || fail "fm-send plain text: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-plain.txt")"
+  assert_contains "$(cat "$log_new")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
+    "fm-send plain text did not passively prove the tmux target exists before typing"
+  assert_contains "$(cat "$log_new")" $'\x1f''capture-pane'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-S'$'\x1f''-40' \
+    "fm-send plain text did not inspect the pane for a busy footer before typing"
+  assert_log_order "$log_new" $'\x1f''capture-pane'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-S'$'\x1f''-40' \
+    $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
+    "fm-send plain text readiness check must happen before literal typing"
   assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''hello captain' \
     "fm-send did not send the literal text with send-keys -l"
   assert_contains "$(cat "$log_new")" $'\x1f''Enter' "fm-send did not submit with Enter"
@@ -680,12 +692,13 @@ test_send_conformance_old_vs_new() {
   run_send_case "$ROOT" "$fb" "$log_new" "$home" -- "sess:win" /some-skill
   rc_new=$?
   expect_code "$rc_old" "$rc_new" "fm-send /skill: old vs new exit code"
-  strip_send_preflight "$log_old" > "$filtered_old"
-  strip_send_preflight "$log_new" > "$filtered_new"
-  diff -u "$filtered_old" "$filtered_new" > "$TMP_ROOT/send-diff-slash.txt" 2>&1 \
-    || fail "fm-send /skill: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/send-diff-slash.txt")"
+  assert_log_order "$log_new" $'\x1f''capture-pane'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-S'$'\x1f''-40' \
+    $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''/some-skill' \
+    "fm-send /skill readiness check must happen before literal typing"
+  assert_contains "$(cat "$log_new")" $'\x1f''send-keys'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-l'$'\x1f''/some-skill' \
+    "fm-send /skill did not send the literal text with send-keys -l after readiness"
 
-  pass "fm-send.sh: explicit tmux targets are verified, while --key/plain/slash send command shape stays old-compatible"
+  pass "fm-send.sh: --key preserves send shape; text sends add readiness before send-keys -l and Enter submission"
 }
 
 # --- old vs new: fm-peek.sh --------------------------------------------------

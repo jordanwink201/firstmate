@@ -120,6 +120,14 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-composer-lib.sh"
 
+# Shared busy-footer detection (FM_TMUX_BUSY_REGEX_DEFAULT, FM_BUSY_REGEX
+# override). The busy footers are harness-owned, not tmux-owned: fm-crew-state.sh
+# already matches this same regex against cmux captures in its generic
+# busy-corroboration arm, and send readiness below reuses it rather than
+# carrying a second copy that could drift.
+# shellcheck source=bin/fm-tmux-lib.sh
+. "$FM_BACKEND_CMUX_ROOT/bin/fm-tmux-lib.sh"
+
 # Verified minimum: the version the live pass ran against (docs/cmux-backend.md).
 FM_BACKEND_CMUX_MIN_MAJOR=0
 FM_BACKEND_CMUX_MIN_MINOR=64
@@ -596,6 +604,28 @@ fm_backend_cmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
   done
+}
+
+# fm_backend_cmux_send_readiness: cmux has no native agent-state primitive
+# (unlike herdr's agent.get), so busy detection is the harness busy footer on
+# the captured tail - the same signal fm_pane_is_busy reads for tmux - followed
+# by the structural composer-row check used by submit verification. An
+# unreadable surface (including the fresh-surface read-screen failure, see
+# fm_backend_cmux_surface_exists) stays a conservative unknown.
+fm_backend_cmux_send_readiness() {  # <target> [expected-label]
+  local tail40 state
+  tail40=$(fm_backend_cmux_capture "$1" 40 "${2:-}") || { printf 'unknown'; return 0; }
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"; then
+    printf 'busy'
+    return 0
+  fi
+  state=$(fm_backend_cmux_composer_state "$1" "${2:-}")
+  case "$state" in
+    empty) printf 'ready' ;;
+    pending) printf 'pending' ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 # fm_backend_cmux_window_of_workspace: echo "<window_id> <workspace_count>" for
