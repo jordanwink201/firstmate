@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
-# fm-route-report.sh — read-only summary of routing economics from data/routing-ledger.jsonl.
+# fm-route-report.sh - read-only summary of routing economics from data/routing-ledger.jsonl.
 # Answers: claude:codex ratio (tasks + output tokens), spend by role/model/effort/rule,
 # cache rates, coverage gaps, and over-tier candidates. No writes, no side effects.
 #
 # Usage: bin/fm-route-report.sh [ledger-path]
 #   default ledger: $FM_ROOT/data/routing-ledger.jsonl (or ./data/routing-ledger.jsonl)
 set -euo pipefail
+
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
 
 FM_ROOT=${FM_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 LEDGER=${1:-$FM_ROOT/data/routing-ledger.jsonl}
