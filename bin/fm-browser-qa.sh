@@ -244,7 +244,7 @@ probe_page() {
   safe_id=$(safe_page_id "$page_id")
   err_file="$TMP_DIR/probe-$safe_id.err"
   axi selectpage "$page_id" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
-  axi eval 'JSON.stringify({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
+  axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
   parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$out_json" 2> "$err_file" || return 1
 }
 

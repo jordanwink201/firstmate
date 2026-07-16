@@ -108,9 +108,14 @@ case "$cmd" in
     if [ -e "$dir/mismatch_on_final" ] && [ "$count" -gt 1 ]; then
       href="https://example.test/wrong"
     fi
-    node - "$href" "$title" <<'NODE'
-const [href, title] = process.argv.slice(2);
-process.stdout.write(`result: ${JSON.stringify(JSON.stringify({ href, title }))}\n`);
+    expr=${1:?}
+    node - "$href" "$title" "$expr" <<'NODE'
+const [href, title, expr] = process.argv.slice(2);
+const location = { href };
+const document = { title };
+const value = eval(expr);
+// Match real chrome-devtools-axi output: the eval value is stringified twice.
+process.stdout.write(`result: ${JSON.stringify(JSON.stringify(value))}\n`);
 NODE
     ;;
   newpage)
