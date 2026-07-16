@@ -165,6 +165,10 @@ An `ABSENT` `data/captain.md` or `data/secondmates.md` or `data/learnings.md` me
 
 Do not dispatch any work until the tools that work needs are present and GitHub auth is good.
 Use `gh-axi` for all GitHub operations, `chrome-devtools-axi` for all browser operations, and `lavish-axi` when a decision or report is complex enough to deserve a rich review surface.
+For browser QA, use `bin/fm-browser-qa.sh` instead of improvising a browser stack: pass the exact task/preview URL with `--url <exact-url>` and an evidence directory with `--out <dir>`.
+The helper attaches to the authenticated Chrome remote-debugging endpoint at `http://127.0.0.1:9222` by default, opens the exact URL if no exact tab exists, proves the active `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md` evidence.
+It reports unusable browser paths as `blocked: ...`; relay that wording rather than falling back to custom Python websocket code, `chrome-remote-interface`, or Playwright unless the project explicitly owns that tooling.
+The exact QA URL belongs in the task brief or a local playbook, not in tracked firstmate policy; if firstmate is unsure of the exact URL, ask the captain before dispatching QA work.
 Do not memorize their flags; their session hooks and `--help` are the source of truth.
 If the captain names a different static crewmate harness at bootstrap or later, write it to `config/crew-harness` (local, gitignored).
 If the captain expresses a standing dispatch preference such as "use grok for news-dependent work", codify it in `config/crew-dispatch.json` instead.

@@ -290,6 +290,34 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_ship_and_scout_briefs_include_browser_qa_rules() {
+  local home ship_id scout_id ship_brief scout_brief
+  home="$TMP_ROOT/browser-qa-home"
+  mkdir -p "$home/data"
+  ship_id="brief-browser-ship-d1"
+  scout_id="brief-browser-scout-d2"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$ship_id" some-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$scout_id" some-proj --scout >/dev/null 2>&1
+  ship_brief="$home/data/$ship_id/brief.md"
+  scout_brief="$home/data/$scout_id/brief.md"
+
+  for brief in "$ship_brief" "$scout_brief"; do
+    assert_present "$brief" "browser QA brief was not scaffolded"
+    assert_grep "bin/fm-browser-qa.sh --url <exact-url> --out <evidence-dir>" "$brief" \
+      "brief missing fm-browser-qa helper instruction"
+    assert_grep "ask the captain for the exact QA URL" "$brief" \
+      "brief missing exact QA URL escalation"
+    assert_grep "Do not improvise Python websocket, chrome-remote-interface, Playwright, or other browser stacks" "$brief" \
+      "brief missing improvised browser stack prohibition"
+    assert_grep "identity.json" "$brief" \
+      "brief missing required browser evidence list"
+    assert_grep "blocked:" "$brief" \
+      "brief missing blocked browser QA failure rule"
+  done
+  pass "fm-brief.sh: ship and scout briefs include browser QA rules"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -302,3 +330,4 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_ship_and_scout_briefs_include_browser_qa_rules
