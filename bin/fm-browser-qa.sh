@@ -156,6 +156,17 @@ process.stdout.write(String(obj[field] ?? ''));
 NODE
 }
 
+normalize_url() {
+  node - "$1" <<'NODE'
+const [raw] = process.argv.slice(2);
+try {
+  process.stdout.write(new URL(raw).href);
+} catch {
+  process.stdout.write(raw);
+}
+NODE
+}
+
 parse_eval_identity() {
   node - "$1" "$2" <<'NODE'
 const fs = require('fs');
@@ -213,7 +224,7 @@ is_auth_blocked() {
 const [href, title] = process.argv.slice(2);
 const h = String(href || '').toLowerCase();
 const t = String(title || '').toLowerCase();
-if (h.includes('/cdn-cgi/access/login') || t.includes('cloudflare access') || t.includes('sign in')) {
+if (h.includes('/cdn-cgi/access/login') || t.includes('cloudflare access') || /\bsign[ -]?in\b/.test(t)) {
   process.exit(0);
 }
 process.exit(1);
@@ -228,43 +239,43 @@ safe_page_id() {
   printf '%s' "$1" | LC_ALL=C tr -c '[:alnum:]_.-' '_'
 }
 
-select_and_probe() {
-  local page_id=$1 out_json=$2 safe_id select_out select_err eval_out eval_err
+probe_page() {
+  local page_id=$1 out_json=$2 safe_id err_file
   safe_id=$(safe_page_id "$page_id")
-  select_out="$TMP_DIR/select-$safe_id.out"
-  select_err="$TMP_DIR/select-$safe_id.err"
-  eval_out="$TMP_DIR/eval-$safe_id.out"
-  eval_err="$TMP_DIR/eval-$safe_id.err"
+  err_file="$TMP_DIR/probe-$safe_id.err"
+  axi selectpage "$page_id" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
+  axi eval 'JSON.stringify({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
+  parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$out_json" 2> "$err_file" || return 1
+}
 
-  if ! axi selectpage "$page_id" > "$select_out" 2> "$select_err"; then
-    blocked "could not select browser page $page_id: $(cat "$select_err")"
+probe_error() {
+  cat "$TMP_DIR/probe-$(safe_page_id "$1").err"
+}
+
+list_page_ids() {
+  local label=$1
+  if ! axi pages > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
+    blocked "could not enumerate browser pages: $(cat "$TMP_DIR/pages-$label.err")"
   fi
-  if ! axi eval 'JSON.stringify({href: location.href, title: document.title})' > "$eval_out" 2> "$eval_err"; then
-    blocked "could not prove browser page $page_id identity: $(cat "$eval_err")"
-  fi
-  if ! parse_eval_identity "$eval_out" "$out_json" 2> "$TMP_DIR/parse-$safe_id.err"; then
-    blocked "could not parse browser page $page_id identity: $(cat "$TMP_DIR/parse-$safe_id.err")"
-  fi
+  awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$TMP_DIR/pages-$label.txt"
 }
 
 scan_pages() {
-  local scan_dir=$1 ids page_id identity_json href title
+  local scan_dir=$1 ids=$2 mode=$3 page_id identity_json href
   mkdir -p "$scan_dir"
   : > "$scan_dir/matches.tsv"
-  : > "$scan_dir/auth.tsv"
-  if ! axi pages > "$scan_dir/pages.txt" 2> "$scan_dir/pages.err"; then
-    blocked "could not enumerate browser pages: $(cat "$scan_dir/pages.err")"
-  fi
-  ids=$(awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$scan_dir/pages.txt")
   for page_id in $ids; do
     identity_json="$scan_dir/page-$(safe_page_id "$page_id").json"
-    select_and_probe "$page_id" "$identity_json"
-    href=$(json_field "$identity_json" href)
-    title=$(json_field "$identity_json" title)
-    if is_auth_blocked "$href" "$title"; then
-      printf '%s\t%s\t%s\n' "$page_id" "$href" "$title" >> "$scan_dir/auth.tsv"
+    if ! probe_page "$page_id" "$identity_json"; then
+      if [ "$mode" = strict ]; then
+        blocked "could not prove browser page $page_id identity: $(probe_error "$page_id")"
+      fi
+      echo "warning: skipped browser page $page_id: could not probe it" >&2
+      append_warning "skipped browser page $page_id: could not probe it"
+      continue
     fi
-    if [ "$href" = "$TARGET_URL" ]; then
+    href=$(json_field "$identity_json" href)
+    if [ "$href" = "$NORM_TARGET_URL" ]; then
       printf '%s\t%s\n' "$page_id" "$identity_json" >> "$scan_dir/matches.tsv"
     fi
   done
@@ -277,24 +288,44 @@ open_target_page() {
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
 }
 
+NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
+
 SCAN_DIR="$TMP_DIR/scan-initial"
-scan_pages "$SCAN_DIR"
+INITIAL_IDS=$(list_page_ids initial)
+scan_pages "$SCAN_DIR" "$INITIAL_IDS" tolerate
 MATCHES="$SCAN_DIR/matches.tsv"
 MATCH_COUNT=$(count_lines "$MATCHES")
 
 if [ "$MATCH_COUNT" -eq 0 ]; then
   open_target_page
+  POST_IDS=$(list_page_ids after-open)
+  NEW_IDS=
+  for page_id in $POST_IDS; do
+    known=0
+    for known_id in $INITIAL_IDS; do
+      if [ "$page_id" = "$known_id" ]; then
+        known=1
+        break
+      fi
+    done
+    if [ "$known" -eq 0 ]; then
+      NEW_IDS="$NEW_IDS $page_id"
+    fi
+  done
   SCAN_DIR="$TMP_DIR/scan-after-open"
-  scan_pages "$SCAN_DIR"
+  scan_pages "$SCAN_DIR" "$NEW_IDS" strict
   MATCHES="$SCAN_DIR/matches.tsv"
   MATCH_COUNT=$(count_lines "$MATCHES")
-fi
-
-if [ "$MATCH_COUNT" -eq 0 ]; then
-  if [ -s "$SCAN_DIR/auth.tsv" ]; then
-    blocked "authenticated browser session expired"
+  if [ "$MATCH_COUNT" -eq 0 ]; then
+    for page_id in $NEW_IDS; do
+      identity_json="$SCAN_DIR/page-$(safe_page_id "$page_id").json"
+      [ -f "$identity_json" ] || continue
+      if is_auth_blocked "$(json_field "$identity_json" href)" "$(json_field "$identity_json" title)"; then
+        blocked "authenticated browser session expired"
+      fi
+    done
+    blocked "exact QA URL is not open after navigation: $TARGET_URL"
   fi
-  blocked "exact QA URL is not open after navigation: $TARGET_URL"
 fi
 
 if [ "$MATCH_COUNT" -gt 1 ]; then
@@ -304,7 +335,9 @@ fi
 MATCH_LINE=$(sed -n '1p' "$MATCHES")
 PAGE_ID=$(printf '%s\n' "$MATCH_LINE" | cut -f1)
 FINAL_IDENTITY="$TMP_DIR/final-identity.json"
-select_and_probe "$PAGE_ID" "$FINAL_IDENTITY"
+if ! probe_page "$PAGE_ID" "$FINAL_IDENTITY"; then
+  blocked "could not prove browser page $PAGE_ID identity: $(probe_error "$PAGE_ID")"
+fi
 FINAL_HREF=$(json_field "$FINAL_IDENTITY" href)
 FINAL_TITLE=$(json_field "$FINAL_IDENTITY" title)
 
@@ -312,8 +345,8 @@ if is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE"; then
   blocked "authenticated browser session expired"
 fi
 
-if [ "$FINAL_HREF" != "$TARGET_URL" ]; then
-  blocked "selected browser tab URL mismatch: expected $TARGET_URL got $FINAL_HREF"
+if [ "$FINAL_HREF" != "$NORM_TARGET_URL" ]; then
+  blocked "selected browser tab URL mismatch: expected $NORM_TARGET_URL got $FINAL_HREF"
 fi
 
 write_identity "$FINAL_IDENTITY" "$PAGE_ID"

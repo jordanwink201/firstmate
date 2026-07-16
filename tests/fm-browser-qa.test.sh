@@ -88,6 +88,10 @@ case "$cmd" in
   selectpage)
     id=${1:?}
     [ -e "$(page_file "$id")" ] || { echo "no such page: $id" >&2; exit 1; }
+    if [ -e "$dir/unprobeable_$id" ]; then
+      echo "cannot attach to page $id" >&2
+      exit 1
+    fi
     printf '%s\n' "$id" > "$dir/selected"
     printf 'page:\n  title: %s\n' "$(page_title "$id")"
     ;;
@@ -319,6 +323,70 @@ test_auth_blocked_reported() {
   pass "fm-browser-qa.sh: auth/sign-in pages block clearly"
 }
 
+test_unprobeable_unrelated_tab_is_skipped() {
+  local dir fakebin evidence
+  dir="$TMP_ROOT/unprobeable-other"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "chrome://gpu" "GPU Internals"
+  : > "$dir/browser/unprobeable_1"
+  write_page "$dir/browser" 2 "https://example.test/qa" "QA Page"
+  evidence="$dir/evidence"
+
+  run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" >/dev/null
+
+  assert_present "$evidence/identity.json" "identity evidence missing despite healthy target tab"
+  assert_grep "skipped browser page 1: could not probe it" "$evidence/report.md" \
+    "report missing skipped-tab warning"
+  pass "fm-browser-qa.sh: unprobeable unrelated tab is skipped, not blocking"
+}
+
+test_unrelated_sign_in_tab_does_not_report_auth_expired() {
+  local dir fakebin out status
+  dir="$TMP_ROOT/signin-other"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://github.com/login" "Sign in to GitHub"
+  printf '%s\t%s\n' "https://example.test/elsewhere" "Elsewhere" > "$dir/browser/newpage_redirect"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+  status=$?
+  set -e
+  expect_code 1 "$status" "unresolved navigation should exit 1"
+  assert_not_contains "$out" "authenticated browser session expired" \
+    "unrelated sign-in tab must not trigger the auth verdict"
+  assert_contains "$out" "blocked: exact QA URL is not open after navigation" \
+    "unresolved navigation should report the navigation failure"
+  pass "fm-browser-qa.sh: unrelated sign-in tab does not fake an auth verdict"
+}
+
+test_sign_in_substring_title_is_not_auth() {
+  local dir fakebin evidence
+  dir="$TMP_ROOT/signin-substring"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "Assign in bulk"
+  evidence="$dir/evidence"
+
+  run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" >/dev/null
+
+  assert_present "$evidence/identity.json" "identity evidence missing for non-auth title"
+  pass "fm-browser-qa.sh: 'sign in' substring inside a word is not an auth verdict"
+}
+
+test_trailing_slash_url_is_normalized() {
+  local dir fakebin evidence
+  dir="$TMP_ROOT/normalize"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/" "Home"
+  evidence="$dir/evidence"
+
+  run_qa "$fakebin" "$dir/browser" --url "https://example.test" --out "$evidence" >/dev/null
+
+  node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1])); if (j.requested_url !== "https://example.test" || j.active_url !== "https://example.test/") process.exit(1)' "$evidence/identity.json" \
+    || fail "identity evidence did not record requested vs browser-normalized URL"
+  assert_absent "$dir/browser/newpage.log" "normalized match should not open a new tab"
+  pass "fm-browser-qa.sh: browser-equivalent trailing-slash URL matches without a new tab"
+}
+
 test_snapshot_failure_blocks() {
   local dir fakebin out status
   dir="$TMP_ROOT/snapshot-fail"
@@ -384,6 +452,10 @@ test_no_exact_tab_opens_new_page_then_verifies
 test_multiple_exact_tabs_refused
 test_selected_url_mismatch_refused
 test_auth_blocked_reported
+test_unprobeable_unrelated_tab_is_skipped
+test_unrelated_sign_in_tab_does_not_report_auth_expired
+test_sign_in_substring_title_is_not_auth
+test_trailing_slash_url_is_normalized
 test_snapshot_failure_blocks
 test_screenshot_failure_blocks
 test_console_and_network_failures_warn_only

@@ -245,6 +245,7 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 `chrome-devtools-axi` being installed only proves the browser driver is available.
 Browser QA also needs an authenticated Chrome remote-debugging endpoint, defaulting to `http://127.0.0.1:9222`.
 Use `bin/fm-browser-qa.sh --url <exact-url> --out <evidence-dir>` for preview QA.
+Pass the exact intended QA URL: the helper matches only the browser-normalized form of that URL (for example `https://host` matches the `https://host/` Chrome reports) with no fuzzy matching, host aliases, or query rewriting.
 The helper attaches to that browser by default, opens the exact URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
 It also writes best-effort `console.txt` and `network.txt`, recording capture failures as warnings.
 
