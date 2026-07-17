@@ -298,6 +298,71 @@ const html = String.raw`<!doctype html>
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .summary-pipeline {
+      display: grid;
+      gap: 5px;
+      min-width: 0;
+    }
+    .summary-pipeline-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+      font-size: 11px;
+      line-height: 1.2;
+    }
+    .summary-stage {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--ink);
+      font-weight: 760;
+    }
+    .summary-profile {
+      flex: 0 0 auto;
+      max-width: 52%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-weight: 650;
+    }
+    .summary-track {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(6px, 1fr));
+      gap: 3px;
+      min-width: 0;
+    }
+    .summary-segment {
+      height: 6px;
+      border-radius: 999px;
+      background: rgba(104, 114, 118, 0.2);
+      border: 1px solid rgba(104, 114, 118, 0.18);
+      min-width: 0;
+    }
+    .summary-segment[data-state="done"] {
+      background: rgba(46, 125, 79, 0.45);
+      border-color: rgba(46, 125, 79, 0.24);
+    }
+    .summary-segment[data-state="active"] {
+      background: var(--teal);
+      border-color: rgba(29, 118, 111, 0.38);
+    }
+    .summary-segment[data-state="unknown"] {
+      background: var(--red);
+      border-color: rgba(180, 61, 50, 0.32);
+    }
+    .summary-note {
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.25;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .main {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(300px, 390px);
@@ -937,6 +1002,46 @@ const html = String.raw`<!doctype html>
         '</dl>';
     }
 
+    function validationSummaryText(branch) {
+      if (!branch) return '';
+      var pieces = [];
+      if (branch.step) pieces.push(titleize(branch.step));
+      if (branch.status) pieces.push(branch.status);
+      if (branch.findings != null) pieces.push(String(branch.findings) + ' finding' + (branch.findings === 1 ? '' : 's'));
+      if (branch.superseded_status_log) pieces.push('superseded');
+      return pieces.join(' · ');
+    }
+
+    function pipelineSummaryHtml(pipeline) {
+      var active = (pipeline && pipeline.main_stage) || 'unknown';
+      var activeIndex = pipelineStages.findIndex(function(step) { return step.id === active; });
+      var note = pipeline && pipeline.profile === 'cad_no_mistakes'
+        ? validationSummaryText(pipeline.validation_branch)
+        : '';
+      if (!note && pipeline) note = pipeline.next_human_action || pipeline.source_confidence || '';
+      return '<span class="summary-pipeline" aria-label="Pipeline summary" data-stage="' + escapeHtml(active) + '">' +
+        '<span class="summary-pipeline-head">' +
+          '<span class="summary-stage">' + escapeHtml((pipeline && pipeline.stage_label) || titleize(active)) + '</span>' +
+          '<span class="summary-profile">' + escapeHtml(profileLabel(pipeline && pipeline.profile)) + '</span>' +
+        '</span>' +
+        '<span class="summary-track" aria-hidden="true">' + pipelineStages.map(function(step, index) {
+          var stateName = 'pending';
+          if (step.id === active) stateName = active === 'unknown' ? 'unknown' : 'active';
+          else if (activeIndex > -1 && index < activeIndex && active !== 'unknown') stateName = 'done';
+          return '<span class="summary-segment" data-state="' + escapeHtml(stateName) + '"></span>';
+        }).join('') + '</span>' +
+        '<span class="summary-note">' + escapeHtml(note) + '</span>' +
+      '</span>';
+    }
+
+    function shipSummaryCardInnerHtml(ship, station) {
+      var pipeline = pipelineOf(ship, station);
+      return '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
+        '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
+        pipelineSummaryHtml(pipeline) +
+        '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(station) + '">' + escapeHtml(stationLabel(station)) + '</span>' + attentionBadge(ship) + '</span>';
+    }
+
     function actionState(ship, station) {
       if (ship && ship.attention === 'needs_action') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'needs_captain') return { label: 'Needs you', tone: 'needs_action' };
@@ -998,9 +1103,7 @@ const html = String.raw`<!doctype html>
         var station = stationOf(ship.task_id);
         var selected = ship.task_id === state.selectedId ? 'true' : 'false';
         return '<button class="ship-tab" type="button" aria-selected="' + selected + '" data-ship="' + escapeHtml(ship.task_id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '">' +
-          '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
-          '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
-          '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(station) + '">' + escapeHtml(stationLabel(station)) + '</span>' + attentionBadge(ship) + '</span>' +
+          shipSummaryCardInnerHtml(ship, station) +
         '</button>';
       }).join('');
     }
@@ -1013,9 +1116,7 @@ const html = String.raw`<!doctype html>
         var cards = ships.map(function(ship) {
           var selected = ship.task_id === state.selectedId ? 'true' : 'false';
           return '<button class="ship-card" type="button" data-station="' + escapeHtml(def.id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '" data-ship="' + escapeHtml(ship.task_id) + '" aria-selected="' + selected + '">' +
-            '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
-            '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
-            '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(def.id) + '">' + escapeHtml(stationLabel(def.id)) + '</span>' + attentionBadge(ship) + '</span>' +
+            shipSummaryCardInnerHtml(ship, def.id) +
           '</button>';
         }).join('');
         if (!cards) cards = '<div class="empty-lane">No ships</div>';
