@@ -240,6 +240,19 @@ It uses the same live secondmate discovery and propagation helper as bootstrap, 
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Browser QA
+
+`chrome-devtools-axi` being installed only proves the browser driver is available.
+Browser QA also needs an authenticated Chrome remote-debugging endpoint, defaulting to `http://127.0.0.1:9222`.
+Use `bin/fm-browser-qa.sh --url <exact-url> --out <evidence-dir>` for preview QA.
+Pass the exact intended QA URL: the helper matches only the browser-normalized form of that URL (for example `https://host` matches the `https://host/` Chrome reports) with no fuzzy matching, host aliases, or query rewriting.
+The helper attaches to that browser by default, opens the exact URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
+It also writes best-effort `console.txt` and `network.txt`, recording capture failures as warnings.
+
+Do not put project preview URLs in tracked firstmate policy.
+The exact QA URL comes from a task brief, PR, or local playbook; if firstmate is unsure of the exact URL, ask the captain.
+If the authenticated browser is unreachable, expired, on Cloudflare Access, or on a sign-in page, the helper exits with `blocked: ...` wording so the task stops instead of inventing Python websocket, `chrome-remote-interface`, or Playwright fallbacks.
+
 ## X mode (.env)
 
 X mode lets a firstmate instance answer public `@myfirstmate` mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
