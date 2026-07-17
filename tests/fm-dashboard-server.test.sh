@@ -230,6 +230,7 @@ test_routes_and_methods() {
   assert_grep 'renderSelectedPipelineRail' "$body" "dashboard HTML does not include selected-task top pipeline renderer"
   assert_grep 'selected-pipeline-title' "$body" "top rail does not expose selected task identity"
   assert_grep 'selected-pipeline-next' "$body" "top rail does not expose selected task next action"
+  assert_grep 'rail-dot' "$body" "dashboard pipeline rail does not render Jenkins-style status dots"
   assert_no_grep 'function shipSummaryCardInnerHtml' "$body" "top rail still carries fleet-card summary rendering"
   assert_grep 'What matters' "$body" "dashboard detail does not prioritize captain-facing fields"
   assert_grep 'Pipeline' "$body" "dashboard detail does not render the pipeline rail section"

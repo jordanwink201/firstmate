@@ -209,6 +209,7 @@ const html = String.raw`<!doctype html>
       gap: 10px;
       min-width: 0;
       box-shadow: 0 8px 24px rgba(29, 37, 40, 0.08);
+      overflow-x: auto;
     }
     .selected-pipeline-head {
       display: flex;
@@ -573,35 +574,86 @@ const html = String.raw`<!doctype html>
     .validation-rail {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
-      gap: 6px;
       min-width: 0;
+      padding: 8px 0 4px;
+    }
+    .selected-pipeline .pipeline-rail {
+      grid-template-columns: repeat(9, minmax(96px, 1fr));
+      min-width: 860px;
+      padding: 12px 0 6px;
     }
     .rail-step {
-      min-height: 54px;
-      border: 1px solid rgba(104, 114, 118, 0.24);
-      border-radius: 8px;
-      padding: 7px;
+      position: relative;
+      min-height: 68px;
+      border: 0;
+      border-radius: 0;
+      padding: 0 8px;
       display: grid;
-      align-content: center;
-      gap: 3px;
-      background: rgba(255, 253, 248, 0.72);
+      grid-template-rows: 24px auto auto;
+      justify-items: center;
+      align-content: start;
+      gap: 4px;
+      background: transparent;
       color: var(--muted);
-      overflow: hidden;
+      overflow: visible;
+      text-align: center;
+    }
+    .rail-step::before {
+      content: "";
+      position: absolute;
+      top: 10px;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: rgba(104, 114, 118, 0.24);
+      z-index: 0;
+    }
+    .rail-step:first-child::before {
+      left: 50%;
+    }
+    .rail-step:last-child::before {
+      right: 50%;
+    }
+    .rail-dot {
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      border: 3px solid rgba(104, 114, 118, 0.45);
+      background: var(--paper);
+      box-shadow: 0 0 0 4px var(--paper);
+      position: relative;
+      z-index: 1;
     }
     .rail-step[data-state="done"] {
-      border-color: rgba(46, 125, 79, 0.28);
-      background: rgba(46, 125, 79, 0.06);
       color: var(--green);
     }
+    .rail-step[data-state="done"]::before {
+      background: rgba(46, 125, 79, 0.48);
+    }
+    .rail-step[data-state="done"] .rail-dot {
+      border-color: var(--green);
+      background: var(--green);
+    }
     .rail-step[data-state="active"] {
-      border-color: rgba(29, 118, 111, 0.42);
-      background: rgba(29, 118, 111, 0.1);
       color: var(--ink);
     }
+    .rail-step[data-state="active"]::before {
+      background: linear-gradient(90deg, rgba(46, 125, 79, 0.48) 0 50%, rgba(104, 114, 118, 0.24) 50% 100%);
+    }
+    .rail-step[data-state="active"] .rail-dot {
+      border-color: var(--teal);
+      background: var(--teal);
+      box-shadow: 0 0 0 4px var(--paper), 0 0 0 7px rgba(29, 118, 111, 0.16);
+    }
     .rail-step[data-state="unknown"] {
-      border-color: rgba(180, 61, 50, 0.28);
-      background: rgba(180, 61, 50, 0.07);
       color: var(--red);
+    }
+    .rail-step[data-state="unknown"]::before {
+      background: rgba(181, 106, 21, 0.34);
+    }
+    .rail-step[data-state="unknown"] .rail-dot {
+      border-color: var(--amber);
+      background: var(--paper);
     }
     .rail-step strong,
     .rail-step span {
@@ -617,6 +669,9 @@ const html = String.raw`<!doctype html>
     .rail-step span {
       font-size: 12px;
       color: inherit;
+    }
+    .rail-caption {
+      min-height: 15px;
     }
     .pipeline-note {
       border: 1px dashed rgba(104, 114, 118, 0.36);
@@ -938,8 +993,9 @@ const html = String.raw`<!doctype html>
         if (step.id === active) stateName = active === 'unknown' ? 'unknown' : 'active';
         else if (activeIndex > -1 && index < activeIndex && active !== 'unknown') stateName = 'done';
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
+          '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span>' + escapeHtml(stateName === 'active' ? 'Now' : (stateName === 'done' ? 'Done' : '')) + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? 'Now' : (stateName === 'done' ? 'Done' : '')) + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
@@ -953,8 +1009,9 @@ const html = String.raw`<!doctype html>
       return '<div class="validation-rail" aria-label="No-mistakes validation">' + stages.map(function(step) {
         var stateName = step.id === stepId ? 'active' : 'pending';
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
+          '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span>' + escapeHtml(step.id === stepId ? (branch.status || 'Current') : '') + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(step.id === stepId ? (branch.status || 'Current') : '') + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
