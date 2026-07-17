@@ -328,6 +328,8 @@ test_arrival_ledger_keeps_landed_ships_visible_today() {
   yesterday=$(date -v-1d '+%Y-%m-%d' 2>/dev/null || date -d yesterday '+%Y-%m-%d')
   cat > "$data/dashboard-arrivals.jsonl" <<EOF
 {"task_id":"landed-t1","arrived_at":"${today}T12:00:00Z","display_title":"Landed task","latest_status":"done: landed cleanly","pr_url":"https://github.com/example/repo/pull/1","branch":"fm/landed-t1","commit_short":"abc123def","project":"repo","worktree":"/tmp/wt","mode":"no-mistakes","source":"teardown"}
+{"task_id":"blocked-arrival-t2","arrived_at":"${today}T13:00:00Z","display_title":"Blocked arrival","latest_status":"blocked: cleanup blocked by dirty worktree","pr_url":"https://github.com/example/repo/pull/2","mode":"no-mistakes","source":"teardown"}
+{"task_id":"decision-arrival-t3","arrived_at":"${today}T14:00:00Z","display_title":"Decision arrival","latest_status":"needs-decision: cleanup blocked by missing report","pr_url":"https://github.com/example/repo/pull/3","mode":"no-mistakes","source":"teardown"}
 {"task_id":"old-t1","arrived_at":"${yesterday}T12:00:00Z","display_title":"Old task","latest_status":"done: old","source":"teardown"}
 EOF
 
@@ -336,15 +338,25 @@ EOF
     "$out" "same-day arrival ledger row did not appear as archived fleet item"
   [ "$(jq_value '.stations[] | select(.task_id == "landed-t1") | .station' "$out")" = arrived_today ] \
     || fail "same-day arrival did not map to arrived_today"
+  assert_jq_true '[.stations[] | select(.station == "arrived_today") | .task_id] == ["landed-t1"]' \
+    "$out" "same-day attention arrivals still appeared in arrived_today"
   assert_jq_true '.fleet[] | select(.task_id == "landed-t1" and .timeline.source == "arrival-ledger" and .timeline.freshness == "today")' \
     "$out" "same-day arrival did not expose today timeline fields"
+  [ "$(jq_value '.stations[] | select(.task_id == "blocked-arrival-t2") | .station' "$out")" = needs_captain ] \
+    || fail "same-day blocked arrival did not map to needs_captain"
+  assert_jq_true '.fleet[] | select(.task_id == "blocked-arrival-t2" and .attention == "needs_action" and .source == "arrival-ledger" and .current_state.state == "blocked" and .current_state.detail == "cleanup blocked by dirty worktree" and .latest_status.verb == "blocked" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and (.pipeline.evidence | index("source=arrival-ledger")))' \
+    "$out" "blocked arrival ledger row did not stay in the captain-attention pipeline"
+  [ "$(jq_value '.stations[] | select(.task_id == "decision-arrival-t3") | .station' "$out")" = needs_captain ] \
+    || fail "same-day needs-decision arrival did not map to needs_captain"
+  assert_jq_true '.fleet[] | select(.task_id == "decision-arrival-t3" and .attention == "needs_action" and .source == "arrival-ledger" and .current_state.state == "parked" and .current_state.detail == "cleanup blocked by missing report" and .latest_status.verb == "needs-decision" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and (.pipeline.evidence | index("source=arrival-ledger")))' \
+    "$out" "needs-decision arrival ledger row did not stay in the captain-attention pipeline"
   [ "$(jq_value '.stations[] | select(.task_id == "old-t1") | .station' "$out")" = done_earlier ] \
     || fail "previous-day arrival did not map to done_earlier"
   [ "$(jq_value '.fleet[] | select(.task_id == "old-t1") | .pr_url' "$out")" = "" ] \
     || fail "missing arrival pr_url did not remain empty"
   assert_jq_true '[.stations[] | select(.task_id == "old-t1" and .station == "arrived_today")] | length == 0' \
     "$out" "previous-day arrival ledger row still appeared in arrived_today"
-  pass "arrival ledger separates same-day and older landed ships"
+  pass "arrival ledger separates landed ships from attention rows"
 }
 
 test_completion_timeline_drives_done_lanes_and_reconciliation() {

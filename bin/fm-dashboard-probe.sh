@@ -848,7 +848,7 @@ arrival_local_day() {
 
 print_arrival_fleet_rows() {
   local today row fields_json id arrived_at arrived_day station reason display_title latest_status pr_url branch commit_short project worktree mode
-  local status_verb status_note first_ref
+  local status_verb status_note first_ref attention current_state current_detail source
   [ -f "$ARRIVALS" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   today=$(today_local_date)
@@ -869,18 +869,35 @@ print_arrival_fleet_rows() {
     [ -n "$id" ] || continue
     task_id_seen "$id" && continue
     arrived_day=$(arrival_local_day "$arrived_at" 2>/dev/null || true)
-    if [ "$arrived_day" = "$today" ]; then
-      station=arrived_today
-      reason="archived successful ship teardown from today's arrival ledger"
-    else
-      station=done_earlier
-      reason="archived successful ship teardown from prior arrival ledger"
-    fi
     status_verb=$(status_verb_of "$latest_status")
     status_note=$(status_note_of "$latest_status")
+    attention="done"
+    current_state="done"
+    current_detail="successful ship teardown"
+    source=teardown
+    case "$status_verb" in
+      needs-decision|needs_captain|blocked|failed)
+        station=needs_captain
+        reason="arrival ledger latest status requires captain attention"
+        attention=needs_action
+        current_state=parked
+        case "$status_verb" in blocked|failed) current_state=$status_verb ;; esac
+        current_detail=${status_note:-$latest_status}
+        source=arrival-ledger
+        ;;
+      *)
+        if [ "$arrived_day" = "$today" ]; then
+          station=arrived_today
+          reason="archived successful ship teardown from today's arrival ledger"
+        else
+          station=done_earlier
+          reason="archived successful ship teardown from prior arrival ledger"
+        fi
+        ;;
+    esac
     [ -n "$mode" ] || mode=no-mistakes
     set_arrival_timeline "$arrived_at"
-    set_pipeline_fields ship "$mode" "$station" "done" arrival-ledger "successful ship teardown" "$status_verb" "$status_note" "$worktree" archived "" "$pr_url" teardown
+    set_pipeline_fields ship "$mode" "$station" "$current_state" arrival-ledger "$current_detail" "$status_verb" "$status_note" "$worktree" archived "" "$pr_url" "$source"
     STATION_IDS+=("$id")
     STATION_VALUES+=("$station")
     STATION_REASONS+=("$reason")
@@ -891,7 +908,7 @@ print_arrival_fleet_rows() {
     printf '      "task_id": %s,\n' "$(json_string "$id")"
     printf '      "display_title": %s,\n' "$(json_string "$display_title")"
     printf '      "display_subtitle": %s,\n' "$(json_string "$status_note")"
-    printf '      "attention": "done",\n'
+    printf '      "attention": %s,\n' "$(json_string "$attention")"
     printf '      "branch": %s,\n' "$(json_string "$branch")"
     printf '      "commit_short": %s,\n' "$(json_string "$commit_short")"
     printf '      "pr_url": %s,\n' "$(json_string "$pr_url")"
@@ -908,13 +925,13 @@ print_arrival_fleet_rows() {
     printf '      "window": "",\n'
     printf '      "backend_target": "",\n'
     printf '      "backend_liveness": "archived",\n'
-    printf '      "source": "teardown",\n'
+    printf '      "source": %s,\n' "$(json_string "$source")"
     printf '      "arrived_at": %s,\n' "$(json_string "$arrived_at")"
     print_timeline_json
     printf '      "current_state": {\n'
-    printf '        "state": "done",\n'
+    printf '        "state": %s,\n' "$(json_string "$current_state")"
     printf '        "source": "arrival-ledger",\n'
-    printf '        "detail": "successful ship teardown",\n'
+    printf '        "detail": %s,\n' "$(json_string "$current_detail")"
     printf '        "raw": %s\n' "$(json_string "$first_ref")"
     printf '      },\n'
     printf '      "latest_status": {\n'
