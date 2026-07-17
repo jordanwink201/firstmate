@@ -200,14 +200,56 @@ const html = String.raw`<!doctype html>
     .banner strong {
       color: var(--red);
     }
-    .fleet-strip {
+    .selected-pipeline {
+      border: 1px solid var(--line);
+      background: rgba(255, 253, 248, 0.9);
+      border-radius: 8px;
+      padding: 12px;
       display: grid;
-      grid-auto-flow: column;
-      grid-auto-columns: minmax(180px, 240px);
       gap: 10px;
-      overflow-x: auto;
-      padding: 2px 2px 10px;
-      scrollbar-color: var(--line) transparent;
+      min-width: 0;
+      box-shadow: 0 8px 24px rgba(29, 37, 40, 0.08);
+    }
+    .selected-pipeline-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: start;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .selected-pipeline-title {
+      display: grid;
+      gap: 3px;
+      min-width: min(280px, 100%);
+    }
+    .selected-pipeline-title strong {
+      font-size: 18px;
+      line-height: 1.18;
+      overflow-wrap: anywhere;
+    }
+    .selected-pipeline-title span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .selected-pipeline-next {
+      display: grid;
+      gap: 3px;
+      min-width: min(360px, 100%);
+      max-width: 520px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.3;
+    }
+    .selected-pipeline-next strong {
+      color: var(--ink);
+      font-size: 12px;
+      text-transform: uppercase;
     }
     .ship-tab {
       min-height: 88px;
@@ -294,71 +336,6 @@ const html = String.raw`<!doctype html>
       border: 1px solid rgba(180, 61, 50, 0.36);
       color: var(--red);
       background: rgba(180, 61, 50, 0.08);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .summary-pipeline {
-      display: grid;
-      gap: 5px;
-      min-width: 0;
-    }
-    .summary-pipeline-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-width: 0;
-      font-size: 11px;
-      line-height: 1.2;
-    }
-    .summary-stage {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--ink);
-      font-weight: 760;
-    }
-    .summary-profile {
-      flex: 0 0 auto;
-      max-width: 52%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      color: var(--muted);
-      font-weight: 650;
-    }
-    .summary-track {
-      display: grid;
-      grid-template-columns: repeat(9, minmax(6px, 1fr));
-      gap: 3px;
-      min-width: 0;
-    }
-    .summary-segment {
-      height: 6px;
-      border-radius: 999px;
-      background: rgba(104, 114, 118, 0.2);
-      border: 1px solid rgba(104, 114, 118, 0.18);
-      min-width: 0;
-    }
-    .summary-segment[data-state="done"] {
-      background: rgba(46, 125, 79, 0.45);
-      border-color: rgba(46, 125, 79, 0.24);
-    }
-    .summary-segment[data-state="active"] {
-      background: var(--teal);
-      border-color: rgba(29, 118, 111, 0.38);
-    }
-    .summary-segment[data-state="unknown"] {
-      background: var(--red);
-      border-color: rgba(180, 61, 50, 0.32);
-    }
-    .summary-note {
-      min-width: 0;
-      color: var(--muted);
-      font-size: 11px;
-      line-height: 1.25;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -723,9 +700,6 @@ const html = String.raw`<!doctype html>
       .meta {
         justify-content: flex-start;
       }
-      .fleet-strip {
-        grid-auto-columns: minmax(164px, 82vw);
-      }
       .kv {
         grid-template-columns: 1fr;
       }
@@ -744,7 +718,7 @@ const html = String.raw`<!doctype html>
       </div>
     </header>
     <div class="banner" id="banner"></div>
-    <nav class="fleet-strip" id="fleetStrip" aria-label="Fleet"></nav>
+    <section class="selected-pipeline" id="fleetStrip" aria-label="Selected task pipeline"></section>
     <main class="main">
       <section class="map" aria-label="Voyage map">
         <div class="lanes" id="lanes"></div>
@@ -1002,46 +976,6 @@ const html = String.raw`<!doctype html>
         '</dl>';
     }
 
-    function validationSummaryText(branch) {
-      if (!branch) return '';
-      var pieces = [];
-      if (branch.step) pieces.push(titleize(branch.step));
-      if (branch.status) pieces.push(branch.status);
-      if (branch.findings != null) pieces.push(String(branch.findings) + ' finding' + (branch.findings === 1 ? '' : 's'));
-      if (branch.superseded_status_log) pieces.push('superseded');
-      return pieces.join(' · ');
-    }
-
-    function pipelineSummaryHtml(pipeline) {
-      var active = (pipeline && pipeline.main_stage) || 'unknown';
-      var activeIndex = pipelineStages.findIndex(function(step) { return step.id === active; });
-      var note = pipeline && pipeline.profile === 'cad_no_mistakes'
-        ? validationSummaryText(pipeline.validation_branch)
-        : '';
-      if (!note && pipeline) note = pipeline.next_human_action || pipeline.source_confidence || '';
-      return '<span class="summary-pipeline" aria-label="Pipeline summary" data-stage="' + escapeHtml(active) + '">' +
-        '<span class="summary-pipeline-head">' +
-          '<span class="summary-stage">' + escapeHtml((pipeline && pipeline.stage_label) || titleize(active)) + '</span>' +
-          '<span class="summary-profile">' + escapeHtml(profileLabel(pipeline && pipeline.profile)) + '</span>' +
-        '</span>' +
-        '<span class="summary-track" aria-hidden="true">' + pipelineStages.map(function(step, index) {
-          var stateName = 'pending';
-          if (step.id === active) stateName = active === 'unknown' ? 'unknown' : 'active';
-          else if (activeIndex > -1 && index < activeIndex && active !== 'unknown') stateName = 'done';
-          return '<span class="summary-segment" data-state="' + escapeHtml(stateName) + '"></span>';
-        }).join('') + '</span>' +
-        '<span class="summary-note">' + escapeHtml(note) + '</span>' +
-      '</span>';
-    }
-
-    function shipSummaryCardInnerHtml(ship, station) {
-      var pipeline = pipelineOf(ship, station);
-      return '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
-        '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
-        pipelineSummaryHtml(pipeline) +
-        '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(station) + '">' + escapeHtml(stationLabel(station)) + '</span>' + attentionBadge(ship) + '</span>';
-    }
-
     function actionState(ship, station) {
       if (ship && ship.attention === 'needs_action') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'needs_captain') return { label: 'Needs you', tone: 'needs_action' };
@@ -1092,20 +1026,27 @@ const html = String.raw`<!doctype html>
       banner.className = 'banner' + (pieces.length ? ' show' : '');
     }
 
-    function renderStrip() {
+    function renderSelectedPipelineRail() {
       var strip = document.getElementById('fleetStrip');
-      var fleet = (state.snapshot && state.snapshot.fleet) || [];
-      if (!fleet.length) {
-        strip.innerHTML = '';
+      var ship = state.selectedId ? taskById(state.selectedId) : null;
+      if (!ship) {
+        strip.innerHTML = '<div class="detail-empty">No ship selected.</div>';
         return;
       }
-      strip.innerHTML = fleet.map(function(ship) {
-        var station = stationOf(ship.task_id);
-        var selected = ship.task_id === state.selectedId ? 'true' : 'false';
-        return '<button class="ship-tab" type="button" aria-selected="' + selected + '" data-ship="' + escapeHtml(ship.task_id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '">' +
-          shipSummaryCardInnerHtml(ship, station) +
-        '</button>';
-      }).join('');
+      var station = stationOf(ship.task_id);
+      var pipeline = pipelineOf(ship, station);
+      var nextStep = pipeline.next_human_action || nextStepText(ship, station);
+      strip.innerHTML = '<div class="selected-pipeline-head">' +
+        '<div class="selected-pipeline-title">' +
+          '<strong>' + escapeHtml(displayTitle(ship)) + '</strong>' +
+          '<span>' + escapeHtml(ship.task_id) + ' · ' + escapeHtml(profileLabel(pipeline.profile)) + '</span>' +
+        '</div>' +
+        '<div class="selected-pipeline-next">' +
+          '<strong>Next</strong>' +
+          '<span>' + escapeHtml(nextStep) + '</span>' +
+        '</div>' +
+      '</div>' +
+      pipelineRailHtml(pipeline);
     }
 
     function renderLanes() {
@@ -1116,7 +1057,9 @@ const html = String.raw`<!doctype html>
         var cards = ships.map(function(ship) {
           var selected = ship.task_id === state.selectedId ? 'true' : 'false';
           return '<button class="ship-card" type="button" data-station="' + escapeHtml(def.id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '" data-ship="' + escapeHtml(ship.task_id) + '" aria-selected="' + selected + '">' +
-            shipSummaryCardInnerHtml(ship, def.id) +
+            '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
+            '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
+            '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(def.id) + '">' + escapeHtml(stationLabel(def.id)) + '</span>' + attentionBadge(ship) + '</span>' +
           '</button>';
         }).join('');
         if (!cards) cards = '<div class="empty-lane">No ships</div>';
@@ -1208,7 +1151,7 @@ const html = String.raw`<!doctype html>
       }
       renderMeta();
       renderBanner();
-      renderStrip();
+      renderSelectedPipelineRail();
       renderLanes();
       renderOverlay();
       renderDetail();
