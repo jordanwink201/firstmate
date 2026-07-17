@@ -71,12 +71,13 @@ function runGuard(): Promise<{ code: number; stderr: string }> {
 }
 
 // PreToolUse seatbelts (bin/fm-arm-pretool-check.sh, docs/arm-pretool-check.md;
-// bin/fm-cd-pretool-check.sh, docs/cd-guard.md). Both piggyback on this same
+// bin/fm-cd-pretool-check.sh, docs/cd-guard.md; and
+// bin/fm-github-pretool-check.sh). They piggyback on this same
 // extension file rather than separate ones so no extra Pi -e flag is needed at
 // launch - the primary already loads this file for the turn-end guard, and
 // pi.on("tool_call", ...) can block (verified 2026-07-09 against pi 0.80.5:
 // returning {block: true} prevents the bash command from running). Each owner
-// script owns its own decision and is inert outside the real primary checkout.
+// script owns its own decision and fails open outside its relevant scope.
 function runChecker(script: string, command: string): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/${script}`, ["--command", command], {
@@ -99,6 +100,10 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
   return runChecker("fm-cd-pretool-check.sh", command);
 }
 
+function runGithubCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-github-pretool-check.sh", command);
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", () => {
     markLoaded();
@@ -108,6 +113,10 @@ export default function (pi: ExtensionAPI) {
     if (event.type !== "tool_call" || event.toolName !== "bash") return {};
     const command = String((event.input as { command?: unknown })?.command ?? "");
     if (!command) return {};
+    const githubResult = await runGithubCheck(command);
+    if (githubResult.code === 2) {
+      return { block: true, reason: githubResult.stderr.trim() || "denied by the GitHub fork-maintenance PreToolUse seatbelt" };
+    }
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
