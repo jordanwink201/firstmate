@@ -54,6 +54,7 @@ make_case() {
       "effort": "high",
       "backend": "tmux",
       "backend_liveness": "alive",
+      "timeline": {"done_at": "", "done_date": "", "source": "none", "freshness": "none"},
       "pipeline": {
         "profile": "cad_no_mistakes",
         "main_stage": "validation_gate",
@@ -72,11 +73,46 @@ make_case() {
       },
       "current_state": {"state": "working", "source": "run-step", "detail": "validating", "raw": "state: working"},
       "latest_status": {"path": "/tmp/state/alpha-t1.status", "verb": "working", "note": "validating", "raw": "working: validating"}
+    },
+    {
+      "task_id": "beta-t2",
+      "display_title": "Beta completed task",
+      "display_subtitle": "completed earlier",
+      "attention": "done",
+      "branch": "fm/beta-t2",
+      "commit_short": "def456abc",
+      "pr_url": "",
+      "project": "/tmp/projects/beta",
+      "worktree": "/tmp/worktrees/beta-t2",
+      "kind": "ship",
+      "mode": "direct-PR",
+      "harness": "codex",
+      "model": "gpt-5",
+      "effort": "high",
+      "backend": "archived",
+      "backend_liveness": "archived",
+      "timeline": {"done_at": "2026-07-16T13:52:00Z", "done_date": "2026-07-16", "source": "status-line", "freshness": "earlier"},
+      "pipeline": {
+        "profile": "direct_pr",
+        "main_stage": "landed",
+        "stage_label": "Landed",
+        "next_human_action": "move/comment in Basecamp",
+        "source_confidence": "approximate",
+        "evidence": ["timeline.source=status-line"],
+        "validation_branch": null
+      },
+      "current_state": {"state": "done", "source": "status-log", "detail": "completed earlier", "raw": "done: completed earlier"},
+      "latest_status": {"path": "/tmp/state/beta-t2.status", "verb": "done", "note": "completed earlier", "raw": "2026-07-16 done: completed earlier"}
     }
   ],
   "stations": [
-    {"task_id": "alpha-t1", "station": "gate_run", "reason": "working run-step has validation or test wording"}
+    {"task_id": "alpha-t1", "station": "gate_run", "reason": "working run-step has validation or test wording"},
+    {"task_id": "beta-t2", "station": "done_earlier", "reason": "done signal has prior-date evidence"}
   ],
+  "supervision": {
+    "watcher": {"fresh": true, "stale": false, "age_seconds": 12},
+    "wake_queue": {"pending": 1}
+  },
   "replay_sources": {
     "quality": "approximate",
     "minimum_event_ledger": {"implemented": false, "fields": ["timestamp", "task_id", "event_type", "station", "source", "detail"]}
@@ -212,6 +248,88 @@ start_server() {
   printf 'http://127.0.0.1:%s\n' "$port"
 }
 
+assert_dashboard_render_contract() {
+  local html=$1 snapshot=$2
+  node - "$html" "$snapshot" <<'NODE'
+const fs = require('node:fs');
+const vm = require('node:vm');
+
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const snapshot = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const match = html.match(/<script>([\s\S]*)<\/script>/);
+if (!match) throw new Error('dashboard script not found');
+
+class Element {
+  constructor(id) {
+    this.id = id;
+    this.innerHTML = '';
+    this.className = '';
+  }
+}
+
+const elements = new Map(['meta', 'banner', 'fleetStrip', 'lanes', 'overlay', 'detail'].map(id => [id, new Element(id)]));
+const document = {
+  getElementById(id) {
+    if (!elements.has(id)) elements.set(id, new Element(id));
+    return elements.get(id);
+  },
+  addEventListener() {},
+};
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+const context = {
+  document,
+  window: {},
+  Date,
+  Intl,
+  Number,
+  String,
+  Boolean,
+  Promise,
+  setInterval() {},
+  clearInterval() {},
+  fetch() { throw new Error('render contract must not fetch'); },
+};
+context.window.Intl = Intl;
+vm.createContext(context);
+vm.runInContext(match[1].replace(/\n\s*refresh\(\);\s*$/, '\n'), context);
+
+context.state.snapshot = snapshot;
+context.state.loading = false;
+context.state.error = '';
+context.state.stale = false;
+context.state.lastGoodAt = Date.now();
+context.render();
+
+const strip = elements.get('fleetStrip').innerHTML;
+const detail = elements.get('detail').innerHTML;
+const lanes = elements.get('lanes').innerHTML;
+const meta = elements.get('meta').innerHTML;
+const railSteps = (strip.match(/class="rail-step"/g) || []).length;
+
+assert(context.state.selectedId === 'alpha-t1', `expected selected alpha-t1, got ${context.state.selectedId}`);
+assert(strip.includes('selected-pipeline-title'), 'top strip must keep selected task identity');
+assert(strip.includes('class="pipeline-rail"'), 'top strip must render the selected task pipeline rail');
+assert(railSteps === 9, `top pipeline rail should render 9 stages, got ${railSteps}`);
+assert(strip.includes('class="rail-dot"'), 'top pipeline rail should render status dots');
+assert(strip.includes('Validation') && strip.includes('Now'), 'top pipeline rail should mark Validation as current');
+assert(!strip.includes('ship-tab'), 'top strip must not regress to fleet task cards');
+assert(!strip.includes('data-ship='), 'top strip must not contain selectable ship cards');
+assert(detail.includes('Pipeline status'), 'detail panel should keep compact pipeline status');
+assert(!detail.includes('class="pipeline-rail"'), 'detail panel must not duplicate the top pipeline rail');
+assert(lanes.includes('Done Earlier'), 'lanes should render the Done Earlier station');
+assert(lanes.includes('Done Jul 16'), 'done cards should render the completion date chip');
+assert(!lanes.includes('empty-lane'), 'zero-count lanes should stay hidden at runtime');
+assert(!lanes.includes('station-chip'), 'lane cards should not repeat station chips at runtime');
+assert(!lanes.includes('attention-badge'), 'lane cards should not repeat needs-action badges at runtime');
+assert(meta.includes('2 records'), 'meta should count restored fleet records');
+assert(meta.includes('state lag'), 'meta should surface supervision lag when wake queue is pending');
+NODE
+}
+
 test_routes_and_methods() {
   local dir base code body headers
   dir=$(make_case routes)
@@ -226,14 +344,18 @@ test_routes_and_methods() {
   assert_grep 'Open PR' "$body" "dashboard HTML does not render a PR link in details"
   assert_grep 'attention-badge' "$body" "dashboard HTML does not include needs-action badge markup"
   assert_grep 'Arrived Today' "$body" "dashboard HTML does not expose Arrived Today lane"
+  assert_grep 'Done Earlier' "$body" "dashboard HTML does not expose Done Earlier lane"
+  assert_grep 'Needs Reconciliation' "$body" "dashboard HTML does not expose Needs Reconciliation lane"
   assert_grep 'aria-label="Selected task pipeline"' "$body" "top rail is not scoped to the selected task pipeline"
   assert_grep 'renderSelectedPipelineRail' "$body" "dashboard HTML does not include selected-task top pipeline renderer"
   assert_grep 'selected-pipeline-title' "$body" "top rail does not expose selected task identity"
   assert_grep 'selected-pipeline-next' "$body" "top rail does not expose selected task next action"
   assert_grep 'rail-dot' "$body" "dashboard pipeline rail does not render Jenkins-style status dots"
+  assert_grep 'doneChipHtml' "$body" "dashboard HTML does not include done date chip renderer"
   assert_no_grep 'function shipSummaryCardInnerHtml' "$body" "top rail still carries fleet-card summary rendering"
   assert_grep 'What matters' "$body" "dashboard detail does not prioritize captain-facing fields"
-  assert_grep 'Pipeline' "$body" "dashboard detail does not render the pipeline rail section"
+  assert_grep 'Pipeline status' "$body" "dashboard detail does not render compact pipeline status"
+  assert_no_grep 'pipelineRailHtml(pipeline) +' "$body" "dashboard detail still duplicates the top pipeline rail"
   assert_grep 'pipelineRailHtml' "$body" "dashboard HTML does not include pipeline rail renderer"
   assert_grep 'No-mistakes' "$body" "dashboard detail does not render the no-mistakes sub-rail section"
   assert_grep 'validationBranchHtml' "$body" "dashboard HTML does not include validation branch renderer"
@@ -247,7 +369,7 @@ test_routes_and_methods() {
   headers="$dir/snapshot.headers"
   code=$(http_request_with_headers GET "$base" /api/snapshot "$body" "$headers")
   [ "$code" = 200 ] || fail "/api/snapshot returned HTTP $code: $(cat "$body")"
-  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .stations[0].station == "gate_run"' "$body" >/dev/null \
+  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
     || fail "/api/snapshot did not return valid probe JSON: $(cat "$body")"
   [ "$(header_value "$headers" x-firstmate-cache)" = fresh ] \
     || fail "/api/snapshot did not mark a fresh cache response: $(cat "$headers")"
@@ -282,6 +404,23 @@ test_routes_and_methods() {
   jq -e '.error == "not_found"' "$body" >/dev/null || fail "404 body was not clear JSON: $(cat "$body")"
 
   pass "dashboard server serves HTML, cached snapshot, report, health, 405, and 404"
+}
+
+test_dashboard_runtime_keeps_top_pipeline_rail() {
+  local dir base code body snapshot
+  dir=$(make_case runtime-top-rail)
+  base=$(start_server "$dir")
+
+  body="$dir/home.html"
+  code=$(http_request GET "$base" / "$body")
+  [ "$code" = 200 ] || fail "/ returned HTTP $code"
+
+  snapshot="$dir/snapshot.json"
+  code=$(http_request GET "$base" /api/snapshot "$snapshot")
+  [ "$code" = 200 ] || fail "/api/snapshot returned HTTP $code: $(cat "$snapshot")"
+
+  assert_dashboard_render_contract "$body" "$snapshot"
+  pass "dashboard runtime keeps restored pipeline and station rendering"
 }
 
 test_initial_no_cache_snapshot_waits_for_boot_probe() {
@@ -434,6 +573,7 @@ test_concurrent_snapshot_requests_share_one_probe_run() {
 }
 
 test_routes_and_methods
+test_dashboard_runtime_keeps_top_pipeline_rail
 test_initial_no_cache_snapshot_waits_for_boot_probe
 test_warm_cache_snapshot_does_not_launch_probe
 test_due_refresh_runs_in_background_while_serving_cache

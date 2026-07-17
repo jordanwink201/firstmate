@@ -23,6 +23,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 ARRIVALS="$DATA/dashboard-arrivals.jsonl"
 CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
+CASTING_OFF_GRACE_SECONDS="${FM_DASHBOARD_CASTING_OFF_GRACE_SECONDS:-600}"
+WATCHER_GRACE_SECONDS="${FM_DASHBOARD_WATCHER_GRACE_SECONDS:-300}"
+case "$CASTING_OFF_GRACE_SECONDS" in ""|*[!0-9]*) CASTING_OFF_GRACE_SECONDS=600 ;; esac
+case "$WATCHER_GRACE_SECONDS" in ""|*[!0-9]*) WATCHER_GRACE_SECONDS=300 ;; esac
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -91,20 +95,237 @@ last_nonblank_line() {
   awk 'NF { line = $0 } END { if (line != "") print line }' "$1"
 }
 
+status_body_of() {
+  local s
+  s=$(trim "${1:-}")
+  s=$(printf '%s' "$s" | sed -E '
+    s/^\[([0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?([.][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?)\][[:space:]]*//;
+    s/^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?([.][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?[[:space:]]+//;
+    s/^[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+//;
+  ')
+  trim "$s"
+}
+
+normalize_status_verb() {
+  case "${1:-}" in
+    done|complete|completed|landed|archived) printf 'done' ;;
+    *) printf '%s' "${1:-}" ;;
+  esac
+}
+
 status_verb_of() {
-  local v=${1%%:*}
-  trim "$v"
+  local body marker first first_word
+  body=$(status_body_of "${1:-}")
+  first=${body%%:*}
+  first=$(trim "$first")
+  first_word=${first%% *}
+  case "$first_word" in
+    done|complete|completed|landed|archived|failed|blocked|needs-decision|paused|working|resolved)
+      marker=$first_word
+      ;;
+    *)
+      marker=$(printf '%s\n' "$body" | sed -nE 's/.*[[:space:]](done|complete|completed|landed|archived):.*/\1/p' | head -1)
+      ;;
+  esac
+  if [ -z "$marker" ]; then
+    marker=$first_word
+  fi
+  normalize_status_verb "$marker"
 }
 
 status_note_of() {
-  case "${1:-}" in
-    *:*) trim "${1#*:}" ;;
-    *) trim "${1:-}" ;;
+  local body verb note
+  body=$(status_body_of "${1:-}")
+  verb=$(status_verb_of "${1:-}")
+  if [ "$verb" = "done" ]; then
+    note=$(printf '%s\n' "$body" | sed -E '
+      s/^(done|complete|completed|landed|archived)([[:space:]]*:)?[[:space:]]*//;
+      s/^.*[[:space:]](done|complete|completed|landed|archived):[[:space:]]*//;
+    ')
+    trim "$note"
+    return
+  fi
+  case "$body" in
+    *:*) trim "${body#*:}" ;;
+    *) trim "$body" ;;
   esac
 }
 
 collapse_spaces() {
   printf '%s\n' "${1:-}" | awk '{$1=$1; print}'
+}
+
+today_local_date() {
+  if [ -n "${FM_DASHBOARD_TODAY:-}" ]; then
+    printf '%s' "$FM_DASHBOARD_TODAY"
+  else
+    date '+%Y-%m-%d'
+  fi
+}
+
+now_epoch() {
+  if [ -n "${FM_DASHBOARD_NOW_EPOCH:-}" ]; then
+    printf '%s' "$FM_DASHBOARD_NOW_EPOCH"
+  else
+    date '+%s'
+  fi
+}
+
+epoch_to_local_date() {
+  local epoch=$1
+  case "$epoch" in ""|*[!0-9]*) return 1 ;; esac
+  if [ "$(uname)" = Darwin ]; then
+    date -r "$epoch" '+%Y-%m-%d' 2>/dev/null
+  else
+    date -d "@$epoch" '+%Y-%m-%d' 2>/dev/null
+  fi
+}
+
+epoch_to_utc_iso() {
+  local epoch=$1
+  case "$epoch" in ""|*[!0-9]*) return 1 ;; esac
+  if [ "$(uname)" = Darwin ]; then
+    date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null
+  else
+    date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null
+  fi
+}
+
+timestamp_to_local_date() {
+  local ts=${1:-} norm epoch
+  [ -n "$ts" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    norm=$(printf '%s' "$ts" | sed -E 's/([+-][0-9]{2}):([0-9]{2})$/\1\2/')
+    case "$norm" in
+      ????-??-??T??:??:??Z)
+        epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$norm" '+%s' 2>/dev/null || true)
+        ;;
+      ????-??-??T??:??:??[+-]????)
+        epoch=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$norm" '+%s' 2>/dev/null || true)
+        ;;
+      ????-??-??T??:??:??)
+        epoch=$(date -j -f '%Y-%m-%dT%H:%M:%S' "$norm" '+%s' 2>/dev/null || true)
+        ;;
+      ????-??-??\ ??:??:??)
+        epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$norm" '+%s' 2>/dev/null || true)
+        ;;
+    esac
+    if [ -n "${epoch:-}" ]; then
+      epoch_to_local_date "$epoch" && return 0
+    fi
+  else
+    date -d "$ts" '+%Y-%m-%d' 2>/dev/null && return 0
+  fi
+  case "$ts" in
+    ????-??-??*) printf '%s\n' "${ts:0:10}" ;;
+    *) return 1 ;;
+  esac
+}
+
+status_line_timestamp() {
+  local line=${1:-} ts
+  ts=$(printf '%s\n' "$line" | grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?([.][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?' | head -1 || true)
+  if [ -n "$ts" ]; then
+    printf '%s' "$ts"
+    return
+  fi
+  printf '%s\n' "$line" | grep -Eo '^\[?[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1 | tr -d '[' || true
+}
+
+timeline_freshness_for_date() {
+  local done_date=$1 today
+  [ -n "$done_date" ] || { printf 'none'; return; }
+  today=$(today_local_date)
+  if [ "$done_date" = "$today" ]; then
+    printf 'today'
+  elif [ "$done_date" \< "$today" ]; then
+    printf 'earlier'
+  else
+    printf 'future'
+  fi
+}
+
+set_timeline_from_timestamp() {
+  local ts=$1 source=$2
+  TL_DONE_AT=$ts
+  TL_DONE_DATE=$(timestamp_to_local_date "$ts" 2>/dev/null || true)
+  TL_SOURCE=$source
+  TL_FRESHNESS=$(timeline_freshness_for_date "$TL_DONE_DATE")
+}
+
+set_timeline_from_epoch() {
+  local epoch=$1 source=$2 iso day
+  iso=$(epoch_to_utc_iso "$epoch" 2>/dev/null || true)
+  day=$(epoch_to_local_date "$epoch" 2>/dev/null || true)
+  TL_DONE_AT=$iso
+  TL_DONE_DATE=$day
+  TL_SOURCE=$source
+  TL_FRESHNESS=$(timeline_freshness_for_date "$TL_DONE_DATE")
+}
+
+clear_timeline() {
+  TL_DONE_AT=
+  TL_DONE_DATE=
+  TL_SOURCE=none
+  TL_FRESHNESS=none
+}
+
+set_completion_timeline() {
+  local current_state=$1 status_verb=$2 status_line=$3 status_file=$4 meta=$5 ts mtime
+  clear_timeline
+
+  if [ "$status_verb" = "done" ]; then
+    ts=$(status_line_timestamp "$status_line")
+    if [ -n "$ts" ]; then
+      set_timeline_from_timestamp "$ts" status-line
+      return
+    fi
+    if [ -f "$status_file" ]; then
+      mtime=$(stat_mtime "$status_file" || true)
+      if [ -n "$mtime" ]; then
+        set_timeline_from_epoch "$mtime" status-file-mtime
+        return
+      fi
+    fi
+    if [ -f "$meta" ]; then
+      mtime=$(stat_mtime "$meta" || true)
+      if [ -n "$mtime" ]; then
+        set_timeline_from_epoch "$mtime" meta-file-mtime
+        return
+      fi
+    fi
+  elif [ "$current_state" = "done" ] && [ -f "$meta" ]; then
+    mtime=$(stat_mtime "$meta" || true)
+    if [ -n "$mtime" ]; then
+      set_timeline_from_epoch "$mtime" meta-file-mtime
+      return
+    fi
+  fi
+}
+
+set_arrival_timeline() {
+  local arrived_at=$1
+  clear_timeline
+  [ -n "$arrived_at" ] || return 0
+  set_timeline_from_timestamp "$arrived_at" arrival-ledger
+}
+
+print_timeline_json() {
+  printf '      "timeline": {\n'
+  printf '        "done_at": %s,\n' "$(json_string "$TL_DONE_AT")"
+  printf '        "done_date": %s,\n' "$(json_string "$TL_DONE_DATE")"
+  printf '        "source": %s,\n' "$(json_string "$TL_SOURCE")"
+  printf '        "freshness": %s\n' "$(json_string "$TL_FRESHNESS")"
+  printf '      },\n'
+}
+
+file_age_seconds() {
+  local path=$1 mtime now
+  [ -f "$path" ] || return 1
+  mtime=$(stat_mtime "$path" || true)
+  now=$(now_epoch)
+  case "$mtime:$now" in *[!0-9:]*|:*) return 1 ;; esac
+  printf '%s' "$((now - mtime))"
 }
 
 clean_display_text() {
@@ -183,7 +404,8 @@ attention_for() {
   local station=$1 current_state=$2 status_verb=$3
   case "$station" in
     needs_captain) printf 'needs_action'; return ;;
-    arrived_today) printf 'done'; return ;;
+    needs_reconciliation) printf 'needs_action'; return ;;
+    arrived_today|done_earlier) printf 'done'; return ;;
   esac
   case "$status_verb" in
     needs-decision|blocked|failed|needs_captain) printf 'needs_action'; return ;;
@@ -245,30 +467,39 @@ validation_detail() {
 
 station_for() {
   local current_state=$1 current_source=$2 current_detail=$3 status_verb=$4 worktree=$5 liveness=$6 target=$7
-  if [ "$current_state" = "done" ] || [ "$status_verb" = "done" ]; then
-    printf 'arrived_today|done signal is available from current state or status log'
-    return
-  fi
+  local done_freshness=${8:-none} meta_age=${9:-}
   case "$current_state" in
     parked|blocked|failed)
       printf 'needs_captain|current state requires captain attention'
       return
       ;;
   esac
+  if [ "$current_state" = working ]; then
+    case "$current_source" in
+      run-step|pane)
+        if [ "$current_source" = run-step ] && validation_detail "$current_detail"; then
+          printf 'gate_run|working run-step has validation or test wording'
+        else
+          printf 'underway|working source has no validation or test wording'
+        fi
+        return
+        ;;
+    esac
+  fi
+  if [ "$current_state" = "done" ] || [ "$status_verb" = "done" ]; then
+    case "$done_freshness" in
+      today|future) printf 'arrived_today|done signal has date evidence for today' ;;
+      earlier) printf 'done_earlier|done signal has prior-date evidence' ;;
+      *) printf 'done_earlier|done signal has no same-day evidence' ;;
+    esac
+    return
+  fi
   case "$status_verb" in
     needs-decision|blocked|failed)
       printf 'needs_captain|latest status event requires captain attention'
       return
       ;;
   esac
-  if [ "$current_state" = working ]; then
-    if [ "$current_source" = run-step ] && validation_detail "$current_detail"; then
-      printf 'gate_run|working run-step has validation or test wording'
-    else
-      printf 'underway|working source has no validation or test wording'
-    fi
-    return
-  fi
   if [ -z "$worktree" ] || [ ! -d "$worktree" ]; then
     printf 'unknown|worktree is missing or torn down'
     return
@@ -277,7 +508,11 @@ station_for() {
     printf 'unknown|backend target is missing, dead, or uncertain'
     return
   fi
-  printf 'casting_off|live metadata exists but no strong current state is available yet'
+  if [ -n "$meta_age" ] && [ "$meta_age" -ge 0 ] && [ "$meta_age" -le "$CASTING_OFF_GRACE_SECONDS" ]; then
+    printf 'casting_off|recent live metadata exists but no strong current state is available yet'
+  else
+    printf 'needs_reconciliation|live metadata exists but current task state is incomplete'
+  fi
 }
 
 stage_label_for() {
@@ -367,7 +602,15 @@ validation_status_for() {
 }
 
 pipeline_source_confidence_for() {
-  local source=$1 current_source=$2 current_state=$3 worktree=$4 liveness=$5 target=$6 stage=$7
+  local source=$1 current_source=$2 current_state=$3 worktree=$4 liveness=$5 target=$6 stage=$7 station=${8:-}
+  if [ "$station" = needs_reconciliation ]; then
+    printf 'unknown'
+    return
+  fi
+  if [ "$station" = done_earlier ]; then
+    printf 'approximate'
+    return
+  fi
   if [ "$source" = teardown ] || [ "$liveness" = archived ]; then
     printf 'approximate'
     return
@@ -400,10 +643,16 @@ pipeline_stage_for() {
     printf 'landed'
     return
   fi
-  if [ "$station" = unknown ]; then
-    printf 'unknown'
-    return
-  fi
+  case "$station" in
+    done_earlier)
+      printf 'landed'
+      return
+      ;;
+    unknown|needs_reconciliation)
+      printf 'unknown'
+      return
+      ;;
+  esac
   case "$profile" in
     cad_no_mistakes)
       if [ "$current_state" = "done" ] || [ "$status_verb" = "done" ] || [ "$station" = arrived_today ]; then
@@ -511,7 +760,7 @@ set_pipeline_fields() {
   PIPE_PROFILE=$(pipeline_profile_for "$kind" "$mode")
   PIPE_MAIN_STAGE=$(pipeline_stage_for "$PIPE_PROFILE" "$station" "$current_state" "$current_detail" "$status_verb" "$status_note" "$pr_url" "$source")
   PIPE_STAGE_LABEL=$(stage_label_for "$PIPE_MAIN_STAGE")
-  PIPE_SOURCE_CONFIDENCE=$(pipeline_source_confidence_for "$source" "$current_source" "$current_state" "$worktree" "$liveness" "$target" "$PIPE_MAIN_STAGE")
+  PIPE_SOURCE_CONFIDENCE=$(pipeline_source_confidence_for "$source" "$current_source" "$current_state" "$worktree" "$liveness" "$target" "$PIPE_MAIN_STAGE" "$station")
   PIPE_VALIDATION_STEP=
   PIPE_VALIDATION_STATUS=
   PIPE_VALIDATION_FINDINGS=
@@ -525,6 +774,7 @@ set_pipeline_fields() {
   [ -n "$current_source" ] && PIPE_EVIDENCE+=("current_state.source=$current_source")
   [ -n "$station" ] && PIPE_EVIDENCE+=("station=$station")
   [ -n "$status_verb" ] && PIPE_EVIDENCE+=("status.verb=$status_verb")
+  [ -n "${TL_SOURCE:-}" ] && [ "${TL_SOURCE:-none}" != none ] && PIPE_EVIDENCE+=("timeline.source=$TL_SOURCE")
   [ -n "$pr_url" ] && PIPE_EVIDENCE+=("pr_url=present")
   if [ -z "$worktree" ] || { [ -n "$worktree" ] && [ ! -d "$worktree" ]; }; then
     PIPE_EVIDENCE+=("worktree=missing")
@@ -535,7 +785,11 @@ set_pipeline_fields() {
   if text_has "$current_detail" 'status-log superseded'; then
     PIPE_VALIDATION_SUPERSEDED=true
   fi
-  PIPE_NEXT_HUMAN_ACTION=$(pipeline_next_action_for "$PIPE_PROFILE" "$PIPE_MAIN_STAGE" "$current_state" "$status_verb" "$PIPE_SOURCE_CONFIDENCE" "$PIPE_VALIDATION_SUPERSEDED")
+  if [ "$station" = needs_reconciliation ]; then
+    PIPE_NEXT_HUMAN_ACTION="reconcile task state"
+  else
+    PIPE_NEXT_HUMAN_ACTION=$(pipeline_next_action_for "$PIPE_PROFILE" "$PIPE_MAIN_STAGE" "$current_state" "$status_verb" "$PIPE_SOURCE_CONFIDENCE" "$PIPE_VALIDATION_SUPERSEDED")
+  fi
   if [ "$PIPE_PROFILE" = cad_no_mistakes ]; then
     PIPE_VALIDATION_STEP=$(validation_step_from_detail "$current_detail")
     PIPE_VALIDATION_STATUS=$(validation_status_for "$current_state" "$current_detail")
@@ -589,37 +843,47 @@ task_id_seen() {
 arrival_local_day() {
   local ts=$1
   [ -n "$ts" ] || return 1
-  if [ "$(uname)" = Darwin ]; then
-    date -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" '+%Y-%m-%d' 2>/dev/null && return 0
-  else
-    date -d "$ts" '+%Y-%m-%d' 2>/dev/null && return 0
-  fi
-  printf '%s\n' "${ts%%T*}"
+  timestamp_to_local_date "$ts"
 }
 
 print_arrival_fleet_rows() {
-  local today row fields id arrived_at display_title latest_status pr_url branch commit_short project worktree mode
+  local today row fields_json id arrived_at arrived_day station reason display_title latest_status pr_url branch commit_short project worktree mode
   local status_verb status_note first_ref
   [ -f "$ARRIVALS" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
-  today=$(date '+%Y-%m-%d')
+  today=$(today_local_date)
   # shellcheck disable=SC2094 # This function writes JSON to stdout, not to the arrivals file it reads.
   while IFS= read -r row || [ -n "$row" ]; do
     [ -n "$row" ] || continue
-    fields=$(printf '%s\n' "$row" | jq -r '[.task_id // .id // "", .arrived_at // "", .display_title // (.task_id // .id // ""), .latest_status // "", .pr_url // "", .branch // "", .commit_short // "", .project // "", .worktree // "", .mode // ""] | @tsv' 2>/dev/null) || continue
-    IFS=$'\t' read -r id arrived_at display_title latest_status pr_url branch commit_short project worktree mode <<EOF
-$fields
-EOF
+    fields_json=$(printf '%s\n' "$row" | jq -c '[.task_id // .id // "", .arrived_at // "", .display_title // (.task_id // .id // ""), .latest_status // "", .pr_url // "", .branch // "", .commit_short // "", .project // "", .worktree // "", .mode // ""]' 2>/dev/null) || continue
+    id=$(printf '%s\n' "$fields_json" | jq -r '.[0]')
+    arrived_at=$(printf '%s\n' "$fields_json" | jq -r '.[1]')
+    display_title=$(printf '%s\n' "$fields_json" | jq -r '.[2]')
+    latest_status=$(printf '%s\n' "$fields_json" | jq -r '.[3]')
+    pr_url=$(printf '%s\n' "$fields_json" | jq -r '.[4]')
+    branch=$(printf '%s\n' "$fields_json" | jq -r '.[5]')
+    commit_short=$(printf '%s\n' "$fields_json" | jq -r '.[6]')
+    project=$(printf '%s\n' "$fields_json" | jq -r '.[7]')
+    worktree=$(printf '%s\n' "$fields_json" | jq -r '.[8]')
+    mode=$(printf '%s\n' "$fields_json" | jq -r '.[9]')
     [ -n "$id" ] || continue
     task_id_seen "$id" && continue
-    [ "$(arrival_local_day "$arrived_at")" = "$today" ] || continue
+    arrived_day=$(arrival_local_day "$arrived_at" 2>/dev/null || true)
+    if [ "$arrived_day" = "$today" ]; then
+      station=arrived_today
+      reason="archived successful ship teardown from today's arrival ledger"
+    else
+      station=done_earlier
+      reason="archived successful ship teardown from prior arrival ledger"
+    fi
     status_verb=$(status_verb_of "$latest_status")
     status_note=$(status_note_of "$latest_status")
     [ -n "$mode" ] || mode=no-mistakes
-    set_pipeline_fields ship "$mode" arrived_today "done" arrival-ledger "successful ship teardown" "$status_verb" "$status_note" "$worktree" archived "" "$pr_url" teardown
+    set_arrival_timeline "$arrived_at"
+    set_pipeline_fields ship "$mode" "$station" "done" arrival-ledger "successful ship teardown" "$status_verb" "$status_note" "$worktree" archived "" "$pr_url" teardown
     STATION_IDS+=("$id")
-    STATION_VALUES+=("arrived_today")
-    STATION_REASONS+=("archived successful ship teardown from today's arrival ledger")
+    STATION_VALUES+=("$station")
+    STATION_REASONS+=("$reason")
     [ "$first" -eq 1 ] || printf ',\n'
     first=0
     first_ref="$ARRIVALS"
@@ -646,6 +910,7 @@ EOF
     printf '      "backend_liveness": "archived",\n'
     printf '      "source": "teardown",\n'
     printf '      "arrived_at": %s,\n' "$(json_string "$arrived_at")"
+    print_timeline_json
     printf '      "current_state": {\n'
     printf '        "state": "done",\n'
     printf '        "source": "arrival-ledger",\n'
@@ -676,7 +941,7 @@ task_id_from_file() {
 print_fleet_and_station_arrays() {
   local first=1 meta id backend backend_known window target liveness worktree project kind mode harness model effort
   local crew_line current_state current_source current_detail status_file status_line status_verb status_note station_pair station reason
-  local display_title display_subtitle attention branch commit_short pr_url pr_head
+  local display_title display_subtitle attention branch commit_short pr_url pr_head meta_age
   STATION_IDS=()
   STATION_VALUES=()
   STATION_REASONS=()
@@ -720,8 +985,10 @@ print_fleet_and_station_arrays() {
     status_line=$(last_nonblank_line "$status_file" 2>/dev/null || true)
     status_verb=$(status_verb_of "$status_line")
     status_note=$(status_note_of "$status_line")
+    set_completion_timeline "$current_state" "$status_verb" "$status_line" "$status_file" "$meta"
+    meta_age=$(file_age_seconds "$meta" 2>/dev/null || true)
 
-    station_pair=$(station_for "$current_state" "$current_source" "$current_detail" "$status_verb" "$worktree" "$liveness" "$target")
+    station_pair=$(station_for "$current_state" "$current_source" "$current_detail" "$status_verb" "$worktree" "$liveness" "$target" "$TL_FRESHNESS" "$meta_age")
     station=${station_pair%%|*}
     reason=${station_pair#*|}
     display_title=$(display_title_for "$meta" "$id" "$status_note")
@@ -763,6 +1030,7 @@ print_fleet_and_station_arrays() {
     printf '      "window": %s,\n' "$(json_string "$window")"
     printf '      "backend_target": %s,\n' "$(json_string "$target")"
     printf '      "backend_liveness": %s,\n' "$(json_string "$liveness")"
+    print_timeline_json
     printf '      "current_state": {\n'
     printf '        "state": %s,\n' "$(json_string "$current_state")"
     printf '        "source": %s,\n' "$(json_string "$current_source")"
@@ -894,14 +1162,15 @@ print_task_ledger() {
 print_file_mtimes() {
   local first=1 path id type mtime
   printf '    "file_mtimes": [\n'
-  for path in "$STATE"/*.meta "$STATE"/*.status "$STATE/.watch-triage.log" "$STATE/.wake-queue" "$DATA/task-ledger.md" "$ARRIVALS"; do
+  for path in "$STATE"/*.meta "$STATE"/*.status "$STATE/.watch-triage.log" "$STATE/.wake-queue" "$STATE/.last-watcher-beat" "$DATA/task-ledger.md" "$ARRIVALS"; do
     [ -e "$path" ] || continue
     type=other
     case "$path" in
       *.meta) type=meta ;;
       *.status) type=status ;;
       */.watch-triage.log) type=watch-triage ;;
-      */.wake-queue) type=wake-queue ;;
+      */.wake-queue) type="wake-queue" ;;
+      */.last-watcher-beat) type=watcher-heartbeat ;;
       */task-ledger.md) type=task-ledger ;;
       */dashboard-arrivals.jsonl) type=arrival-ledger ;;
     esac
@@ -913,6 +1182,28 @@ print_file_mtimes() {
       "$(json_string "$type")" "$(json_string "$id")" "$(json_string "$path")" "$(json_number_or_null "$mtime")"
   done
   printf '\n    ],\n'
+}
+
+print_supervision_state() {
+  local beat="$STATE/.last-watcher-beat" wake="$STATE/.wake-queue"
+  local beat_mtime="" age="" fresh=false stale=true pending=0
+  if [ -f "$beat" ]; then
+    beat_mtime=$(stat_mtime "$beat" || true)
+    age=$(file_age_seconds "$beat" 2>/dev/null || true)
+    if [ -n "$age" ] && [ "$age" -ge 0 ] && [ "$age" -le "$WATCHER_GRACE_SECONDS" ]; then
+      fresh=true
+      stale=false
+    fi
+  fi
+  if [ -f "$wake" ]; then
+    pending=$(awk 'NF { count++ } END { print count + 0 }' "$wake")
+  fi
+  printf '  "supervision": {\n'
+  printf '    "watcher": {"path": %s, "mtime_epoch": %s, "age_seconds": %s, "grace_seconds": %s, "fresh": %s, "stale": %s},\n' \
+    "$(json_string "$beat")" "$(json_number_or_null "$beat_mtime")" "$(json_number_or_null "$age")" "$(json_number_or_null "$WATCHER_GRACE_SECONDS")" "$fresh" "$stale"
+  printf '    "wake_queue": {"path": %s, "pending": %s}\n' \
+    "$(json_string "$wake")" "$(json_number_or_null "$pending")"
+  printf '  },\n'
 }
 
 print_replay_sources() {
@@ -935,6 +1226,7 @@ print_replay_sources() {
 print_json() {
   printf '{\n'
   print_fleet_and_station_arrays
+  print_supervision_state
   print_replay_sources
   printf '}\n'
 }

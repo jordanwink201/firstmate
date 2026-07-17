@@ -326,6 +326,8 @@ const html = String.raw`<!doctype html>
     .station-chip[data-station="needs_captain"] { background: var(--red); }
     .station-chip[data-station="at_port"] { background: var(--green); }
     .station-chip[data-station="arrived_today"] { background: var(--green); }
+    .station-chip[data-station="done_earlier"] { background: var(--gray); }
+    .station-chip[data-station="needs_reconciliation"] { background: var(--amber); }
     .station-chip[data-station="unknown"] { background: var(--gray); }
     .attention-badge {
       width: fit-content;
@@ -362,7 +364,7 @@ const html = String.raw`<!doctype html>
     }
     .lanes {
       display: grid;
-      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
       gap: 0;
       height: 100%;
       min-height: 560px;
@@ -405,10 +407,10 @@ const html = String.raw`<!doctype html>
       border-left: 5px solid var(--gray);
       background: rgba(255, 253, 248, 0.94);
       border-radius: 8px;
-      padding: 10px;
-      min-height: 104px;
+      padding: 9px 10px;
+      min-height: 76px;
       display: grid;
-      gap: 7px;
+      gap: 6px;
       align-content: start;
       cursor: pointer;
       box-shadow: 0 8px 20px rgba(29, 37, 40, 0.07);
@@ -419,6 +421,8 @@ const html = String.raw`<!doctype html>
     .ship-card[data-station="needs_captain"] { border-left-color: var(--red); }
     .ship-card[data-station="at_port"] { border-left-color: var(--green); }
     .ship-card[data-station="arrived_today"] { border-left-color: var(--green); }
+    .ship-card[data-station="done_earlier"] { border-left-color: var(--gray); }
+    .ship-card[data-station="needs_reconciliation"] { border-left-color: var(--amber); }
     .ship-card[data-station="unknown"] { border-left-color: var(--gray); }
     .ship-card[aria-selected="true"] {
       outline: 2px solid var(--teal);
@@ -441,6 +445,27 @@ const html = String.raw`<!doctype html>
       color: var(--muted);
       font-style: normal;
       font-size: 12px;
+    }
+    .card-meta {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .done-chip {
+      width: fit-content;
+      max-width: 100%;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      line-height: 1.25;
+      color: var(--green);
+      border: 1px solid rgba(46, 125, 79, 0.28);
+      background: rgba(46, 125, 79, 0.08);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .empty-lane {
       min-height: 84px;
@@ -741,7 +766,7 @@ const html = String.raw`<!doctype html>
       }
       .lanes {
         overflow-x: auto;
-        grid-template-columns: repeat(6, minmax(220px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       }
     }
     @media (max-width: 720px) {
@@ -791,6 +816,8 @@ const html = String.raw`<!doctype html>
       { id: 'gate_run', label: 'Gate Run' },
       { id: 'needs_captain', label: 'Needs Captain' },
       { id: 'arrived_today', label: 'Arrived Today' },
+      { id: 'done_earlier', label: 'Done Earlier' },
+      { id: 'needs_reconciliation', label: 'Needs Reconciliation' },
       { id: 'unknown', label: 'Unknown' }
     ];
     var pipelineStages = [
@@ -810,7 +837,7 @@ const html = String.raw`<!doctype html>
       { id: 'push', label: 'Push' },
       { id: 'ci', label: 'CI' }
     ];
-    var selectPriority = ['needs_captain', 'gate_run', 'underway', 'casting_off', 'unknown', 'arrived_today'];
+    var selectPriority = ['needs_captain', 'needs_reconciliation', 'gate_run', 'underway', 'casting_off', 'unknown', 'arrived_today', 'done_earlier'];
     var state = {
       snapshot: null,
       selectedId: null,
@@ -854,11 +881,70 @@ const html = String.raw`<!doctype html>
     function stationLabel(station) {
       station = normalizeStation(station);
       if (station === 'arrived_today') return 'Arrived Today';
+      if (station === 'done_earlier') return 'Done Earlier';
+      if (station === 'needs_reconciliation') return 'Needs Reconciliation';
       return String(station || 'unknown').replace(/_/g, ' ');
+    }
+
+    function isDoneStation(station) {
+      return station === 'arrived_today' || station === 'done_earlier';
     }
 
     function displayTitle(ship) {
       return (ship && (ship.display_title || ship.task_id)) || 'Untitled task';
+    }
+
+    function stationCounts() {
+      var counts = {};
+      stationDefs.forEach(function(def) { counts[def.id] = 0; });
+      ((state.snapshot && state.snapshot.fleet) || []).forEach(function(ship) {
+        var station = stationOf(ship.task_id);
+        counts[station] = (counts[station] || 0) + 1;
+      });
+      return counts;
+    }
+
+    function formatDoneDate(value) {
+      var match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!match) return value || '';
+      var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      var month = months[Math.max(0, Math.min(11, Number(match[2]) - 1))];
+      return month + ' ' + String(Number(match[3]));
+    }
+
+    function cardTaskIdHtml(ship) {
+      var title = displayTitle(ship);
+      var taskId = ship && ship.task_id ? String(ship.task_id) : '';
+      if (!taskId || taskId === title) return '';
+      return '<span class="task-id">' + escapeHtml(taskId) + '</span>';
+    }
+
+    function doneChipHtml(ship) {
+      if (!ship) return '';
+      var station = stationOf(ship.task_id);
+      if (!isDoneStation(station)) return '';
+      var timeline = ship.timeline || {};
+      var label = timeline.done_date ? 'Done ' + formatDoneDate(timeline.done_date) : (station === 'arrived_today' ? 'Done today' : 'Done earlier');
+      return '<span class="done-chip">' + escapeHtml(label) + '</span>';
+    }
+
+    function doneTimelineText(ship) {
+      if (!ship || !ship.timeline || !ship.timeline.done_date) return '';
+      var source = ship.timeline.source && ship.timeline.source !== 'none' ? ' via ' + ship.timeline.source : '';
+      return 'Done ' + formatDoneDate(ship.timeline.done_date) + source;
+    }
+
+    function laneCardMetaHtml(ship) {
+      var pieces = [cardTaskIdHtml(ship), doneChipHtml(ship)].filter(Boolean);
+      if (!pieces.length) return '';
+      return '<span class="card-meta">' + pieces.join('') + '</span>';
+    }
+
+    function supervisionLagging() {
+      var supervision = (state.snapshot && state.snapshot.supervision) || {};
+      var watcher = supervision.watcher || {};
+      var queue = supervision.wake_queue || {};
+      return watcher.stale === true || Number(queue.pending || 0) > 0;
     }
 
     function attentionBadge(ship) {
@@ -917,6 +1003,8 @@ const html = String.raw`<!doctype html>
       text = text.replace(/\bworktree isolation\b/ig, 'setup checks');
       text = text.replace(/\breading required skill instructions\b/ig, 'reading instructions');
       if (!text && station === 'arrived_today') return 'Finished and archived for today.';
+      if (!text && station === 'done_earlier') return 'Finished before today.';
+      if (!text && station === 'needs_reconciliation') return 'State needs reconciliation.';
       if (!text && station === 'underway') return 'Work is in progress.';
       if (!text && station === 'gate_run') return 'Validation is running.';
       return text || stationLabel(station);
@@ -928,9 +1016,11 @@ const html = String.raw`<!doctype html>
     }
 
     function nextStepText(ship, station) {
+      if (station === 'needs_reconciliation') return 'Reconcile task state.';
       if (ship && ship.attention === 'needs_action') return 'Review the latest update.';
       if (station === 'needs_captain') return 'Review the latest update.';
       if (station === 'arrived_today') return 'No action. Kept here until tomorrow.';
+      if (station === 'done_earlier') return 'No action. Earlier completion retained for context.';
       if (station === 'gate_run') return 'Wait for validation to finish.';
       if (station === 'underway') return 'Wait for the next progress update.';
       if (station === 'casting_off') return 'Starting up.';
@@ -955,7 +1045,8 @@ const html = String.raw`<!doctype html>
 
     function fallbackPipelineStage(ship, station) {
       if (station === 'gate_run') return 'validation_gate';
-      if (station === 'arrived_today') return 'landed';
+      if (isDoneStation(station)) return 'landed';
+      if (station === 'needs_reconciliation') return 'unknown';
       if (station === 'underway') return 'run_work';
       if (station === 'casting_off') return 'spawn';
       if (station === 'needs_captain') return 'human_followthrough';
@@ -1033,11 +1124,38 @@ const html = String.raw`<!doctype html>
         '</dl>';
     }
 
+    function noMistakesNeedsDetail(branch) {
+      if (!branch) return false;
+      var status = String(branch.status || '').toLowerCase();
+      var findings = Number(branch.findings || 0);
+      return ['running', 'fixing', 'failed', 'cancelled'].indexOf(status) !== -1 || findings > 0;
+    }
+
+    function noMistakesNote(branch) {
+      if (!branch) return 'No active no-mistakes detail for this task.';
+      var status = branch.status || 'unknown';
+      return 'No active no-mistakes findings. Last status: ' + status + '.';
+    }
+
+    function noMistakesSectionHtml(pipeline) {
+      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') return '';
+      var branch = pipeline.validation_branch;
+      var body = noMistakesNeedsDetail(branch)
+        ? validationBranchHtml(pipeline)
+        : '<div class="pipeline-note">' + escapeHtml(noMistakesNote(branch)) + '</div>';
+      return '<section class="detail-section pipeline-section">' +
+        '<div class="detail-section-title">No-mistakes</div>' +
+        body +
+      '</section>';
+    }
+
     function actionState(ship, station) {
+      if (station === 'needs_reconciliation') return { label: 'Needs reconciliation', tone: 'needs_action' };
       if (ship && ship.attention === 'needs_action') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'needs_captain') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'gate_run') return { label: 'Validating', tone: 'active' };
       if (station === 'arrived_today') return { label: 'Landed today', tone: 'landed' };
+      if (station === 'done_earlier') return { label: 'Done earlier', tone: 'landed' };
       if (station === 'underway') return { label: 'In progress', tone: 'active' };
       if (station === 'casting_off') return { label: 'Starting', tone: 'active' };
       return { label: 'Monitoring', tone: 'active' };
@@ -1056,9 +1174,20 @@ const html = String.raw`<!doctype html>
       return '<div class="kv' + (compact ? ' compact' : '') + '"><dt>' + escapeHtml(label) + '</dt><dd' + (muted ? ' data-muted="true"' : '') + '>' + (html ? value : escapeHtml(value || '-')) + '</dd></div>';
     }
 
+    function whatMattersHtml(ship, station, nextStep) {
+      var done = doneTimelineText(ship);
+      return '<dl class="detail-facts">' +
+        kvRow('Next', nextStep, false, false, false) +
+        (done && isDoneStation(station) ? kvRow('Done', done, false, false, false) : '') +
+      '</dl>';
+    }
+
     function renderMeta() {
       var meta = document.getElementById('meta');
       var fleet = (state.snapshot && state.snapshot.fleet) || [];
+      var counts = stationCounts();
+      var active = (counts.casting_off || 0) + (counts.underway || 0) + (counts.gate_run || 0);
+      var reconciliation = counts.needs_reconciliation || 0;
       var age = state.lastGoodAt ? Math.round((Date.now() - state.lastGoodAt) / 1000) : null;
       var tone = state.error ? 'bad' : ((state.stale || state.serverRefreshing) ? 'warn' : 'ok');
       var label = 'Live';
@@ -1068,7 +1197,10 @@ const html = String.raw`<!doctype html>
       else if (state.serverRefreshing) label = 'Refreshing';
       else if (state.stale) label = 'Stale';
       var html = '<span class="pill" data-tone="' + tone + '">' + escapeHtml(label) + '</span>';
-      html += '<span class="pill">' + fleet.length + ' ship' + (fleet.length === 1 ? '' : 's') + '</span>';
+      html += '<span class="pill">' + fleet.length + ' record' + (fleet.length === 1 ? '' : 's') + '</span>';
+      if (active) html += '<span class="pill">' + active + ' active</span>';
+      if (reconciliation) html += '<span class="pill" data-tone="warn">' + reconciliation + ' reconcile</span>';
+      if (supervisionLagging()) html += '<span class="pill" data-tone="warn">state lag</span>';
       if (age != null) html += '<span class="pill">' + age + 's ago</span>';
       meta.innerHTML = html;
     }
@@ -1111,15 +1243,14 @@ const html = String.raw`<!doctype html>
       var groups = groupFleet();
       lanes.innerHTML = stationDefs.map(function(def) {
         var ships = groups[def.id] || [];
+        if (!ships.length) return '';
         var cards = ships.map(function(ship) {
           var selected = ship.task_id === state.selectedId ? 'true' : 'false';
           return '<button class="ship-card" type="button" data-station="' + escapeHtml(def.id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '" data-ship="' + escapeHtml(ship.task_id) + '" aria-selected="' + selected + '">' +
             '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
-            '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
-            '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(def.id) + '">' + escapeHtml(stationLabel(def.id)) + '</span>' + attentionBadge(ship) + '</span>' +
+            laneCardMetaHtml(ship) +
           '</button>';
         }).join('');
-        if (!cards) cards = '<div class="empty-lane">No ships</div>';
         return '<section class="lane" data-station="' + escapeHtml(def.id) + '">' +
           '<div class="lane-title"><strong>' + escapeHtml(def.label) + '</strong><span>' + ships.length + '</span></div>' +
           '<div class="lane-ships">' + cards + '</div>' +
@@ -1170,23 +1301,16 @@ const html = String.raw`<!doctype html>
         '</section>' +
         '<section class="detail-section">' +
           '<div class="detail-section-title">What matters</div>' +
-          '<dl class="detail-facts">' +
-            kvRow('Next', nextStep, false, false, false) +
-            kvRow('Update', update, false, false, false) +
-          '</dl>' +
+          whatMattersHtml(ship, station, nextStep) +
         '</section>' +
         '<section class="detail-section pipeline-section">' +
-          '<div class="detail-section-title">Pipeline</div>' +
-          pipelineRailHtml(pipeline) +
+          '<div class="detail-section-title">Pipeline status</div>' +
           '<dl class="detail-facts">' +
             kvRow('Stage', pipeline.stage_label || titleize(pipeline.main_stage), false, true, false) +
             kvRow('Confidence', pipeline.source_confidence || 'unknown', false, true, pipeline.source_confidence !== 'live') +
           '</dl>' +
         '</section>' +
-        '<section class="detail-section pipeline-section">' +
-          '<div class="detail-section-title">No-mistakes</div>' +
-          validationBranchHtml(pipeline) +
-        '</section>' +
+        noMistakesSectionHtml(pipeline) +
         '<details class="detail-section">' +
           '<summary>Operational refs</summary>' +
           '<dl class="detail-facts">' +
