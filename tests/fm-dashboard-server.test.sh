@@ -441,12 +441,32 @@ assert(strip.includes('aria-label="No-mistakes validation branch"'), 'top strip 
 assert(strip.includes('class="rail-dot"'), 'top pipeline rail should render status dots');
 assert(strip.includes('Validation') && strip.includes('Now'), 'top pipeline rail should mark Validation as current');
 assert(strip.includes('No-mistakes') && strip.includes('Awaiting Approval'), 'top branch should expose no-mistakes status');
+assert(!mainRail.includes('<span class="rail-caption">Done</span>'), 'top pipeline rail should use dots instead of repeated Done captions');
+assert(!branchRail.includes('<span class="rail-caption">Done</span>'), 'top no-mistakes branch should use dots instead of repeated Done captions');
 assert(!strip.includes('ship-tab'), 'top strip must not regress to fleet task cards');
 assert(!strip.includes('data-ship='), 'top strip must not contain selectable ship cards');
 assert(detail.includes('Pipeline status'), 'detail panel should keep compact pipeline status');
 assert(!detail.includes('class="pipeline-rail"'), 'detail panel must not duplicate the top pipeline rail');
 assert(!detail.includes('class="validation-rail"'), 'detail panel must not duplicate the no-mistakes validation branch rail');
 assert(!detail.includes('detail-section-title">No-mistakes</div>'), 'detail panel should not carry a second no-mistakes rail section');
+
+const completedSnapshot = JSON.parse(JSON.stringify(snapshot));
+completedSnapshot.fleet[0].task_id = 'completed-no-mistakes';
+completedSnapshot.fleet[0].display_title = 'Completed no-mistakes task';
+completedSnapshot.fleet[0].attention = 'done';
+completedSnapshot.fleet[0].pipeline.main_stage = 'landed';
+completedSnapshot.fleet[0].pipeline.validation_branch.step = 'validation';
+completedSnapshot.fleet[0].pipeline.validation_branch.status = 'completed';
+completedSnapshot.stations[0].task_id = 'completed-no-mistakes';
+completedSnapshot.stations[0].station = 'arrived_today';
+context.state.snapshot = completedSnapshot;
+context.state.selectedId = 'completed-no-mistakes';
+context.render();
+const completedStrip = elements.get('fleetStrip').innerHTML;
+const completedBranchRail = completedStrip.slice(completedStrip.indexOf('class="pipeline-branch"'));
+assert(completedBranchRail.includes('No-mistakes'), 'completed no-mistakes branch should still render in the top strip');
+assert(!completedBranchRail.includes('<span>Completed</span>'), 'completed top no-mistakes branch should use dots instead of status text');
+
 assert(lanes.includes('Answered Today'), 'lanes should render the Answered Today station');
 assert(lanes.includes('Gamma answered report'), 'answered lane should render completed report rows');
 const deltaIndex = lanes.indexOf('Delta newer report');

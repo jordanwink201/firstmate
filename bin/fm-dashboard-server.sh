@@ -209,9 +209,9 @@ const html = String.raw`<!doctype html>
       border: 1px solid var(--line);
       background: var(--paper);
       border-radius: 6px;
-      padding: 12px 12px 10px;
+      padding: 10px 12px 8px;
       display: grid;
-      gap: 10px;
+      gap: 6px;
       min-width: 0;
       box-shadow: var(--shadow);
       overflow-x: auto;
@@ -625,7 +625,7 @@ const html = String.raw`<!doctype html>
     .selected-pipeline .pipeline-rail {
       grid-template-columns: repeat(9, minmax(96px, 1fr));
       min-width: 860px;
-      padding: 12px 0 6px;
+      padding: 8px 0 0;
     }
     .pipeline-flow {
       display: grid;
@@ -636,37 +636,34 @@ const html = String.raw`<!doctype html>
       display: grid;
       grid-template-columns: repeat(9, minmax(96px, 1fr));
       min-width: 860px;
-      margin-top: -2px;
-      padding-bottom: 2px;
+      margin-top: -8px;
     }
     .pipeline-branch-body {
       grid-column: 5 / -1;
       position: relative;
       display: grid;
-      gap: 4px;
-      border: 1px solid var(--line-soft);
-      background: var(--paper-muted);
-      border-radius: 6px;
-      padding: 16px 12px 8px;
+      gap: 2px;
+      padding: 8px 0 0;
     }
     .pipeline-branch-body::before {
       content: "";
       position: absolute;
-      top: -18px;
+      top: -10px;
       left: calc(10% - 1px);
       width: 2px;
-      height: 18px;
+      height: 14px;
       background: rgba(32, 116, 74, 0.45);
     }
     .pipeline-branch-head {
       display: flex;
-      justify-content: space-between;
+      justify-content: flex-start;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       line-height: 1.2;
       min-width: 0;
+      padding-left: 8px;
     }
     .pipeline-branch-head strong {
       color: var(--ink);
@@ -682,25 +679,29 @@ const html = String.raw`<!doctype html>
     }
     .selected-pipeline .pipeline-branch .validation-rail {
       grid-template-columns: repeat(5, minmax(72px, 1fr));
-      padding: 4px 0 0;
+      padding: 0;
     }
     .selected-pipeline .pipeline-branch .rail-step {
-      min-height: 56px;
-      grid-template-rows: 20px auto auto;
-      padding: 0 4px;
+      min-height: 40px;
+      grid-template-rows: 16px auto auto;
+      gap: 2px;
+      padding: 0 2px;
     }
     .selected-pipeline .pipeline-branch .rail-step::before {
-      top: 8px;
+      top: 7px;
       height: 3px;
     }
     .selected-pipeline .pipeline-branch .rail-dot {
-      width: 16px;
-      height: 16px;
+      width: 14px;
+      height: 14px;
       border-width: 2px;
-      box-shadow: 0 0 0 4px var(--paper-muted);
+      box-shadow: 0 0 0 4px var(--paper);
     }
     .selected-pipeline .pipeline-branch .rail-step[data-state="active"] .rail-dot {
-      box-shadow: 0 0 0 4px var(--paper-muted), 0 0 0 7px rgba(15, 118, 110, 0.13);
+      box-shadow: 0 0 0 4px var(--paper), 0 0 0 7px rgba(15, 118, 110, 0.13);
+    }
+    .selected-pipeline .pipeline-branch .rail-step strong {
+      font-size: 10px;
     }
     .rail-step {
       position: relative;
@@ -791,7 +792,10 @@ const html = String.raw`<!doctype html>
       color: inherit;
     }
     .rail-caption {
-      min-height: 15px;
+      min-height: 0;
+    }
+    .rail-caption:empty {
+      display: none;
     }
     .pipeline-note {
       border: 1px dashed rgba(102, 112, 133, 0.34);
@@ -1231,7 +1235,7 @@ const html = String.raw`<!doctype html>
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
           '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? 'Now' : (stateName === 'done' ? 'Done' : '')) + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? 'Now' : '') + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
@@ -1273,7 +1277,7 @@ const html = String.raw`<!doctype html>
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
           '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? validationBranchStatusLabel(branch) : (stateName === 'done' ? 'Done' : '')) + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? validationBranchStatusLabel(branch) : '') + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
@@ -1282,11 +1286,12 @@ const html = String.raw`<!doctype html>
       var branch = pipeline && pipeline.validation_branch;
       if (!pipeline || pipeline.profile !== 'cad_no_mistakes' || !hasValidationBranchDetail(branch)) return '';
       var branchStatus = validationBranchStatusLabel(branch);
+      var branchStatusHtml = validationBranchComplete(pipeline, branch) ? '' : '<span>' + escapeHtml(branchStatus) + '</span>';
       return '<div class="pipeline-branch" aria-label="No-mistakes validation branch">' +
         '<div class="pipeline-branch-body">' +
           '<div class="pipeline-branch-head">' +
             '<strong>No-mistakes</strong>' +
-            '<span>' + escapeHtml(branchStatus) + '</span>' +
+            branchStatusHtml +
           '</div>' +
           validationRailHtml(branch, pipeline) +
         '</div>' +
