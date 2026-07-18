@@ -1251,6 +1251,12 @@ const html = String.raw`<!doctype html>
       return titleize((branch && branch.status) || 'current');
     }
 
+    function hasValidationBranchDetail(branch) {
+      if (!branch) return false;
+      var status = String(branch.status || '').toLowerCase();
+      return Boolean(branch.step || (status && status !== 'unknown') || branch.pr_url || branch.superseded_status_log || Number(branch.findings || 0) > 0);
+    }
+
     function validationRailHtml(branch, pipeline) {
       var stepId = (branch && branch.step) || 'validation';
       var stages = validationStages.slice();
@@ -1274,7 +1280,7 @@ const html = String.raw`<!doctype html>
 
     function noMistakesBranchHtml(pipeline) {
       var branch = pipeline && pipeline.validation_branch;
-      if (!pipeline || pipeline.profile !== 'cad_no_mistakes' || !branch) return '';
+      if (!pipeline || pipeline.profile !== 'cad_no_mistakes' || !hasValidationBranchDetail(branch)) return '';
       var branchStatus = validationBranchStatusLabel(branch);
       return '<div class="pipeline-branch" aria-label="No-mistakes validation branch">' +
         '<div class="pipeline-branch-body">' +

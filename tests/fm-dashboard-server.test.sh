@@ -167,13 +167,51 @@ make_case() {
       },
       "current_state": {"state": "done", "source": "report-store", "detail": "Newer report summary", "raw": "/tmp/fmhome/data/delta-report/report.md"},
       "latest_status": {"path": "/tmp/fmhome/data/delta-report/report.md", "verb": "done", "note": "Newer report summary", "raw": "done: scout report written"}
+    },
+    {
+      "task_id": "epsilon-unknown-branch",
+      "display_title": "Unknown no-mistakes branch",
+      "display_subtitle": "needs reconciliation",
+      "attention": "needs_action",
+      "branch": "fm/epsilon-unknown-branch",
+      "commit_short": "feed123",
+      "pr_url": "",
+      "project": "/tmp/projects/epsilon",
+      "worktree": "/tmp/worktrees/epsilon-unknown-branch",
+      "kind": "ship",
+      "mode": "no-mistakes",
+      "harness": "codex",
+      "model": "gpt-5",
+      "effort": "high",
+      "backend": "archived",
+      "backend_liveness": "archived",
+      "timeline": {"done_at": "", "done_date": "", "source": "none", "freshness": "none"},
+      "pipeline": {
+        "profile": "cad_no_mistakes",
+        "main_stage": "unknown",
+        "stage_label": "Unknown",
+        "next_human_action": "reconcile task state",
+        "source_confidence": "unknown",
+        "evidence": ["worktree=missing"],
+        "validation_branch": {
+          "name": "no-mistakes",
+          "step": "",
+          "status": "unknown",
+          "findings": 0,
+          "pr_url": "",
+          "superseded_status_log": false
+        }
+      },
+      "current_state": {"state": "unknown", "source": "missing", "detail": "state needs reconciliation", "raw": ""},
+      "latest_status": {"path": "/tmp/state/epsilon-unknown-branch.status", "verb": "unknown", "note": "state needs reconciliation", "raw": ""}
     }
   ],
   "stations": [
     {"task_id": "alpha-t1", "station": "gate_run", "reason": "working run-step has validation or test wording"},
     {"task_id": "beta-t2", "station": "done_earlier", "reason": "done signal has prior-date evidence"},
     {"task_id": "gamma-report", "station": "answered", "reason": "completed scout report is available"},
-    {"task_id": "delta-report", "station": "answered", "reason": "completed scout report is available"}
+    {"task_id": "delta-report", "station": "answered", "reason": "completed scout report is available"},
+    {"task_id": "epsilon-unknown-branch", "station": "unknown", "reason": "state needs reconciliation"}
   ],
   "supervision": {
     "watcher": {"fresh": true, "stale": false, "age_seconds": 12},
@@ -420,7 +458,7 @@ assert(/Done \d{1,2}:\d{2}(am|pm) Jul 16/.test(lanes), 'done cards should render
 assert(!lanes.includes('empty-lane'), 'zero-count lanes should stay hidden at runtime');
 assert(!lanes.includes('station-chip'), 'lane cards should not repeat station chips at runtime');
 assert(!lanes.includes('attention-badge'), 'lane cards should not repeat needs-action badges at runtime');
-assert(meta.includes('4 records'), 'meta should count restored fleet records');
+assert(meta.includes('5 records'), 'meta should count restored fleet records');
 assert(meta.includes('state lag'), 'meta should surface supervision lag when wake queue is pending');
 
 context.state.selectedId = 'gamma-report';
@@ -439,6 +477,12 @@ assert(!reportDetail.includes('<span class="task-id">gamma-report</span>'), 'ans
 assert(!reportDetail.includes('<span class="pill">gamma-report</span>'), 'answered report detail should not repeat the task id action pill');
 assert(!reportDetail.includes('What matters'), 'answered report detail should not duplicate the top-rail next action');
 assert(!reportDetail.includes('Pipeline status'), 'answered report detail should not duplicate the top-rail pipeline status');
+
+context.state.selectedId = 'epsilon-unknown-branch';
+context.render();
+const unknownStrip = elements.get('fleetStrip').innerHTML;
+assert(unknownStrip.includes('Unknown no-mistakes branch'), 'unknown no-mistakes row should render in the selected pipeline identity');
+assert(!unknownStrip.includes('class="pipeline-branch"'), 'unknown no-mistakes branch detail should not draw a fake branch');
 NODE
 }
 
@@ -482,7 +526,7 @@ test_routes_and_methods() {
   headers="$dir/snapshot.headers"
   code=$(http_request_with_headers GET "$base" /api/snapshot "$body" "$headers")
   [ "$code" = 200 ] || fail "/api/snapshot returned HTTP $code: $(cat "$body")"
-  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .fleet[2].kind == "scout" and .fleet[2].report_url == "/api/reports/gamma-report" and .fleet[2].pipeline.main_stage == "review_ready" and .stations[2].station == "answered" and .fleet[3].task_id == "delta-report" and .stations[3].station == "answered" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
+  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .fleet[2].kind == "scout" and .fleet[2].report_url == "/api/reports/gamma-report" and .fleet[2].pipeline.main_stage == "review_ready" and .stations[2].station == "answered" and .fleet[3].task_id == "delta-report" and .stations[3].station == "answered" and .fleet[4].task_id == "epsilon-unknown-branch" and .stations[4].station == "unknown" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
     || fail "/api/snapshot did not return valid probe JSON: $(cat "$body")"
   [ "$(header_value "$headers" x-firstmate-cache)" = fresh ] \
     || fail "/api/snapshot did not mark a fresh cache response: $(cat "$headers")"
