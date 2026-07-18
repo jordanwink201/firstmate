@@ -310,6 +310,15 @@ set_arrival_timeline() {
   set_timeline_from_timestamp "$arrived_at" arrival-ledger
 }
 
+set_arrival_timeline_from_day() {
+  local arrived_at=$1 arrived_day=$2
+  clear_timeline
+  TL_DONE_AT=$arrived_at
+  TL_DONE_DATE=$arrived_day
+  TL_SOURCE=arrival-ledger
+  TL_FRESHNESS=$(timeline_freshness_for_date "$TL_DONE_DATE")
+}
+
 print_timeline_json() {
   printf '      "timeline": {\n'
   printf '        "done_at": %s,\n' "$(json_string "$TL_DONE_AT")"
@@ -548,18 +557,28 @@ pipeline_profile_for() {
 }
 
 text_has() {
-  printf '%s\n' "${1:-}" | grep -Eiq "$2"
+  local text=${1:-} pattern=${2:-} status had_nocasematch=false
+  if shopt -q nocasematch; then
+    had_nocasematch=true
+  fi
+  shopt -s nocasematch
+  [[ $text =~ $pattern ]]
+  status=$?
+  [ "$had_nocasematch" = true ] || shopt -u nocasematch
+  return "$status"
 }
 
 pipeline_findings_count() {
-  printf '%s\n' "${1:-}" | sed -nE 's/.*[^0-9]([0-9]+) finding\(s\).*/\1/p' | head -1
+  local detail=${1:-}
+  if [[ $detail =~ (^|[^0-9])([0-9]+)[[:space:]]finding\(s\) ]]; then
+    printf '%s' "${BASH_REMATCH[2]}"
+  fi
 }
 
 validation_step_from_detail() {
-  local detail=$1 step
-  step=$(printf '%s\n' "$detail" | sed -nE 's/.*parked at ([^:() ]+).*/\1/p' | head -1)
-  if [ -n "$step" ]; then
-    printf '%s' "$step"
+  local detail=$1
+  if [[ $detail =~ parked[[:space:]]at[[:space:]]([^:\(\)\ ]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
     return
   fi
   if text_has "$detail" '(^|[^[:alpha:]])ci([^[:alpha:]]|$)|checks green|PR ready'; then
@@ -847,25 +866,12 @@ arrival_local_day() {
 }
 
 print_arrival_fleet_rows() {
-  local today row fields_json id arrived_at arrived_day station reason display_title latest_status pr_url branch commit_short project worktree mode
+  local today row id arrived_at arrived_day station reason display_title latest_status pr_url branch commit_short project worktree mode
   local status_verb status_note first_ref attention current_state current_detail source
   [ -f "$ARRIVALS" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   today=$(today_local_date)
-  # shellcheck disable=SC2094 # This function writes JSON to stdout, not to the arrivals file it reads.
-  while IFS= read -r row || [ -n "$row" ]; do
-    [ -n "$row" ] || continue
-    fields_json=$(printf '%s\n' "$row" | jq -c '[.task_id // .id // "", .arrived_at // "", .display_title // (.task_id // .id // ""), .latest_status // "", .pr_url // "", .branch // "", .commit_short // "", .project // "", .worktree // "", .mode // ""]' 2>/dev/null) || continue
-    id=$(printf '%s\n' "$fields_json" | jq -r '.[0]')
-    arrived_at=$(printf '%s\n' "$fields_json" | jq -r '.[1]')
-    display_title=$(printf '%s\n' "$fields_json" | jq -r '.[2]')
-    latest_status=$(printf '%s\n' "$fields_json" | jq -r '.[3]')
-    pr_url=$(printf '%s\n' "$fields_json" | jq -r '.[4]')
-    branch=$(printf '%s\n' "$fields_json" | jq -r '.[5]')
-    commit_short=$(printf '%s\n' "$fields_json" | jq -r '.[6]')
-    project=$(printf '%s\n' "$fields_json" | jq -r '.[7]')
-    worktree=$(printf '%s\n' "$fields_json" | jq -r '.[8]')
-    mode=$(printf '%s\n' "$fields_json" | jq -r '.[9]')
+  while IFS=$'\t' read -r id arrived_at display_title latest_status pr_url branch commit_short project worktree mode || [ -n "$id" ]; do
     [ -n "$id" ] || continue
     task_id_seen "$id" && continue
     arrived_day=$(arrival_local_day "$arrived_at" 2>/dev/null || true)
@@ -901,7 +907,7 @@ print_arrival_fleet_rows() {
         ;;
     esac
     [ -n "$mode" ] || mode=no-mistakes
-    set_arrival_timeline "$arrived_at"
+    set_arrival_timeline_from_day "$arrived_at" "$arrived_day"
     set_pipeline_fields ship "$mode" "$station" "$current_state" arrival-ledger "$current_detail" "$status_verb" "$status_note" "$worktree" archived "" "$pr_url" "$source"
     STATION_IDS+=("$id")
     STATION_VALUES+=("$station")
@@ -948,7 +954,25 @@ print_arrival_fleet_rows() {
     print_pipeline_json
     printf '\n'
     printf '    }'
-  done < "$ARRIVALS"
+  done < <(
+    jq -Rr '
+      fromjson?
+      | select(type == "object")
+      | [
+          .task_id // .id // "",
+          .arrived_at // "",
+          .display_title // (.task_id // .id // ""),
+          .latest_status // "",
+          .pr_url // "",
+          .branch // "",
+          .commit_short // "",
+          .project // "",
+          .worktree // "",
+          .mode // ""
+        ]
+      | @tsv
+    ' "$ARRIVALS" 2>/dev/null
+  )
 }
 
 task_id_from_file() {
