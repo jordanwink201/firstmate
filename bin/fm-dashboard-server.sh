@@ -11,8 +11,8 @@
 # /api/snapshot is the sole data source the dashboard UI polls. The detail
 # panel renders the selected task's main pipeline rail from the snapshot's
 # per-task "pipeline" object (with a client-side fallback when a row lacks
-# one) and shows the no-mistakes validation sub-rail only for the
-# cad_no_mistakes profile.
+# one). CAD/no-mistakes tasks render their validation sub-pipeline as a branch
+# under the selected top rail.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -627,6 +627,81 @@ const html = String.raw`<!doctype html>
       min-width: 860px;
       padding: 12px 0 6px;
     }
+    .pipeline-flow {
+      display: grid;
+      gap: 0;
+      min-width: 860px;
+    }
+    .pipeline-branch {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(96px, 1fr));
+      min-width: 860px;
+      margin-top: -2px;
+      padding-bottom: 2px;
+    }
+    .pipeline-branch-body {
+      grid-column: 5 / -1;
+      position: relative;
+      display: grid;
+      gap: 4px;
+      border: 1px solid var(--line-soft);
+      background: var(--paper-muted);
+      border-radius: 6px;
+      padding: 16px 12px 8px;
+    }
+    .pipeline-branch-body::before {
+      content: "";
+      position: absolute;
+      top: -18px;
+      left: calc(10% - 1px);
+      width: 2px;
+      height: 18px;
+      background: rgba(32, 116, 74, 0.45);
+    }
+    .pipeline-branch-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+      min-width: 0;
+    }
+    .pipeline-branch-head strong {
+      color: var(--ink);
+      font-size: 11px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .pipeline-branch-head span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .selected-pipeline .pipeline-branch .validation-rail {
+      grid-template-columns: repeat(5, minmax(72px, 1fr));
+      padding: 4px 0 0;
+    }
+    .selected-pipeline .pipeline-branch .rail-step {
+      min-height: 56px;
+      grid-template-rows: 20px auto auto;
+      padding: 0 4px;
+    }
+    .selected-pipeline .pipeline-branch .rail-step::before {
+      top: 8px;
+      height: 3px;
+    }
+    .selected-pipeline .pipeline-branch .rail-dot {
+      width: 16px;
+      height: 16px;
+      border-width: 2px;
+      box-shadow: 0 0 0 4px var(--paper-muted);
+    }
+    .selected-pipeline .pipeline-branch .rail-step[data-state="active"] .rail-dot {
+      box-shadow: 0 0 0 4px var(--paper-muted), 0 0 0 7px rgba(15, 118, 110, 0.13);
+    }
     .rail-step {
       position: relative;
       min-height: 68px;
@@ -856,7 +931,8 @@ const html = String.raw`<!doctype html>
       { id: 'intent', label: 'Intent' },
       { id: 'review', label: 'Review' },
       { id: 'push', label: 'Push' },
-      { id: 'ci', label: 'CI' }
+      { id: 'ci', label: 'CI' },
+      { id: 'validation', label: 'Validation' }
     ];
     var selectPriority = ['needs_captain', 'needs_reconciliation', 'gate_run', 'underway', 'casting_off', 'unknown', 'answered', 'arrived_today', 'done_earlier'];
     var state = {
@@ -1097,7 +1173,7 @@ const html = String.raw`<!doctype html>
 
     function titleize(value) {
       return String(value || 'unknown')
-        .replace(/_/g, ' ')
+        .replace(/[-_]/g, ' ')
         .replace(/\b\w/g, function(letter) { return letter.toUpperCase(); });
     }
 
@@ -1160,62 +1236,55 @@ const html = String.raw`<!doctype html>
       }).join('') + '</div>';
     }
 
-    function validationRailHtml(branch) {
+    function validationBranchComplete(pipeline, branch) {
+      if (!branch) return false;
+      var status = String(branch.status || '').toLowerCase();
+      if (['passed', 'checks-passed', 'success', 'succeeded', 'completed'].indexOf(status) !== -1) return true;
+      var mainStage = (pipeline && pipeline.main_stage) || 'unknown';
+      if (mainStage === 'unknown') return false;
+      var activeIndex = pipelineStages.findIndex(function(step) { return step.id === mainStage; });
+      var validationIndex = pipelineStages.findIndex(function(step) { return step.id === 'validation_gate'; });
+      return validationIndex > -1 && activeIndex > validationIndex;
+    }
+
+    function validationBranchStatusLabel(branch) {
+      return titleize((branch && branch.status) || 'current');
+    }
+
+    function validationRailHtml(branch, pipeline) {
       var stepId = (branch && branch.step) || 'validation';
       var stages = validationStages.slice();
       if (!stages.some(function(step) { return step.id === stepId; })) {
         stages.push({ id: stepId, label: titleize(stepId) });
       }
-      return '<div class="validation-rail" aria-label="No-mistakes validation">' + stages.map(function(step) {
-        var stateName = step.id === stepId ? 'active' : 'pending';
+      var activeIndex = stages.findIndex(function(step) { return step.id === stepId; });
+      var complete = validationBranchComplete(pipeline, branch);
+      return '<div class="validation-rail" aria-label="No-mistakes validation">' + stages.map(function(step, index) {
+        var stateName = 'pending';
+        if (complete) stateName = 'done';
+        else if (step.id === stepId) stateName = 'active';
+        else if (activeIndex > -1 && index < activeIndex) stateName = 'done';
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
           '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span class="rail-caption">' + escapeHtml(step.id === stepId ? (branch.status || 'Current') : '') + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? validationBranchStatusLabel(branch) : (stateName === 'done' ? 'Done' : '')) + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
 
-    function validationBranchHtml(pipeline) {
+    function noMistakesBranchHtml(pipeline) {
       var branch = pipeline && pipeline.validation_branch;
-      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') {
-        return '<div class="pipeline-note">Validation detail not tracked for this profile.</div>';
-      }
-      if (!branch) {
-        return '<div class="pipeline-note">Validation detail unavailable for this task.</div>';
-      }
-      return validationRailHtml(branch) +
-        '<dl class="detail-facts">' +
-          kvRow('Step', branch.step || '', false, true, false) +
-          kvRow('Status', branch.status || '', false, true, false) +
-          kvRow('Findings', branch.findings == null ? '-' : String(branch.findings), false, true, false) +
-          kvRow('Superseded', branch.superseded_status_log ? 'yes' : 'no', false, true, branch.superseded_status_log ? false : true) +
-        '</dl>';
-    }
-
-    function noMistakesNeedsDetail(branch) {
-      if (!branch) return false;
-      var status = String(branch.status || '').toLowerCase();
-      var findings = Number(branch.findings || 0);
-      return ['running', 'fixing', 'failed', 'cancelled'].indexOf(status) !== -1 || findings > 0;
-    }
-
-    function noMistakesNote(branch) {
-      if (!branch) return 'No active no-mistakes detail for this task.';
-      var status = branch.status || 'unknown';
-      return 'No active no-mistakes findings. Last status: ' + status + '.';
-    }
-
-    function noMistakesSectionHtml(pipeline) {
-      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') return '';
-      var branch = pipeline.validation_branch;
-      var body = noMistakesNeedsDetail(branch)
-        ? validationBranchHtml(pipeline)
-        : '<div class="pipeline-note">' + escapeHtml(noMistakesNote(branch)) + '</div>';
-      return '<section class="detail-section pipeline-section">' +
-        '<div class="detail-section-title">No-mistakes</div>' +
-        body +
-      '</section>';
+      if (!pipeline || pipeline.profile !== 'cad_no_mistakes' || !branch) return '';
+      var branchStatus = validationBranchStatusLabel(branch);
+      return '<div class="pipeline-branch" aria-label="No-mistakes validation branch">' +
+        '<div class="pipeline-branch-body">' +
+          '<div class="pipeline-branch-head">' +
+            '<strong>No-mistakes</strong>' +
+            '<span>' + escapeHtml(branchStatus) + '</span>' +
+          '</div>' +
+          validationRailHtml(branch, pipeline) +
+        '</div>' +
+      '</div>';
     }
 
     function actionState(ship, station) {
@@ -1339,7 +1408,10 @@ const html = String.raw`<!doctype html>
           '<span>' + escapeHtml(nextStep) + '</span>' +
         '</div>' +
       '</div>' +
-      pipelineRailHtml(pipeline);
+      '<div class="pipeline-flow">' +
+        pipelineRailHtml(pipeline) +
+        noMistakesBranchHtml(pipeline) +
+      '</div>';
     }
 
     function renderLanes() {
@@ -1406,7 +1478,6 @@ const html = String.raw`<!doctype html>
         '</section>' +
         whatMattersSectionHtml(ship, station, nextStep) +
         pipelineStatusSectionHtml(pipeline, station) +
-        noMistakesSectionHtml(pipeline) +
         '<details class="detail-section">' +
           '<summary>Operational refs</summary>' +
           '<dl class="detail-facts">' +

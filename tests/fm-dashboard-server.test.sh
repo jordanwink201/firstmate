@@ -387,18 +387,28 @@ const strip = elements.get('fleetStrip').innerHTML;
 const detail = elements.get('detail').innerHTML;
 const lanes = elements.get('lanes').innerHTML;
 const meta = elements.get('meta').innerHTML;
-const railSteps = (strip.match(/class="rail-step"/g) || []).length;
+const mainRail = strip.slice(strip.indexOf('class="pipeline-rail"'), strip.indexOf('class="pipeline-branch"'));
+const branchRail = strip.slice(strip.indexOf('class="pipeline-branch"'));
+const mainRailSteps = (mainRail.match(/class="rail-step"/g) || []).length;
+const branchRailSteps = (branchRail.match(/class="rail-step"/g) || []).length;
 
 assert(context.state.selectedId === 'alpha-t1', `expected selected alpha-t1, got ${context.state.selectedId}`);
 assert(strip.includes('selected-pipeline-title'), 'top strip must keep selected task identity');
 assert(strip.includes('class="pipeline-rail"'), 'top strip must render the selected task pipeline rail');
-assert(railSteps === 9, `top pipeline rail should render 9 stages, got ${railSteps}`);
+assert(mainRailSteps === 9, `top pipeline rail should render 9 main stages, got ${mainRailSteps}`);
+assert(strip.includes('class="pipeline-branch"'), 'top strip should render the no-mistakes branch from validation');
+assert(branchRailSteps === 5, `top no-mistakes branch should render 5 stages, got ${branchRailSteps}`);
+assert(strip.indexOf('class="pipeline-branch"') > strip.indexOf('class="pipeline-rail"'), 'no-mistakes branch should sit under the main rail');
+assert(strip.includes('aria-label="No-mistakes validation branch"'), 'top strip should identify the no-mistakes validation branch');
 assert(strip.includes('class="rail-dot"'), 'top pipeline rail should render status dots');
 assert(strip.includes('Validation') && strip.includes('Now'), 'top pipeline rail should mark Validation as current');
+assert(strip.includes('No-mistakes') && strip.includes('Awaiting Approval'), 'top branch should expose no-mistakes status');
 assert(!strip.includes('ship-tab'), 'top strip must not regress to fleet task cards');
 assert(!strip.includes('data-ship='), 'top strip must not contain selectable ship cards');
 assert(detail.includes('Pipeline status'), 'detail panel should keep compact pipeline status');
 assert(!detail.includes('class="pipeline-rail"'), 'detail panel must not duplicate the top pipeline rail');
+assert(!detail.includes('class="validation-rail"'), 'detail panel must not duplicate the no-mistakes validation branch rail');
+assert(!detail.includes('detail-section-title">No-mistakes</div>'), 'detail panel should not carry a second no-mistakes rail section');
 assert(lanes.includes('Answered Today'), 'lanes should render the Answered Today station');
 assert(lanes.includes('Gamma answered report'), 'answered lane should render completed report rows');
 const deltaIndex = lanes.indexOf('Delta newer report');
@@ -419,6 +429,7 @@ const reportStrip = elements.get('fleetStrip').innerHTML;
 const reportDetail = elements.get('detail').innerHTML;
 assert(reportStrip.includes('Gamma answered report'), 'answered report should render in the selected pipeline identity');
 assert(reportStrip.includes('Review') && reportStrip.includes('Now'), 'answered report should mark Review as current in the top rail');
+assert(!reportStrip.includes('class="pipeline-branch"'), 'answered report should not render a no-mistakes branch');
 assert(reportDetail.includes('Answered Today'), 'answered report detail should keep the current station context');
 assert(reportDetail.includes('Report ready'), 'answered report detail should expose report-ready action state');
 assert(reportDetail.includes('Open report'), 'answered report detail should link to the Markdown report');
@@ -453,18 +464,16 @@ test_routes_and_methods() {
   assert_grep 'selected-pipeline-title' "$body" "top rail does not expose selected task identity"
   assert_grep 'selected-pipeline-next' "$body" "top rail does not expose selected task next action"
   assert_grep 'rail-dot' "$body" "dashboard pipeline rail does not render Jenkins-style status dots"
+  assert_grep 'pipeline-branch' "$body" "dashboard top rail does not render the no-mistakes branch"
+  assert_grep 'noMistakesBranchHtml' "$body" "dashboard HTML does not include top-rail no-mistakes branch renderer"
   assert_grep 'doneChipHtml' "$body" "dashboard HTML does not include done date chip renderer"
   assert_grep 'reportChipHtml' "$body" "dashboard HTML does not include report date chip renderer"
   assert_grep 'Open report' "$body" "dashboard HTML does not render a report link in details"
   assert_no_grep 'function shipSummaryCardInnerHtml' "$body" "top rail still carries fleet-card summary rendering"
   assert_grep 'What matters' "$body" "dashboard detail does not prioritize captain-facing fields"
   assert_grep 'Pipeline status' "$body" "dashboard detail does not render compact pipeline status"
-  assert_no_grep 'pipelineRailHtml(pipeline) +' "$body" "dashboard detail still duplicates the top pipeline rail"
   assert_grep 'pipelineRailHtml' "$body" "dashboard HTML does not include pipeline rail renderer"
-  assert_grep 'No-mistakes' "$body" "dashboard detail does not render the no-mistakes sub-rail section"
-  assert_grep 'validationBranchHtml' "$body" "dashboard HTML does not include validation branch renderer"
-  assert_grep 'Validation detail not tracked for this profile.' "$body" "dashboard HTML does not include fallback copy for non-no-mistakes profiles"
-  assert_grep 'Validation detail unavailable for this task.' "$body" "dashboard HTML does not include unavailable copy for no-mistakes rows without validation detail"
+  assert_no_grep '<div class="detail-section-title">No-mistakes</div>' "$body" "dashboard detail still carries the no-mistakes sub-rail section"
   assert_grep 'Operational refs' "$body" "dashboard detail does not de-emphasize operational fields"
   assert_grep 'Needs you' "$body" "dashboard detail does not expose the action state"
   assert_no_grep '>At Port<' "$body" "dashboard still renders the old At Port lane"
