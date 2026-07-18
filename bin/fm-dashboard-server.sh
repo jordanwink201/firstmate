@@ -439,8 +439,14 @@ const html = String.raw`<!doctype html>
     .ship-card[data-station="needs_reconciliation"] { border-left-color: var(--amber); }
     .ship-card[data-station="unknown"] { border-left-color: var(--gray); }
     .ship-card[aria-selected="true"] {
-      outline: 2px solid rgba(15, 118, 110, 0.78);
-      outline-offset: 1px;
+      border-color: rgba(15, 118, 110, 0.72);
+      background: #f2faf7;
+      outline: 2px solid rgba(15, 118, 110, 0.7);
+      outline-offset: 2px;
+      box-shadow:
+        inset 0 0 0 1px rgba(15, 118, 110, 0.2),
+        0 0 0 3px rgba(15, 118, 110, 0.12),
+        0 3px 10px rgba(15, 118, 110, 0.12);
     }
     .ship-card:hover {
       border-color: #c7ced8;
