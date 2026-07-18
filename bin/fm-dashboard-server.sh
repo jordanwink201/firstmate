@@ -926,12 +926,38 @@ const html = String.raw`<!doctype html>
       return counts;
     }
 
+    var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
     function formatDoneDate(value) {
       var match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
       if (!match) return value || '';
-      var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      var month = months[Math.max(0, Math.min(11, Number(match[2]) - 1))];
+      var month = monthNames[Math.max(0, Math.min(11, Number(match[2]) - 1))];
       return month + ' ' + String(Number(match[3]));
+    }
+
+    function formatTimelineTimestamp(timeline) {
+      timeline = timeline || {};
+      var raw = timeline.done_at || '';
+      if (raw && /[T ][0-9]{2}:[0-9]{2}/.test(raw)) {
+        var parsed = Date.parse(raw);
+        if (!Number.isNaN(parsed)) {
+          var date = new Date(parsed);
+          var hour = date.getHours();
+          var suffix = hour >= 12 ? 'pm' : 'am';
+          var displayHour = hour % 12 || 12;
+          var minute = String(date.getMinutes()).padStart(2, '0');
+          return displayHour + ':' + minute + suffix + ' ' + monthNames[date.getMonth()] + ' ' + String(date.getDate());
+        }
+      }
+      return timeline.done_date ? formatDoneDate(timeline.done_date) : '';
+    }
+
+    function timelineTimestampMs(ship) {
+      var timeline = (ship && ship.timeline) || {};
+      var parsed = timeline.done_at ? Date.parse(timeline.done_at) : NaN;
+      if (!Number.isNaN(parsed)) return parsed;
+      parsed = timeline.done_date ? Date.parse(timeline.done_date + 'T00:00:00') : NaN;
+      return Number.isNaN(parsed) ? 0 : parsed;
     }
 
     function cardTaskIdHtml(ship) {
@@ -946,21 +972,23 @@ const html = String.raw`<!doctype html>
       var station = stationOf(ship.task_id);
       if (!isDoneStation(station)) return '';
       var timeline = ship.timeline || {};
-      var label = timeline.done_date ? 'Done ' + formatDoneDate(timeline.done_date) : (station === 'arrived_today' ? 'Done today' : 'Done earlier');
+      var stamp = formatTimelineTimestamp(timeline);
+      var label = stamp ? 'Done ' + stamp : (station === 'arrived_today' ? 'Done today' : 'Done earlier');
       return '<span class="done-chip">' + escapeHtml(label) + '</span>';
     }
 
     function reportChipHtml(ship) {
       if (!ship || stationOf(ship.task_id) !== 'answered') return '';
       var timeline = ship.timeline || {};
-      var label = timeline.done_date ? 'Reported ' + formatDoneDate(timeline.done_date) : 'Report ready';
+      var stamp = formatTimelineTimestamp(timeline);
+      var label = stamp ? 'Reported ' + stamp : 'Report ready';
       return '<span class="done-chip">' + escapeHtml(label) + '</span>';
     }
 
     function doneTimelineText(ship) {
       if (!ship || !ship.timeline || !ship.timeline.done_date) return '';
       var source = ship.timeline.source && ship.timeline.source !== 'none' ? ' via ' + ship.timeline.source : '';
-      return 'Done ' + formatDoneDate(ship.timeline.done_date) + source;
+      return 'Done ' + formatTimelineTimestamp(ship.timeline) + source;
     }
 
     function laneCardMetaHtml(ship) {
@@ -1001,11 +1029,20 @@ const html = String.raw`<!doctype html>
 
     function groupFleet() {
       var groups = {};
+      var originalOrder = {};
       stationDefs.forEach(function(def) { groups[def.id] = []; });
-      ((state.snapshot && state.snapshot.fleet) || []).forEach(function(ship) {
+      ((state.snapshot && state.snapshot.fleet) || []).forEach(function(ship, index) {
+        originalOrder[ship.task_id] = index;
         var station = stationOf(ship.task_id);
         if (!groups[station]) groups.unknown.push(ship);
         else groups[station].push(ship);
+      });
+      Object.keys(groups).forEach(function(station) {
+        groups[station].sort(function(left, right) {
+          var byTime = timelineTimestampMs(right) - timelineTimestampMs(left);
+          if (byTime !== 0) return byTime;
+          return (originalOrder[left.task_id] || 0) - (originalOrder[right.task_id] || 0);
+        });
       });
       return groups;
     }

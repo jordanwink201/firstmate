@@ -135,12 +135,45 @@ make_case() {
       },
       "current_state": {"state": "done", "source": "report-store", "detail": "Report summary", "raw": "/tmp/fmhome/data/gamma-report/report.md"},
       "latest_status": {"path": "/tmp/fmhome/data/gamma-report/report.md", "verb": "done", "note": "Report summary", "raw": "done: scout report written"}
+    },
+    {
+      "task_id": "delta-report",
+      "display_title": "Delta newer report",
+      "display_subtitle": "delta-report · scout report",
+      "attention": "done",
+      "branch": "",
+      "commit_short": "",
+      "pr_url": "",
+      "report_url": "/api/reports/delta-report",
+      "report_path": "/tmp/fmhome/data/delta-report/report.md",
+      "project": "cad",
+      "worktree": "",
+      "kind": "scout",
+      "mode": "report",
+      "harness": "",
+      "model": "",
+      "effort": "",
+      "backend": "archived",
+      "backend_liveness": "archived",
+      "timeline": {"done_at": "2026-07-18T16:20:00Z", "done_date": "2026-07-18", "source": "report-file-mtime", "freshness": "today"},
+      "pipeline": {
+        "profile": "scout_report",
+        "main_stage": "review_ready",
+        "stage_label": "Review Ready",
+        "next_human_action": "review scout report",
+        "source_confidence": "approximate",
+        "evidence": ["source=report-store"],
+        "validation_branch": null
+      },
+      "current_state": {"state": "done", "source": "report-store", "detail": "Newer report summary", "raw": "/tmp/fmhome/data/delta-report/report.md"},
+      "latest_status": {"path": "/tmp/fmhome/data/delta-report/report.md", "verb": "done", "note": "Newer report summary", "raw": "done: scout report written"}
     }
   ],
   "stations": [
     {"task_id": "alpha-t1", "station": "gate_run", "reason": "working run-step has validation or test wording"},
     {"task_id": "beta-t2", "station": "done_earlier", "reason": "done signal has prior-date evidence"},
-    {"task_id": "gamma-report", "station": "answered", "reason": "completed scout report is available"}
+    {"task_id": "gamma-report", "station": "answered", "reason": "completed scout report is available"},
+    {"task_id": "delta-report", "station": "answered", "reason": "completed scout report is available"}
   ],
   "supervision": {
     "watcher": {"fresh": true, "stale": false, "age_seconds": 12},
@@ -152,12 +185,18 @@ make_case() {
   }
 }
 JSON
-  mkdir -p "$dir/fmhome/data/gamma-report"
+  mkdir -p "$dir/fmhome/data/gamma-report" "$dir/fmhome/data/delta-report"
   cat > "$dir/fmhome/data/gamma-report/report.md" <<'EOF'
 # Gamma Report
 
 ## Finding
 Report summary
+EOF
+  cat > "$dir/fmhome/data/delta-report/report.md" <<'EOF'
+# Delta Report
+
+## Finding
+Newer report summary
 EOF
   printf 'ok\n' > "$dir/fake/behavior"
   cat > "$dir/fake/fm-dashboard-probe.sh" <<'SH'
@@ -290,7 +329,7 @@ start_server() {
 
 assert_dashboard_render_contract() {
   local html=$1 snapshot=$2
-  node - "$html" "$snapshot" <<'NODE'
+  node - "$html" "$snapshot" <<'NODE' || fail "dashboard render contract failed"
 const fs = require('node:fs');
 const vm = require('node:vm');
 
@@ -362,13 +401,16 @@ assert(detail.includes('Pipeline status'), 'detail panel should keep compact pip
 assert(!detail.includes('class="pipeline-rail"'), 'detail panel must not duplicate the top pipeline rail');
 assert(lanes.includes('Answered'), 'lanes should render the Answered station');
 assert(lanes.includes('Gamma answered report'), 'answered lane should render completed report rows');
-assert(lanes.includes('Reported Jul 18'), 'answered report cards should render the report date chip');
+const deltaIndex = lanes.indexOf('Delta newer report');
+const gammaIndex = lanes.indexOf('Gamma answered report');
+assert(deltaIndex > -1 && gammaIndex > -1 && deltaIndex < gammaIndex, 'answered lane should sort cards by latest timestamp first');
+assert(/Reported \d{1,2}:\d{2}(am|pm) Jul 18/.test(lanes), 'answered report cards should render compact time and date chips');
 assert(lanes.includes('Done Earlier'), 'lanes should render the Done Earlier station');
-assert(lanes.includes('Done Jul 16'), 'done cards should render the completion date chip');
+assert(/Done \d{1,2}:\d{2}(am|pm) Jul 16/.test(lanes), 'done cards should render compact time and date chips');
 assert(!lanes.includes('empty-lane'), 'zero-count lanes should stay hidden at runtime');
 assert(!lanes.includes('station-chip'), 'lane cards should not repeat station chips at runtime');
 assert(!lanes.includes('attention-badge'), 'lane cards should not repeat needs-action badges at runtime');
-assert(meta.includes('3 records'), 'meta should count restored fleet records');
+assert(meta.includes('4 records'), 'meta should count restored fleet records');
 assert(meta.includes('state lag'), 'meta should surface supervision lag when wake queue is pending');
 
 context.state.selectedId = 'gamma-report';
@@ -425,7 +467,7 @@ test_routes_and_methods() {
   headers="$dir/snapshot.headers"
   code=$(http_request_with_headers GET "$base" /api/snapshot "$body" "$headers")
   [ "$code" = 200 ] || fail "/api/snapshot returned HTTP $code: $(cat "$body")"
-  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .fleet[2].kind == "scout" and .fleet[2].report_url == "/api/reports/gamma-report" and .fleet[2].pipeline.main_stage == "review_ready" and .stations[2].station == "answered" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
+  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .fleet[2].kind == "scout" and .fleet[2].report_url == "/api/reports/gamma-report" and .fleet[2].pipeline.main_stage == "review_ready" and .stations[2].station == "answered" and .fleet[3].task_id == "delta-report" and .stations[3].station == "answered" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
     || fail "/api/snapshot did not return valid probe JSON: $(cat "$body")"
   [ "$(header_value "$headers" x-firstmate-cache)" = fresh ] \
     || fail "/api/snapshot did not mark a fresh cache response: $(cat "$headers")"
