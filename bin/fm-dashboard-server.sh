@@ -363,11 +363,7 @@ const html = String.raw`<!doctype html>
       min-width: 0;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background:
-        linear-gradient(90deg, rgba(24, 33, 42, 0.055) 1px, transparent 1px),
-        linear-gradient(180deg, rgba(24, 33, 42, 0.05) 1px, transparent 1px),
-        var(--paper);
-      background-size: 80px 80px;
+      background: var(--paper);
       overflow: hidden;
       box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
     }
@@ -381,8 +377,9 @@ const html = String.raw`<!doctype html>
     .lane {
       position: relative;
       min-width: 0;
-      padding: 12px 10px;
-      border-right: 1px solid rgba(217, 222, 231, 0.78);
+      padding: 12px;
+      border-right: 1px solid var(--line);
+      background: #fff;
       display: grid;
       grid-template-rows: auto 1fr;
       gap: 12px;
@@ -393,6 +390,10 @@ const html = String.raw`<!doctype html>
     .lane-title {
       display: grid;
       gap: 3px;
+      margin: -12px -12px 0;
+      padding: 10px 12px 9px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #fafbfc;
       min-height: 52px;
     }
     .lane-title strong {
