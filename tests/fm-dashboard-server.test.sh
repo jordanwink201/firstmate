@@ -381,6 +381,7 @@ class Element {
     this.id = id;
     this.innerHTML = '';
     this.className = '';
+    this.style = {};
   }
 }
 
@@ -424,6 +425,7 @@ context.render();
 const strip = elements.get('fleetStrip').innerHTML;
 const detail = elements.get('detail').innerHTML;
 const lanes = elements.get('lanes').innerHTML;
+const laneTracks = elements.get('lanes').style.gridTemplateColumns || '';
 const meta = elements.get('meta').innerHTML;
 const mainRail = strip.slice(strip.indexOf('class="pipeline-rail"'), strip.indexOf('class="pipeline-branch"'));
 const branchRail = strip.slice(strip.indexOf('class="pipeline-branch"'));
@@ -477,13 +479,16 @@ assert(lanes.includes('Done Earlier'), 'lanes should render the Done Earlier sta
 assert(lanes.includes('data-station="done_earlier" data-collapsed="true"'), 'Done Earlier lane should start collapsed');
 assert(lanes.includes('data-lane-toggle="done_earlier"'), 'Done Earlier lane should expose an expand control');
 assert(lanes.includes('aria-expanded="false"'), 'Done Earlier expand control should advertise collapsed state');
+assert(laneTracks.includes('var(--collapsed-lane-width)'), 'collapsed Done Earlier lane should use a narrow grid track');
 assert(!lanes.includes('Beta completed task'), 'collapsed Done Earlier lane should hide older cards');
 assert(!/Done \d{1,2}:\d{2}(am|pm) Jul 16/.test(lanes), 'collapsed Done Earlier lane should hide old done chips');
 context.state.expandedLanes.done_earlier = true;
 context.render();
 const expandedLanes = elements.get('lanes').innerHTML;
+const expandedLaneTracks = elements.get('lanes').style.gridTemplateColumns || '';
 assert(expandedLanes.includes('data-station="done_earlier" data-collapsed="false"'), 'expanded Done Earlier lane should render expanded state');
 assert(expandedLanes.includes('aria-expanded="true"'), 'Done Earlier expand control should advertise expanded state');
+assert(!expandedLaneTracks.includes('var(--collapsed-lane-width)'), 'expanded Done Earlier lane should restore normal grid width');
 assert(expandedLanes.includes('Beta completed task'), 'expanded Done Earlier lane should reveal older cards');
 assert(/Done \d{1,2}:\d{2}(am|pm) Jul 16/.test(expandedLanes), 'expanded done cards should render compact time and date chips');
 assert(!lanes.includes('empty-lane'), 'zero-count lanes should stay hidden at runtime');

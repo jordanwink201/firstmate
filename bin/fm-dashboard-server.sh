@@ -127,6 +127,7 @@ const html = String.raw`<!doctype html>
       --red: #b42318;
       --green: #20744a;
       --gray: #6b7280;
+      --collapsed-lane-width: 92px;
       --shadow: 0 1px 2px rgba(24, 33, 42, 0.06), 0 8px 24px rgba(24, 33, 42, 0.06);
     }
     * {
@@ -445,6 +446,24 @@ const html = String.raw`<!doctype html>
     .lane-toggle[aria-expanded="true"] .lane-toggle-mark {
       border-color: rgba(15, 118, 110, 0.35);
       color: var(--teal);
+    }
+    .lane[data-collapsed="true"] .lane-title {
+      gap: 6px;
+      padding-left: 8px;
+      padding-right: 8px;
+    }
+    .lane[data-collapsed="true"] .lane-title strong {
+      font-size: 10px;
+      line-height: 1.12;
+      overflow-wrap: anywhere;
+    }
+    .lane[data-collapsed="true"] .lane-count {
+      font-size: 24px;
+    }
+    .lane[data-collapsed="true"] .lane-toggle-mark {
+      width: 22px;
+      height: 22px;
+      font-size: 15px;
     }
     .lane-ships {
       display: grid;
@@ -1190,6 +1209,10 @@ const html = String.raw`<!doctype html>
       '</button>';
     }
 
+    function laneGridTrack(lane) {
+      return lane.collapsed ? 'var(--collapsed-lane-width)' : 'minmax(170px, 1fr)';
+    }
+
     function shortPath(value) {
       if (!value) return '';
       var parts = String(value).split('/');
@@ -1491,11 +1514,17 @@ const html = String.raw`<!doctype html>
     function renderLanes() {
       var lanes = document.getElementById('lanes');
       var groups = groupFleet();
-      lanes.innerHTML = stationDefs.map(function(def) {
+      var renderedLanes = stationDefs.map(function(def) {
         var ships = groups[def.id] || [];
         if (!ships.length) return '';
         var collapsed = laneCollapsed(def, ships);
-        var cards = collapsed ? '' : ships.map(function(ship) {
+        return { def: def, ships: ships, collapsed: collapsed };
+      }).filter(Boolean);
+      lanes.style.gridTemplateColumns = renderedLanes.map(laneGridTrack).join(' ');
+      lanes.innerHTML = renderedLanes.map(function(lane) {
+        var def = lane.def;
+        var collapsed = lane.collapsed;
+        var cards = collapsed ? '' : lane.ships.map(function(ship) {
           var selected = ship.task_id === state.selectedId ? 'true' : 'false';
           return '<button class="ship-card" type="button" data-station="' + escapeHtml(def.id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '" data-ship="' + escapeHtml(ship.task_id) + '" aria-selected="' + selected + '">' +
             '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
@@ -1503,7 +1532,7 @@ const html = String.raw`<!doctype html>
           '</button>';
         }).join('');
         return '<section class="lane" data-station="' + escapeHtml(def.id) + '" data-collapsed="' + (collapsed ? 'true' : 'false') + '">' +
-          laneTitleHtml(def, ships.length, collapsed) +
+          laneTitleHtml(def, lane.ships.length, collapsed) +
           '<div class="lane-ships" id="lane-ships-' + escapeHtml(def.id) + '"' + (collapsed ? ' hidden' : '') + '>' + cards + '</div>' +
         '</section>';
       }).join('');
