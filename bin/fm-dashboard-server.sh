@@ -835,7 +835,7 @@ const html = String.raw`<!doctype html>
       { id: 'underway', label: 'Underway' },
       { id: 'gate_run', label: 'Gate Run' },
       { id: 'needs_captain', label: 'Needs Captain' },
-      { id: 'answered', label: 'Answered' },
+      { id: 'answered', label: 'Answered Today' },
       { id: 'arrived_today', label: 'Arrived Today' },
       { id: 'done_earlier', label: 'Done Earlier' },
       { id: 'needs_reconciliation', label: 'Needs Reconciliation' },
@@ -903,7 +903,7 @@ const html = String.raw`<!doctype html>
       station = normalizeStation(station);
       if (station === 'arrived_today') return 'Arrived Today';
       if (station === 'done_earlier') return 'Done Earlier';
-      if (station === 'answered') return 'Answered';
+      if (station === 'answered') return 'Answered Today';
       if (station === 'needs_reconciliation') return 'Needs Reconciliation';
       return String(station || 'unknown').replace(/_/g, ' ');
     }

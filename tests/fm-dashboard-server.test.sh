@@ -399,7 +399,7 @@ assert(!strip.includes('ship-tab'), 'top strip must not regress to fleet task ca
 assert(!strip.includes('data-ship='), 'top strip must not contain selectable ship cards');
 assert(detail.includes('Pipeline status'), 'detail panel should keep compact pipeline status');
 assert(!detail.includes('class="pipeline-rail"'), 'detail panel must not duplicate the top pipeline rail');
-assert(lanes.includes('Answered'), 'lanes should render the Answered station');
+assert(lanes.includes('Answered Today'), 'lanes should render the Answered Today station');
 assert(lanes.includes('Gamma answered report'), 'answered lane should render completed report rows');
 const deltaIndex = lanes.indexOf('Delta newer report');
 const gammaIndex = lanes.indexOf('Gamma answered report');
@@ -438,7 +438,7 @@ test_routes_and_methods() {
   assert_grep 'displayTitle(ship)' "$body" "dashboard HTML does not prefer display_title for cards"
   assert_grep 'Open PR' "$body" "dashboard HTML does not render a PR link in details"
   assert_grep 'attention-badge' "$body" "dashboard HTML does not include needs-action badge markup"
-  assert_grep 'Answered' "$body" "dashboard HTML does not expose Answered lane"
+  assert_grep 'Answered Today' "$body" "dashboard HTML does not expose Answered Today lane"
   assert_grep 'Arrived Today' "$body" "dashboard HTML does not expose Arrived Today lane"
   assert_grep 'Done Earlier' "$body" "dashboard HTML does not expose Done Earlier lane"
   assert_grep 'Needs Reconciliation' "$body" "dashboard HTML does not expose Needs Reconciliation lane"

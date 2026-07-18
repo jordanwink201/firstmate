@@ -1062,6 +1062,8 @@ print_report_fleet_rows() {
     id=$(basename "$(dirname "$report_path")")
     [ -n "$id" ] || continue
     task_id_seen "$id" && continue
+    set_timeline_from_epoch "$report_mtime" report-file-mtime
+    [ "$TL_FRESHNESS" = today ] || continue
     display_title=$(report_title_from_file "$report_path")
     [ -n "$display_title" ] || display_title=$id
     summary=$(report_summary_from_file "$report_path")
@@ -1069,7 +1071,6 @@ print_report_fleet_rows() {
     project=$(report_project_from_file "$report_path")
     report_url="/api/reports/$id"
 
-    set_timeline_from_epoch "$report_mtime" report-file-mtime
     set_pipeline_fields scout report answered "done" report-store \
       "${summary:-report written}" "done" "${summary:-report written}" \
       "" archived "" "" report-store

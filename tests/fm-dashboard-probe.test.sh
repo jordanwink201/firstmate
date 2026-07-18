@@ -693,7 +693,7 @@ EOF
     "kind=scout" \
     "mode=report"
 
-  FM_DASHBOARD_REPORT_LIMIT=1 run_probe_json "$dir" "$out"
+  FM_DASHBOARD_REPORT_LIMIT=12 run_probe_json "$dir" "$out"
 
   assert_jq_true '.fleet | map(select(.task_id == "scout-active")) | length == 1' \
     "$out" "active scout with a report file should not duplicate"
@@ -704,7 +704,7 @@ EOF
   assert_jq_true '[.stations[] | select(.station == "answered") | .task_id] == ["scout-new"]' \
     "$out" "completed scout reports did not feed the answered lane with the report limit applied"
   assert_jq_true '.fleet | map(.task_id) | index("scout-old") | not' \
-    "$out" "report limit did not bound older completed reports"
+    "$out" "completed scout reports did not filter to today"
   pass "completed scout reports remain visible as answered dashboard rows"
 }
 
