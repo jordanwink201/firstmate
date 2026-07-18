@@ -103,11 +103,44 @@ make_case() {
       },
       "current_state": {"state": "done", "source": "status-log", "detail": "completed earlier", "raw": "done: completed earlier"},
       "latest_status": {"path": "/tmp/state/beta-t2.status", "verb": "done", "note": "completed earlier", "raw": "2026-07-16 done: completed earlier"}
+    },
+    {
+      "task_id": "gamma-report",
+      "display_title": "Gamma answered report",
+      "display_subtitle": "gamma-report · scout report",
+      "attention": "done",
+      "branch": "",
+      "commit_short": "",
+      "pr_url": "",
+      "report_url": "/api/reports/gamma-report",
+      "report_path": "/tmp/fmhome/data/gamma-report/report.md",
+      "project": "cad",
+      "worktree": "",
+      "kind": "scout",
+      "mode": "report",
+      "harness": "",
+      "model": "",
+      "effort": "",
+      "backend": "archived",
+      "backend_liveness": "archived",
+      "timeline": {"done_at": "2026-07-18T12:00:00Z", "done_date": "2026-07-18", "source": "report-file-mtime", "freshness": "today"},
+      "pipeline": {
+        "profile": "scout_report",
+        "main_stage": "review_ready",
+        "stage_label": "Review Ready",
+        "next_human_action": "review scout report",
+        "source_confidence": "approximate",
+        "evidence": ["source=report-store"],
+        "validation_branch": null
+      },
+      "current_state": {"state": "done", "source": "report-store", "detail": "Report summary", "raw": "/tmp/fmhome/data/gamma-report/report.md"},
+      "latest_status": {"path": "/tmp/fmhome/data/gamma-report/report.md", "verb": "done", "note": "Report summary", "raw": "done: scout report written"}
     }
   ],
   "stations": [
     {"task_id": "alpha-t1", "station": "gate_run", "reason": "working run-step has validation or test wording"},
-    {"task_id": "beta-t2", "station": "done_earlier", "reason": "done signal has prior-date evidence"}
+    {"task_id": "beta-t2", "station": "done_earlier", "reason": "done signal has prior-date evidence"},
+    {"task_id": "gamma-report", "station": "answered", "reason": "completed scout report is available"}
   ],
   "supervision": {
     "watcher": {"fresh": true, "stale": false, "age_seconds": 12},
@@ -119,6 +152,13 @@ make_case() {
   }
 }
 JSON
+  mkdir -p "$dir/fmhome/data/gamma-report"
+  cat > "$dir/fmhome/data/gamma-report/report.md" <<'EOF'
+# Gamma Report
+
+## Finding
+Report summary
+EOF
   printf 'ok\n' > "$dir/fake/behavior"
   cat > "$dir/fake/fm-dashboard-probe.sh" <<'SH'
 #!/usr/bin/env bash
@@ -320,13 +360,26 @@ assert(!strip.includes('ship-tab'), 'top strip must not regress to fleet task ca
 assert(!strip.includes('data-ship='), 'top strip must not contain selectable ship cards');
 assert(detail.includes('Pipeline status'), 'detail panel should keep compact pipeline status');
 assert(!detail.includes('class="pipeline-rail"'), 'detail panel must not duplicate the top pipeline rail');
+assert(lanes.includes('Answered'), 'lanes should render the Answered station');
+assert(lanes.includes('Gamma answered report'), 'answered lane should render completed report rows');
+assert(lanes.includes('Reported Jul 18'), 'answered report cards should render the report date chip');
 assert(lanes.includes('Done Earlier'), 'lanes should render the Done Earlier station');
 assert(lanes.includes('Done Jul 16'), 'done cards should render the completion date chip');
 assert(!lanes.includes('empty-lane'), 'zero-count lanes should stay hidden at runtime');
 assert(!lanes.includes('station-chip'), 'lane cards should not repeat station chips at runtime');
 assert(!lanes.includes('attention-badge'), 'lane cards should not repeat needs-action badges at runtime');
-assert(meta.includes('2 records'), 'meta should count restored fleet records');
+assert(meta.includes('3 records'), 'meta should count restored fleet records');
 assert(meta.includes('state lag'), 'meta should surface supervision lag when wake queue is pending');
+
+context.state.selectedId = 'gamma-report';
+context.render();
+const reportStrip = elements.get('fleetStrip').innerHTML;
+const reportDetail = elements.get('detail').innerHTML;
+assert(reportStrip.includes('Gamma answered report'), 'answered report should render in the selected pipeline identity');
+assert(reportStrip.includes('Review') && reportStrip.includes('Now'), 'answered report should mark Review as current in the top rail');
+assert(reportDetail.includes('Report ready'), 'answered report detail should expose report-ready action state');
+assert(reportDetail.includes('Open report'), 'answered report detail should link to the Markdown report');
+assert(reportDetail.includes('/tmp/fmhome/data/gamma-report/report.md'), 'answered report detail should expose the local report path in operational refs');
 NODE
 }
 
@@ -343,6 +396,7 @@ test_routes_and_methods() {
   assert_grep 'displayTitle(ship)' "$body" "dashboard HTML does not prefer display_title for cards"
   assert_grep 'Open PR' "$body" "dashboard HTML does not render a PR link in details"
   assert_grep 'attention-badge' "$body" "dashboard HTML does not include needs-action badge markup"
+  assert_grep 'Answered' "$body" "dashboard HTML does not expose Answered lane"
   assert_grep 'Arrived Today' "$body" "dashboard HTML does not expose Arrived Today lane"
   assert_grep 'Done Earlier' "$body" "dashboard HTML does not expose Done Earlier lane"
   assert_grep 'Needs Reconciliation' "$body" "dashboard HTML does not expose Needs Reconciliation lane"
@@ -352,6 +406,8 @@ test_routes_and_methods() {
   assert_grep 'selected-pipeline-next' "$body" "top rail does not expose selected task next action"
   assert_grep 'rail-dot' "$body" "dashboard pipeline rail does not render Jenkins-style status dots"
   assert_grep 'doneChipHtml' "$body" "dashboard HTML does not include done date chip renderer"
+  assert_grep 'reportChipHtml' "$body" "dashboard HTML does not include report date chip renderer"
+  assert_grep 'Open report' "$body" "dashboard HTML does not render a report link in details"
   assert_no_grep 'function shipSummaryCardInnerHtml' "$body" "top rail still carries fleet-card summary rendering"
   assert_grep 'What matters' "$body" "dashboard detail does not prioritize captain-facing fields"
   assert_grep 'Pipeline status' "$body" "dashboard detail does not render compact pipeline status"
@@ -369,7 +425,7 @@ test_routes_and_methods() {
   headers="$dir/snapshot.headers"
   code=$(http_request_with_headers GET "$base" /api/snapshot "$body" "$headers")
   [ "$code" = 200 ] || fail "/api/snapshot returned HTTP $code: $(cat "$body")"
-  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
+  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .fleet[2].kind == "scout" and .fleet[2].report_url == "/api/reports/gamma-report" and .fleet[2].pipeline.main_stage == "review_ready" and .stations[2].station == "answered" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
     || fail "/api/snapshot did not return valid probe JSON: $(cat "$body")"
   [ "$(header_value "$headers" x-firstmate-cache)" = fresh ] \
     || fail "/api/snapshot did not mark a fresh cache response: $(cat "$headers")"
@@ -382,6 +438,23 @@ test_routes_and_methods() {
   code=$(http_request GET "$base" /api/report "$body")
   [ "$code" = 200 ] || fail "/api/report returned HTTP $code: $(cat "$body")"
   assert_contains "$(cat "$body")" "Fleet report" "/api/report did not return probe report text"
+
+  body="$dir/report-file.md"
+  code=$(http_request GET "$base" /api/reports/gamma-report "$body")
+  [ "$code" = 200 ] || fail "/api/reports/gamma-report returned HTTP $code: $(cat "$body")"
+  assert_contains "$(cat "$body")" "# Gamma Report" "/api/reports/gamma-report did not return the stored Markdown report"
+
+  body="$dir/bad-report.json"
+  code=$(http_request GET "$base" /api/reports/bad%2Fid "$body")
+  [ "$code" = 400 ] || fail "/api/reports/bad%2Fid returned HTTP $code instead of 400: $(cat "$body")"
+  jq -e '.error == "bad_report_id"' "$body" >/dev/null \
+    || fail "bad report id body was not clear JSON: $(cat "$body")"
+
+  body="$dir/missing-report.json"
+  code=$(http_request GET "$base" /api/reports/missing-report "$body")
+  [ "$code" = 404 ] || fail "/api/reports/missing-report returned HTTP $code instead of 404: $(cat "$body")"
+  jq -e '.error == "report_not_found"' "$body" >/dev/null \
+    || fail "missing report body was not clear JSON: $(cat "$body")"
 
   body="$dir/health.json"
   code=$(http_request GET "$base" /healthz "$body")
@@ -403,7 +476,7 @@ test_routes_and_methods() {
   [ "$code" = 404 ] || fail "unknown route returned HTTP $code instead of 404"
   jq -e '.error == "not_found"' "$body" >/dev/null || fail "404 body was not clear JSON: $(cat "$body")"
 
-  pass "dashboard server serves HTML, cached snapshot, report, health, 405, and 404"
+  pass "dashboard server serves HTML, cached snapshot, reports, health, 405, and 404"
 }
 
 test_dashboard_runtime_keeps_top_pipeline_rail() {

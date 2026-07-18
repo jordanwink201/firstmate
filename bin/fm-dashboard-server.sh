@@ -5,6 +5,7 @@
 # to 127.0.0.1 by default, accepts only GET requests, and exposes:
 #   /api/snapshot  cached JSON from a background fm-dashboard-probe.sh --json loop
 #   /api/report    on-demand text report from fm-dashboard-probe.sh --report
+#   /api/reports/<task-id>  completed scout report Markdown
 #   /healthz       tiny JSON health check
 #
 # /api/snapshot is the sole data source the dashboard UI polls. The detail
@@ -61,6 +62,8 @@ esac
 command -v node >/dev/null 2>&1 || { printf 'fm-dashboard-server.sh: node not found\n' >&2; exit 127; }
 
 FM_DASHBOARD_PROBE_BIN="${FM_DASHBOARD_PROBE_BIN:-$SCRIPT_DIR/fm-dashboard-probe.sh}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+FM_DASHBOARD_DATA_DIR="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 [ -x "$FM_DASHBOARD_PROBE_BIN" ] || {
   printf 'fm-dashboard-server.sh: probe is not executable: %s\n' "$FM_DASHBOARD_PROBE_BIN" >&2
   exit 1
@@ -69,12 +72,15 @@ FM_DASHBOARD_PROBE_BIN="${FM_DASHBOARD_PROBE_BIN:-$SCRIPT_DIR/fm-dashboard-probe
 export FM_DASHBOARD_HOST="$HOST"
 export FM_DASHBOARD_PORT="$PORT"
 export FM_DASHBOARD_PROBE_BIN
+export FM_DASHBOARD_DATA_DIR
 
 exec node <<'NODE'
 'use strict';
 
 const http = require('node:http');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const host = process.env.FM_DASHBOARD_HOST || '127.0.0.1';
 const port = Number(process.env.FM_DASHBOARD_PORT || '8765');
@@ -85,6 +91,7 @@ const refreshMsRaw = Number(process.env.FM_DASHBOARD_REFRESH_MS || '10000');
 const refreshMs = Number.isFinite(refreshMsRaw) && refreshMsRaw > 0 ? refreshMsRaw : 10000;
 const maxOutputBytesRaw = Number(process.env.FM_DASHBOARD_PROBE_MAX_OUTPUT_BYTES || String(4 * 1024 * 1024));
 const maxOutputBytes = Number.isFinite(maxOutputBytesRaw) && maxOutputBytesRaw > 0 ? maxOutputBytesRaw : 4 * 1024 * 1024;
+const dataDir = path.resolve(process.env.FM_DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'));
 
 const cache = {
   snapshot: null,
@@ -325,6 +332,7 @@ const html = String.raw`<!doctype html>
     .station-chip[data-station="underway"] { background: var(--teal); }
     .station-chip[data-station="gate_run"] { background: var(--amber); }
     .station-chip[data-station="needs_captain"] { background: var(--red); }
+    .station-chip[data-station="answered"] { background: var(--teal); }
     .station-chip[data-station="at_port"] { background: var(--green); }
     .station-chip[data-station="arrived_today"] { background: var(--green); }
     .station-chip[data-station="done_earlier"] { background: var(--gray); }
@@ -423,6 +431,7 @@ const html = String.raw`<!doctype html>
     .ship-card[data-station="underway"] { border-left-color: var(--teal); }
     .ship-card[data-station="gate_run"] { border-left-color: var(--amber); }
     .ship-card[data-station="needs_captain"] { border-left-color: var(--red); }
+    .ship-card[data-station="answered"] { border-left-color: var(--teal); }
     .ship-card[data-station="at_port"] { border-left-color: var(--green); }
     .ship-card[data-station="arrived_today"] { border-left-color: var(--green); }
     .ship-card[data-station="done_earlier"] { border-left-color: var(--gray); }
@@ -826,6 +835,7 @@ const html = String.raw`<!doctype html>
       { id: 'underway', label: 'Underway' },
       { id: 'gate_run', label: 'Gate Run' },
       { id: 'needs_captain', label: 'Needs Captain' },
+      { id: 'answered', label: 'Answered' },
       { id: 'arrived_today', label: 'Arrived Today' },
       { id: 'done_earlier', label: 'Done Earlier' },
       { id: 'needs_reconciliation', label: 'Needs Reconciliation' },
@@ -848,7 +858,7 @@ const html = String.raw`<!doctype html>
       { id: 'push', label: 'Push' },
       { id: 'ci', label: 'CI' }
     ];
-    var selectPriority = ['needs_captain', 'needs_reconciliation', 'gate_run', 'underway', 'casting_off', 'unknown', 'arrived_today', 'done_earlier'];
+    var selectPriority = ['needs_captain', 'needs_reconciliation', 'gate_run', 'underway', 'casting_off', 'unknown', 'answered', 'arrived_today', 'done_earlier'];
     var state = {
       snapshot: null,
       selectedId: null,
@@ -893,6 +903,7 @@ const html = String.raw`<!doctype html>
       station = normalizeStation(station);
       if (station === 'arrived_today') return 'Arrived Today';
       if (station === 'done_earlier') return 'Done Earlier';
+      if (station === 'answered') return 'Answered';
       if (station === 'needs_reconciliation') return 'Needs Reconciliation';
       return String(station || 'unknown').replace(/_/g, ' ');
     }
@@ -939,6 +950,13 @@ const html = String.raw`<!doctype html>
       return '<span class="done-chip">' + escapeHtml(label) + '</span>';
     }
 
+    function reportChipHtml(ship) {
+      if (!ship || stationOf(ship.task_id) !== 'answered') return '';
+      var timeline = ship.timeline || {};
+      var label = timeline.done_date ? 'Reported ' + formatDoneDate(timeline.done_date) : 'Report ready';
+      return '<span class="done-chip">' + escapeHtml(label) + '</span>';
+    }
+
     function doneTimelineText(ship) {
       if (!ship || !ship.timeline || !ship.timeline.done_date) return '';
       var source = ship.timeline.source && ship.timeline.source !== 'none' ? ' via ' + ship.timeline.source : '';
@@ -946,7 +964,7 @@ const html = String.raw`<!doctype html>
     }
 
     function laneCardMetaHtml(ship) {
-      var pieces = [cardTaskIdHtml(ship), doneChipHtml(ship)].filter(Boolean);
+      var pieces = [cardTaskIdHtml(ship), doneChipHtml(ship), reportChipHtml(ship)].filter(Boolean);
       if (!pieces.length) return '';
       return '<span class="card-meta">' + pieces.join('') + '</span>';
     }
@@ -1013,6 +1031,7 @@ const html = String.raw`<!doctype html>
       text = text.replace(/\s+\(commit\s+[a-f0-9]{7,40}\)/ig, '');
       text = text.replace(/\bworktree isolation\b/ig, 'setup checks');
       text = text.replace(/\breading required skill instructions\b/ig, 'reading instructions');
+      if (!text && station === 'answered') return 'Report is ready for review.';
       if (!text && station === 'arrived_today') return 'Finished and archived for today.';
       if (!text && station === 'done_earlier') return 'Finished before today.';
       if (!text && station === 'needs_reconciliation') return 'State needs reconciliation.';
@@ -1030,6 +1049,7 @@ const html = String.raw`<!doctype html>
       if (station === 'needs_reconciliation') return 'Reconcile task state.';
       if (ship && ship.attention === 'needs_action') return 'Review the latest update.';
       if (station === 'needs_captain') return 'Review the latest update.';
+      if (station === 'answered') return 'Review the report.';
       if (station === 'arrived_today') return 'No action. Kept here until tomorrow.';
       if (station === 'done_earlier') return 'No action. Earlier completion retained for context.';
       if (station === 'gate_run') return 'Wait for validation to finish.';
@@ -1058,6 +1078,7 @@ const html = String.raw`<!doctype html>
       if (station === 'gate_run') return 'validation_gate';
       if (isDoneStation(station)) return 'landed';
       if (station === 'needs_reconciliation') return 'unknown';
+      if (station === 'answered') return 'review_ready';
       if (station === 'underway') return 'run_work';
       if (station === 'casting_off') return 'spawn';
       if (station === 'needs_captain') return 'human_followthrough';
@@ -1165,6 +1186,7 @@ const html = String.raw`<!doctype html>
       if (ship && ship.attention === 'needs_action') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'needs_captain') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'gate_run') return { label: 'Validating', tone: 'active' };
+      if (station === 'answered') return { label: 'Report ready', tone: 'landed' };
       if (station === 'arrived_today') return { label: 'Landed today', tone: 'landed' };
       if (station === 'done_earlier') return { label: 'Done earlier', tone: 'landed' };
       if (station === 'underway') return { label: 'In progress', tone: 'active' };
@@ -1176,6 +1198,9 @@ const html = String.raw`<!doctype html>
       var links = [];
       if (ship.pr_url) {
         links.push('<a class="action-link" href="' + escapeHtml(ship.pr_url) + '" target="_blank" rel="noopener noreferrer">Open PR</a>');
+      }
+      if (ship.report_url) {
+        links.push('<a class="action-link" href="' + escapeHtml(ship.report_url) + '" target="_blank" rel="noopener noreferrer">Open report</a>');
       }
       links.push('<span class="pill">' + escapeHtml(ship.task_id || '') + '</span>');
       return links.join('');
@@ -1325,6 +1350,7 @@ const html = String.raw`<!doctype html>
         '<details class="detail-section">' +
           '<summary>Operational refs</summary>' +
           '<dl class="detail-facts">' +
+            (ship.report_path ? kvRow('Report', ship.report_path, false, true, false) : '') +
             kvRow('State', current, false, true, true) +
             kvRow('Reason', reason, false, true, true) +
             kvRow('Branch', branchCommit, false, true, true) +
@@ -1618,6 +1644,32 @@ async function serveProbe(res, kind) {
   else sendProbeFailure(res, kind, result.error);
 }
 
+function reportPathForTask(taskId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(taskId)) return null;
+  const candidate = path.resolve(dataDir, taskId, 'report.md');
+  const root = dataDir.endsWith(path.sep) ? dataDir : `${dataDir}${path.sep}`;
+  return candidate.startsWith(root) ? candidate : null;
+}
+
+async function serveReportFile(res, taskId) {
+  const reportPath = reportPathForTask(taskId);
+  if (!reportPath) {
+    sendJson(res, 400, { error: 'bad_report_id' });
+    return;
+  }
+
+  try {
+    const body = await fs.promises.readFile(reportPath, 'utf8');
+    send(res, 200, baseHeaders('text/markdown; charset=utf-8'), body);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      sendJson(res, 404, { error: 'report_not_found' });
+      return;
+    }
+    sendJson(res, 500, { error: 'report_read_failed', message: trimmedError(error) });
+  }
+}
+
 async function serveSnapshot(res) {
   if (cache.snapshot) {
     sendSnapshotSuccess(res);
@@ -1666,6 +1718,14 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/api/report') {
     serveProbe(res, 'report').catch(error => sendProbeFailure(res, 'report', error));
+    return;
+  }
+
+  const reportMatch = url.pathname.match(/^\/api\/reports\/([^/]+)$/);
+  if (reportMatch) {
+    serveReportFile(res, decodeURIComponent(reportMatch[1])).catch(error => {
+      sendJson(res, 500, { error: 'report_read_failed', message: trimmedError(error) });
+    });
     return;
   }
 

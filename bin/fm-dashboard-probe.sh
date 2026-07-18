@@ -25,8 +25,10 @@ ARRIVALS="$DATA/dashboard-arrivals.jsonl"
 CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 CASTING_OFF_GRACE_SECONDS="${FM_DASHBOARD_CASTING_OFF_GRACE_SECONDS:-600}"
 WATCHER_GRACE_SECONDS="${FM_DASHBOARD_WATCHER_GRACE_SECONDS:-300}"
+REPORT_LIMIT="${FM_DASHBOARD_REPORT_LIMIT:-12}"
 case "$CASTING_OFF_GRACE_SECONDS" in ""|*[!0-9]*) CASTING_OFF_GRACE_SECONDS=600 ;; esac
 case "$WATCHER_GRACE_SECONDS" in ""|*[!0-9]*) WATCHER_GRACE_SECONDS=300 ;; esac
+case "$REPORT_LIMIT" in ""|*[!0-9]*) REPORT_LIMIT=12 ;; esac
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -630,6 +632,10 @@ pipeline_source_confidence_for() {
     printf 'approximate'
     return
   fi
+  if [ "$station" = answered ]; then
+    printf 'approximate'
+    return
+  fi
   if [ "$source" = teardown ] || [ "$liveness" = archived ]; then
     printf 'approximate'
     return
@@ -638,7 +644,7 @@ pipeline_source_confidence_for() {
     landed|review_ready)
       case "$current_source" in
         run-step|pane) printf 'live'; return ;;
-        status-log) printf 'approximate'; return ;;
+        status-log|report-store) printf 'approximate'; return ;;
       esac
       ;;
   esac
@@ -650,7 +656,7 @@ pipeline_source_confidence_for() {
   fi
   case "$current_source" in
     run-step|pane) printf 'live' ;;
-    status-log) printf 'approximate' ;;
+    status-log|report-store) printf 'approximate' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -665,6 +671,10 @@ pipeline_stage_for() {
   case "$station" in
     done_earlier)
       printf 'landed'
+      return
+      ;;
+    answered)
+      printf 'review_ready'
       return
       ;;
     unknown|needs_reconciliation)
@@ -795,7 +805,7 @@ set_pipeline_fields() {
   [ -n "$status_verb" ] && PIPE_EVIDENCE+=("status.verb=$status_verb")
   [ -n "${TL_SOURCE:-}" ] && [ "${TL_SOURCE:-none}" != none ] && PIPE_EVIDENCE+=("timeline.source=$TL_SOURCE")
   [ -n "$pr_url" ] && PIPE_EVIDENCE+=("pr_url=present")
-  if [ -z "$worktree" ] || { [ -n "$worktree" ] && [ ! -d "$worktree" ]; }; then
+  if [ "$source" != report-store ] && [ "$source" != teardown ] && { [ -z "$worktree" ] || { [ -n "$worktree" ] && [ ! -d "$worktree" ]; }; }; then
     PIPE_EVIDENCE+=("worktree=missing")
   fi
   if [ -n "$target" ] && [ "$liveness" != alive ] && [ "$liveness" != archived ]; then
@@ -975,6 +985,151 @@ print_arrival_fleet_rows() {
   )
 }
 
+report_title_from_file() {
+  local file=$1 title
+  title=$(awk '
+    function clean(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      gsub(/^["`]+|["`]+$/, "", value)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    /^Card:[[:space:]]*/ {
+      line = $0
+      sub(/^Card:[[:space:]]*/, "", line)
+      print clean(line)
+      found = 1
+      exit
+    }
+    /^#[[:space:]]+/ && fallback == "" {
+      line = $0
+      sub(/^#[[:space:]]+/, "", line)
+      fallback = clean(line)
+    }
+    END {
+      if (!found && fallback != "") print fallback
+    }
+  ' "$file" 2>/dev/null)
+  printf '%s' "$title"
+}
+
+report_summary_from_file() {
+  local file=$1 summary
+  summary=$(awk '
+    /^##[[:space:]]+Finding/ { in_finding = 1; next }
+    /^##[[:space:]]+/ && in_finding { exit }
+    in_finding && NF {
+      print
+      exit
+    }
+  ' "$file" 2>/dev/null)
+  if [ -z "$summary" ]; then
+    summary=$(awk '
+      /^#/ { next }
+      /^Card:/ { next }
+      /^Scout date:/ { next }
+      /^Checkout:/ { next }
+      NF {
+        print
+        exit
+      }
+    ' "$file" 2>/dev/null)
+  fi
+  collapse_spaces "$summary"
+}
+
+report_project_from_file() {
+  local file=$1 project
+  project=$(awk '
+    /^Checkout:[[:space:]]*/ {
+      line = $0
+      sub(/^Checkout:[[:space:]]*/, "", line)
+      gsub(/`/, "", line)
+      n = split(line, parts, "/")
+      if (n > 0) print parts[n]
+      exit
+    }
+  ' "$file" 2>/dev/null)
+  printf '%s' "$project"
+}
+
+print_report_fleet_rows() {
+  local row report_mtime report_path id display_title display_subtitle summary project report_url emitted=0
+  [ -d "$DATA" ] || return 0
+  while IFS=$'\t' read -r report_mtime report_path || [ -n "${report_path:-}" ]; do
+    [ -n "${report_path:-}" ] || continue
+    [ -f "$report_path" ] || continue
+    id=$(basename "$(dirname "$report_path")")
+    [ -n "$id" ] || continue
+    task_id_seen "$id" && continue
+    display_title=$(report_title_from_file "$report_path")
+    [ -n "$display_title" ] || display_title=$id
+    summary=$(report_summary_from_file "$report_path")
+    display_subtitle="${id} · scout report"
+    project=$(report_project_from_file "$report_path")
+    report_url="/api/reports/$id"
+
+    set_timeline_from_epoch "$report_mtime" report-file-mtime
+    set_pipeline_fields scout report answered "done" report-store \
+      "${summary:-report written}" "done" "${summary:-report written}" \
+      "" archived "" "" report-store
+    STATION_IDS+=("$id")
+    STATION_VALUES+=(answered)
+    STATION_REASONS+=("completed scout report is available")
+    [ "$first" -eq 1 ] || printf ',\n'
+    first=0
+    printf '    {\n'
+    printf '      "task_id": %s,\n' "$(json_string "$id")"
+    printf '      "display_title": %s,\n' "$(json_string "$display_title")"
+    printf '      "display_subtitle": %s,\n' "$(json_string "$display_subtitle")"
+    printf '      "attention": "done",\n'
+    printf '      "branch": "",\n'
+    printf '      "commit_short": "",\n'
+    printf '      "pr_url": "",\n'
+    printf '      "report_url": %s,\n' "$(json_string "$report_url")"
+    printf '      "report_path": %s,\n' "$(json_string "$report_path")"
+    printf '      "meta_path": "",\n'
+    printf '      "project": %s,\n' "$(json_string "$project")"
+    printf '      "worktree": "",\n'
+    printf '      "kind": "scout",\n'
+    printf '      "mode": "report",\n'
+    printf '      "harness": "",\n'
+    printf '      "model": "",\n'
+    printf '      "effort": "",\n'
+    printf '      "backend": "archived",\n'
+    printf '      "backend_known": false,\n'
+    printf '      "window": "",\n'
+    printf '      "backend_target": "",\n'
+    printf '      "backend_liveness": "archived",\n'
+    printf '      "source": "report-store",\n'
+    printf '      "reported_at": %s,\n' "$(json_string "$TL_DONE_AT")"
+    print_timeline_json
+    printf '      "current_state": {\n'
+    printf '        "state": "done",\n'
+    printf '        "source": "report-store",\n'
+    printf '        "detail": %s,\n' "$(json_string "${summary:-report written}")"
+    printf '        "raw": %s\n' "$(json_string "$report_path")"
+    printf '      },\n'
+    printf '      "latest_status": {\n'
+    printf '        "path": %s,\n' "$(json_string "$report_path")"
+    printf '        "verb": "done",\n'
+    printf '        "note": %s,\n' "$(json_string "${summary:-report written}")"
+    printf '        "raw": "done: scout report written"\n'
+    printf '      },\n'
+    print_pipeline_json
+    printf '\n'
+    printf '    }'
+    emitted=$((emitted + 1))
+    [ "$emitted" -lt "$REPORT_LIMIT" ] || break
+  done < <(
+    for report_path in "$DATA"/*/report.md; do
+      [ -f "$report_path" ] || continue
+      report_mtime=$(stat_mtime "$report_path" || true)
+      printf '%s\t%s\n' "${report_mtime:-0}" "$report_path"
+    done | sort -rn
+  )
+}
+
 task_id_from_file() {
   local path=$1 base
   base=$(basename "$path")
@@ -1094,6 +1249,7 @@ print_fleet_and_station_arrays() {
     printf '    }'
   done
   print_arrival_fleet_rows
+  print_report_fleet_rows
   printf '\n  ],\n'
 
   printf '  "stations": [\n'
