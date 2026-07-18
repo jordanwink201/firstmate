@@ -419,9 +419,15 @@ const reportStrip = elements.get('fleetStrip').innerHTML;
 const reportDetail = elements.get('detail').innerHTML;
 assert(reportStrip.includes('Gamma answered report'), 'answered report should render in the selected pipeline identity');
 assert(reportStrip.includes('Review') && reportStrip.includes('Now'), 'answered report should mark Review as current in the top rail');
+assert(reportDetail.includes('Answered Today'), 'answered report detail should keep the current station context');
 assert(reportDetail.includes('Report ready'), 'answered report detail should expose report-ready action state');
 assert(reportDetail.includes('Open report'), 'answered report detail should link to the Markdown report');
 assert(reportDetail.includes('/tmp/fmhome/data/gamma-report/report.md'), 'answered report detail should expose the local report path in operational refs');
+assert(!reportDetail.includes('<span class="pill">Scout report</span>'), 'answered report detail should not repeat the profile pill');
+assert(!reportDetail.includes('<span class="task-id">gamma-report</span>'), 'answered report detail should not repeat the task id header');
+assert(!reportDetail.includes('<span class="pill">gamma-report</span>'), 'answered report detail should not repeat the task id action pill');
+assert(!reportDetail.includes('What matters'), 'answered report detail should not duplicate the top-rail next action');
+assert(!reportDetail.includes('Pipeline status'), 'answered report detail should not duplicate the top-rail pipeline status');
 NODE
 }
 

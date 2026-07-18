@@ -1239,8 +1239,20 @@ const html = String.raw`<!doctype html>
       if (ship.report_url) {
         links.push('<a class="action-link" href="' + escapeHtml(ship.report_url) + '" target="_blank" rel="noopener noreferrer">Open report</a>');
       }
-      links.push('<span class="pill">' + escapeHtml(ship.task_id || '') + '</span>');
       return links.join('');
+    }
+
+    function detailMetaHtml(ship, pipeline, station) {
+      var pieces = [];
+      if (ship.task_id && station !== 'answered') {
+        pieces.push('<span class="task-id">' + escapeHtml(ship.task_id) + '</span>');
+      }
+      if (station !== 'answered') {
+        pieces.push('<span class="pill">' + escapeHtml(profileLabel(pipeline.profile)) + '</span>');
+      }
+      var badge = attentionBadge(ship);
+      if (badge) pieces.push(badge);
+      return pieces.length ? '<div class="detail-meta">' + pieces.join('') + '</div>' : '';
     }
 
     function kvRow(label, value, html, compact, muted) {
@@ -1253,6 +1265,25 @@ const html = String.raw`<!doctype html>
         kvRow('Next', nextStep, false, false, false) +
         (done && isDoneStation(station) ? kvRow('Done', done, false, false, false) : '') +
       '</dl>';
+    }
+
+    function whatMattersSectionHtml(ship, station, nextStep) {
+      if (station === 'answered') return '';
+      return '<section class="detail-section">' +
+        '<div class="detail-section-title">What matters</div>' +
+        whatMattersHtml(ship, station, nextStep) +
+      '</section>';
+    }
+
+    function pipelineStatusSectionHtml(pipeline, station) {
+      if (station === 'answered') return '';
+      return '<section class="detail-section pipeline-section">' +
+        '<div class="detail-section-title">Pipeline status</div>' +
+        '<dl class="detail-facts">' +
+          kvRow('Stage', pipeline.stage_label || titleize(pipeline.main_stage), false, true, false) +
+          kvRow('Confidence', pipeline.source_confidence || 'unknown', false, true, pipeline.source_confidence !== 'live') +
+        '</dl>' +
+      '</section>';
     }
 
     function renderMeta() {
@@ -1362,27 +1393,19 @@ const html = String.raw`<!doctype html>
       var update = humanUpdate(ship, station);
       var nextStep = pipeline.next_human_action || nextStepText(ship, station);
       var current = currentStateText(ship);
+      var actionLinks = actionLinksHtml(ship);
       detail.innerHTML = '<div class="detail-head">' +
         '<span class="station-chip" data-station="' + escapeHtml(station) + '">' + escapeHtml(stationLabel(station)) + '</span>' +
         '<h2>' + escapeHtml(displayTitle(ship)) + '</h2>' +
-        '<div class="detail-meta"><span class="task-id">' + escapeHtml(ship.task_id) + '</span><span class="pill">' + escapeHtml(profileLabel(pipeline.profile)) + '</span>' + attentionBadge(ship) + '</div>' +
+        detailMetaHtml(ship, pipeline, station) +
       '</div>' +
       '<div class="detail-body">' +
         '<section class="detail-summary">' +
           '<div class="detail-status" data-tone="' + escapeHtml(action.tone) + '"><strong>' + escapeHtml(action.label) + '</strong><span>' + escapeHtml(update) + '</span></div>' +
-          '<div class="detail-actions">' + actionLinksHtml(ship) + '</div>' +
+          (actionLinks ? '<div class="detail-actions">' + actionLinks + '</div>' : '') +
         '</section>' +
-        '<section class="detail-section">' +
-          '<div class="detail-section-title">What matters</div>' +
-          whatMattersHtml(ship, station, nextStep) +
-        '</section>' +
-        '<section class="detail-section pipeline-section">' +
-          '<div class="detail-section-title">Pipeline status</div>' +
-          '<dl class="detail-facts">' +
-            kvRow('Stage', pipeline.stage_label || titleize(pipeline.main_stage), false, true, false) +
-            kvRow('Confidence', pipeline.source_confidence || 'unknown', false, true, pipeline.source_confidence !== 'live') +
-          '</dl>' +
-        '</section>' +
+        whatMattersSectionHtml(ship, station, nextStep) +
+        pipelineStatusSectionHtml(pipeline, station) +
         noMistakesSectionHtml(pipeline) +
         '<details class="detail-section">' +
           '<summary>Operational refs</summary>' +
