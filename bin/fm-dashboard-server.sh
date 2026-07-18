@@ -388,13 +388,20 @@ const html = String.raw`<!doctype html>
       border-right: 0;
     }
     .lane-title {
-      display: grid;
-      gap: 3px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
       margin: -12px -12px 0;
       padding: 10px 12px 9px;
       border-bottom: 1px solid var(--line-soft);
       background: #fafbfc;
       min-height: 52px;
+    }
+    .lane-title-copy {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
     }
     .lane-title strong {
       font-size: 11px;
@@ -402,10 +409,42 @@ const html = String.raw`<!doctype html>
       color: var(--muted);
       font-weight: 700;
     }
-    .lane-title span {
+    .lane-count {
       font-size: 26px;
       font-weight: 720;
       line-height: 1;
+    }
+    .lane-toggle {
+      appearance: none;
+      width: calc(100% + 24px);
+      border: 0;
+      border-bottom: 1px solid var(--line-soft);
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: background-color 120ms ease;
+    }
+    .lane-toggle:hover {
+      background: #f5f7f9;
+    }
+    .lane-toggle-mark {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+      line-height: 1;
+      margin-top: 2px;
+    }
+    .lane-toggle[aria-expanded="true"] .lane-toggle-mark {
+      border-color: rgba(15, 118, 110, 0.35);
+      color: var(--teal);
     }
     .lane-ships {
       display: grid;
@@ -923,7 +962,7 @@ const html = String.raw`<!doctype html>
       { id: 'needs_captain', label: 'Needs Captain' },
       { id: 'answered', label: 'Answered Today' },
       { id: 'arrived_today', label: 'Arrived Today' },
-      { id: 'done_earlier', label: 'Done Earlier' },
+      { id: 'done_earlier', label: 'Done Earlier', collapsible: true },
       { id: 'needs_reconciliation', label: 'Needs Reconciliation' },
       { id: 'unknown', label: 'Unknown' }
     ];
@@ -954,7 +993,8 @@ const html = String.raw`<!doctype html>
       stale: false,
       lastGoodAt: 0,
       requesting: false,
-      serverRefreshing: false
+      serverRefreshing: false,
+      expandedLanes: {}
     };
 
     function escapeHtml(value) {
@@ -1132,6 +1172,22 @@ const html = String.raw`<!doctype html>
         });
       });
       return groups;
+    }
+
+    function laneCollapsed(def, ships) {
+      if (!def.collapsible || !ships.length) return false;
+      if (state.expandedLanes[def.id]) return false;
+      return !ships.some(function(ship) { return ship.task_id === state.selectedId; });
+    }
+
+    function laneTitleHtml(def, count, collapsed) {
+      var bodyId = 'lane-ships-' + def.id;
+      var copy = '<span class="lane-title-copy"><strong>' + escapeHtml(def.label) + '</strong><span class="lane-count">' + count + '</span></span>';
+      if (!def.collapsible) return '<div class="lane-title">' + copy + '</div>';
+      return '<button class="lane-title lane-toggle" type="button" data-lane-toggle="' + escapeHtml(def.id) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" aria-controls="' + escapeHtml(bodyId) + '">' +
+        copy +
+        '<span class="lane-toggle-mark" aria-hidden="true">' + (collapsed ? '+' : '-') + '</span>' +
+      '</button>';
     }
 
     function shortPath(value) {
@@ -1438,16 +1494,17 @@ const html = String.raw`<!doctype html>
       lanes.innerHTML = stationDefs.map(function(def) {
         var ships = groups[def.id] || [];
         if (!ships.length) return '';
-        var cards = ships.map(function(ship) {
+        var collapsed = laneCollapsed(def, ships);
+        var cards = collapsed ? '' : ships.map(function(ship) {
           var selected = ship.task_id === state.selectedId ? 'true' : 'false';
           return '<button class="ship-card" type="button" data-station="' + escapeHtml(def.id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '" data-ship="' + escapeHtml(ship.task_id) + '" aria-selected="' + selected + '">' +
             '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
             laneCardMetaHtml(ship) +
           '</button>';
         }).join('');
-        return '<section class="lane" data-station="' + escapeHtml(def.id) + '">' +
-          '<div class="lane-title"><strong>' + escapeHtml(def.label) + '</strong><span>' + ships.length + '</span></div>' +
-          '<div class="lane-ships">' + cards + '</div>' +
+        return '<section class="lane" data-station="' + escapeHtml(def.id) + '" data-collapsed="' + (collapsed ? 'true' : 'false') + '">' +
+          laneTitleHtml(def, ships.length, collapsed) +
+          '<div class="lane-ships" id="lane-ships-' + escapeHtml(def.id) + '"' + (collapsed ? ' hidden' : '') + '>' + cards + '</div>' +
         '</section>';
       }).join('');
     }
@@ -1525,6 +1582,13 @@ const html = String.raw`<!doctype html>
     }
 
     document.addEventListener('click', function(event) {
+      var laneToggle = event.target.closest('[data-lane-toggle]');
+      if (laneToggle) {
+        var lane = laneToggle.getAttribute('data-lane-toggle');
+        state.expandedLanes[lane] = laneToggle.getAttribute('aria-expanded') !== 'true';
+        render();
+        return;
+      }
       var button = event.target.closest('[data-ship]');
       if (!button) return;
       state.selectedId = button.getAttribute('data-ship');
