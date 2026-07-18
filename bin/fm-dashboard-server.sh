@@ -107,18 +107,20 @@ const html = String.raw`<!doctype html>
   <title>Firstmate Fleet Dashboard</title>
   <style>
     :root {
-      --bg: #f4f1ea;
-      --paper: #fffdf8;
-      --ink: #1d2528;
-      --muted: #687276;
-      --line: #d7d0c2;
-      --teal: #1d766f;
-      --blue: #3867ad;
-      --amber: #b56a15;
-      --red: #b43d32;
-      --green: #2e7d4f;
-      --gray: #7d8281;
-      --shadow: 0 16px 40px rgba(29, 37, 40, 0.12);
+      --bg: #f7f8fa;
+      --paper: #ffffff;
+      --paper-muted: #f3f5f7;
+      --ink: #18212a;
+      --muted: #667085;
+      --line: #d9dee7;
+      --line-soft: #e8ebf0;
+      --teal: #0f766e;
+      --blue: #2563eb;
+      --amber: #b76e00;
+      --red: #b42318;
+      --green: #20744a;
+      --gray: #6b7280;
+      --shadow: 0 1px 2px rgba(24, 33, 42, 0.06), 0 8px 24px rgba(24, 33, 42, 0.06);
     }
     * {
       box-sizing: border-box;
@@ -127,25 +129,21 @@ const html = String.raw`<!doctype html>
     body {
       margin: 0;
       min-height: 100vh;
-      background:
-        linear-gradient(180deg, rgba(255, 253, 248, 0.85), rgba(244, 241, 234, 0.92)),
-        radial-gradient(circle at 8% 16%, rgba(29, 118, 111, 0.18), transparent 28%),
-        radial-gradient(circle at 88% 12%, rgba(181, 106, 21, 0.16), transparent 26%),
-        var(--bg);
+      background: var(--bg);
       color: var(--ink);
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 15px;
+      font-size: 14px;
     }
     button {
       font: inherit;
     }
     .shell {
-      width: min(1600px, 100%);
+      width: min(1500px, 100%);
       margin: 0 auto;
-      padding: 20px;
+      padding: 18px 20px;
       display: grid;
       grid-template-rows: auto auto minmax(0, 1fr);
-      gap: 14px;
+      gap: 12px;
     }
     .topbar {
       display: grid;
@@ -153,13 +151,13 @@ const html = String.raw`<!doctype html>
       align-items: end;
       gap: 16px;
       border-bottom: 1px solid var(--line);
-      padding-bottom: 14px;
+      padding-bottom: 12px;
     }
     h1 {
       margin: 0;
-      font-size: clamp(24px, 3vw, 42px);
-      line-height: 1.04;
-      font-weight: 760;
+      font-size: clamp(24px, 2.2vw, 34px);
+      line-height: 1.08;
+      font-weight: 720;
     }
     .meta {
       display: flex;
@@ -168,26 +166,26 @@ const html = String.raw`<!doctype html>
       justify-content: flex-end;
       flex-wrap: wrap;
       color: var(--muted);
-      font-size: 13px;
-      min-height: 32px;
+      font-size: 12px;
+      min-height: 30px;
     }
     .pill {
       border: 1px solid var(--line);
-      background: rgba(255, 253, 248, 0.78);
+      background: var(--paper);
       color: var(--ink);
       border-radius: 999px;
-      padding: 6px 10px;
+      padding: 5px 10px;
       white-space: nowrap;
     }
-    .pill[data-tone="ok"] { border-color: rgba(46, 125, 79, 0.35); color: var(--green); }
-    .pill[data-tone="warn"] { border-color: rgba(181, 106, 21, 0.4); color: var(--amber); }
-    .pill[data-tone="bad"] { border-color: rgba(180, 61, 50, 0.4); color: var(--red); }
+    .pill[data-tone="ok"] { border-color: rgba(32, 116, 74, 0.3); color: var(--green); }
+    .pill[data-tone="warn"] { border-color: rgba(183, 110, 0, 0.32); color: var(--amber); }
+    .pill[data-tone="bad"] { border-color: rgba(180, 35, 24, 0.32); color: var(--red); }
     .banner {
       display: none;
       border: 1px solid var(--line);
-      background: rgba(255, 253, 248, 0.9);
+      background: var(--paper);
       box-shadow: var(--shadow);
-      border-radius: 8px;
+      border-radius: 6px;
       padding: 10px 12px;
       color: var(--ink);
       min-height: 44px;
@@ -202,13 +200,13 @@ const html = String.raw`<!doctype html>
     }
     .selected-pipeline {
       border: 1px solid var(--line);
-      background: rgba(255, 253, 248, 0.9);
-      border-radius: 8px;
-      padding: 12px;
+      background: var(--paper);
+      border-radius: 6px;
+      padding: 12px 12px 10px;
       display: grid;
       gap: 10px;
       min-width: 0;
-      box-shadow: 0 8px 24px rgba(29, 37, 40, 0.08);
+      box-shadow: var(--shadow);
       overflow-x: auto;
     }
     .selected-pipeline-head {
@@ -225,14 +223,15 @@ const html = String.raw`<!doctype html>
       min-width: min(280px, 100%);
     }
     .selected-pipeline-title strong {
-      font-size: 18px;
-      line-height: 1.18;
+      font-size: 17px;
+      line-height: 1.2;
+      font-weight: 700;
       overflow-wrap: anywhere;
     }
     .selected-pipeline-title span {
       color: var(--muted);
       font-size: 12px;
-      font-weight: 650;
+      font-weight: 600;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -251,24 +250,25 @@ const html = String.raw`<!doctype html>
       color: var(--ink);
       font-size: 12px;
       text-transform: uppercase;
+      font-weight: 700;
     }
     .ship-tab {
       min-height: 88px;
       text-align: left;
       border: 1px solid var(--line);
-      background: rgba(255, 253, 248, 0.88);
-      border-radius: 8px;
+      background: var(--paper);
+      border-radius: 6px;
       padding: 10px;
       color: var(--ink);
       cursor: pointer;
       display: grid;
       gap: 6px;
-      box-shadow: 0 4px 16px rgba(29, 37, 40, 0.06);
+      box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
     }
     .ship-tab[data-attention="needs_action"],
     .ship-card[data-attention="needs_action"] {
-      border-color: rgba(180, 61, 50, 0.42);
-      background: rgba(255, 247, 245, 0.96);
+      border-color: rgba(180, 35, 24, 0.34);
+      background: #fff7f6;
     }
     .ship-tab[aria-selected="true"] {
       outline: 2px solid var(--teal);
@@ -276,9 +276,9 @@ const html = String.raw`<!doctype html>
     }
     .ship-title {
       overflow: hidden;
-      font-weight: 720;
+      font-weight: 650;
       min-width: 0;
-      line-height: 1.22;
+      line-height: 1.25;
       display: -webkit-box;
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
@@ -294,7 +294,7 @@ const html = String.raw`<!doctype html>
     .task-id {
       color: var(--muted);
       font-size: 11px;
-      font-weight: 650;
+      font-weight: 600;
       line-height: 1.2;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -316,6 +316,7 @@ const html = String.raw`<!doctype html>
       color: #fff;
       font-size: 11px;
       line-height: 1.25;
+      font-weight: 650;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -336,9 +337,9 @@ const html = String.raw`<!doctype html>
       padding: 3px 8px;
       font-size: 11px;
       line-height: 1.25;
-      border: 1px solid rgba(180, 61, 50, 0.36);
+      border: 1px solid rgba(180, 35, 24, 0.28);
       color: var(--red);
-      background: rgba(180, 61, 50, 0.08);
+      background: rgba(180, 35, 24, 0.07);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -346,21 +347,21 @@ const html = String.raw`<!doctype html>
     .main {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(300px, 390px);
-      gap: 14px;
+      gap: 12px;
       min-height: 560px;
     }
     .map {
       position: relative;
       min-width: 0;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 6px;
       background:
-        linear-gradient(90deg, rgba(29, 118, 111, 0.12) 1px, transparent 1px),
-        linear-gradient(180deg, rgba(29, 37, 40, 0.08) 1px, transparent 1px),
-        rgba(255, 253, 248, 0.78);
+        linear-gradient(90deg, rgba(24, 33, 42, 0.055) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(24, 33, 42, 0.05) 1px, transparent 1px),
+        var(--paper);
       background-size: 80px 80px;
       overflow: hidden;
-      box-shadow: var(--shadow);
+      box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
     }
     .lanes {
       display: grid;
@@ -372,8 +373,8 @@ const html = String.raw`<!doctype html>
     .lane {
       position: relative;
       min-width: 0;
-      padding: 14px 10px;
-      border-right: 1px solid rgba(215, 208, 194, 0.75);
+      padding: 12px 10px;
+      border-right: 1px solid rgba(217, 222, 231, 0.78);
       display: grid;
       grid-template-rows: auto 1fr;
       gap: 12px;
@@ -384,36 +385,39 @@ const html = String.raw`<!doctype html>
     .lane-title {
       display: grid;
       gap: 3px;
-      min-height: 58px;
+      min-height: 52px;
     }
     .lane-title strong {
-      font-size: 13px;
+      font-size: 11px;
       text-transform: uppercase;
       color: var(--muted);
+      font-weight: 700;
     }
     .lane-title span {
-      font-size: 28px;
-      font-weight: 780;
+      font-size: 26px;
+      font-weight: 720;
       line-height: 1;
     }
     .lane-ships {
       display: grid;
       align-content: start;
-      gap: 10px;
+      gap: 8px;
       min-width: 0;
     }
     .ship-card {
-      border: 1px solid rgba(29, 37, 40, 0.13);
-      border-left: 5px solid var(--gray);
-      background: rgba(255, 253, 248, 0.94);
-      border-radius: 8px;
-      padding: 9px 10px;
-      min-height: 76px;
+      text-align: left;
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--gray);
+      background: rgba(255, 255, 255, 0.94);
+      border-radius: 6px;
+      padding: 9px 11px;
+      min-height: 68px;
       display: grid;
       gap: 6px;
       align-content: start;
       cursor: pointer;
-      box-shadow: 0 8px 20px rgba(29, 37, 40, 0.07);
+      box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
+      transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
     }
     .ship-card[data-station="casting_off"] { border-left-color: var(--blue); }
     .ship-card[data-station="underway"] { border-left-color: var(--teal); }
@@ -425,12 +429,17 @@ const html = String.raw`<!doctype html>
     .ship-card[data-station="needs_reconciliation"] { border-left-color: var(--amber); }
     .ship-card[data-station="unknown"] { border-left-color: var(--gray); }
     .ship-card[aria-selected="true"] {
-      outline: 2px solid var(--teal);
+      outline: 2px solid rgba(15, 118, 110, 0.78);
       outline-offset: 1px;
+    }
+    .ship-card:hover {
+      border-color: #c7ced8;
+      box-shadow: 0 2px 8px rgba(24, 33, 42, 0.08);
     }
     .ship-card .line {
       display: flex;
       justify-content: space-between;
+      align-items: flex-start;
       gap: 8px;
       min-width: 0;
     }
@@ -457,20 +466,20 @@ const html = String.raw`<!doctype html>
       width: fit-content;
       max-width: 100%;
       border-radius: 999px;
-      padding: 3px 8px;
+      padding: 3px 7px;
       font-size: 11px;
       line-height: 1.25;
       color: var(--green);
-      border: 1px solid rgba(46, 125, 79, 0.28);
-      background: rgba(46, 125, 79, 0.08);
+      border: 1px solid rgba(32, 116, 74, 0.22);
+      background: rgba(32, 116, 74, 0.07);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     .empty-lane {
       min-height: 84px;
-      border: 1px dashed rgba(104, 114, 118, 0.38);
-      border-radius: 8px;
+      border: 1px dashed rgba(102, 112, 133, 0.34);
+      border-radius: 6px;
       display: grid;
       place-items: center;
       color: var(--muted);
@@ -483,7 +492,7 @@ const html = String.raw`<!doctype html>
       inset: 0;
       display: none;
       place-items: center;
-      background: rgba(244, 241, 234, 0.78);
+      background: rgba(247, 248, 250, 0.82);
       padding: 24px;
       text-align: center;
       color: var(--muted);
@@ -495,20 +504,20 @@ const html = String.raw`<!doctype html>
     .overlay-state strong {
       display: block;
       color: var(--ink);
-      font-size: 22px;
+      font-size: 20px;
       margin-bottom: 6px;
     }
     .detail {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255, 253, 248, 0.92);
+      border-radius: 6px;
+      background: var(--paper);
       box-shadow: var(--shadow);
       min-width: 0;
       display: grid;
       grid-template-rows: auto 1fr;
     }
     .detail-head {
-      padding: 18px;
+      padding: 16px;
       border-bottom: 1px solid var(--line);
       display: grid;
       gap: 10px;
@@ -516,8 +525,9 @@ const html = String.raw`<!doctype html>
     }
     .detail h2 {
       margin: 0;
-      font-size: 24px;
-      line-height: 1.12;
+      font-size: 22px;
+      line-height: 1.16;
+      font-weight: 720;
       overflow-wrap: anywhere;
     }
     .detail-meta {
@@ -528,7 +538,7 @@ const html = String.raw`<!doctype html>
       min-width: 0;
     }
     .detail-body {
-      padding: 18px;
+      padding: 16px;
       display: grid;
       align-content: start;
       gap: 16px;
@@ -537,29 +547,30 @@ const html = String.raw`<!doctype html>
     .detail-summary {
       display: grid;
       gap: 10px;
-      border-bottom: 1px solid rgba(215, 208, 194, 0.78);
+      border-bottom: 1px solid var(--line-soft);
       padding-bottom: 14px;
     }
     .detail-status {
       display: grid;
       gap: 6px;
-      padding: 12px;
-      border-radius: 8px;
-      background: rgba(29, 118, 111, 0.08);
-      border: 1px solid rgba(29, 118, 111, 0.18);
+      padding: 11px;
+      border-radius: 6px;
+      background: rgba(15, 118, 110, 0.06);
+      border: 1px solid rgba(15, 118, 110, 0.16);
     }
     .detail-status[data-tone="needs_action"] {
-      background: rgba(180, 61, 50, 0.08);
-      border-color: rgba(180, 61, 50, 0.2);
+      background: rgba(180, 35, 24, 0.06);
+      border-color: rgba(180, 35, 24, 0.18);
     }
     .detail-status[data-tone="landed"] {
-      background: rgba(46, 125, 79, 0.08);
-      border-color: rgba(46, 125, 79, 0.2);
+      background: rgba(32, 116, 74, 0.06);
+      border-color: rgba(32, 116, 74, 0.18);
     }
     .detail-status strong {
       font-size: 13px;
       text-transform: uppercase;
       color: var(--muted);
+      font-weight: 700;
     }
     .detail-status span {
       overflow-wrap: anywhere;
@@ -575,12 +586,12 @@ const html = String.raw`<!doctype html>
       display: inline-flex;
       min-height: 32px;
       align-items: center;
-      border-radius: 8px;
+      border-radius: 6px;
       padding: 6px 10px;
-      border: 1px solid rgba(56, 103, 173, 0.32);
-      background: rgba(56, 103, 173, 0.08);
+      border: 1px solid rgba(37, 99, 235, 0.25);
+      background: rgba(37, 99, 235, 0.06);
       color: var(--blue);
-      font-weight: 720;
+      font-weight: 700;
       text-decoration: none;
     }
     .action-link:hover {
@@ -592,7 +603,7 @@ const html = String.raw`<!doctype html>
       min-width: 0;
     }
     .pipeline-section {
-      border-bottom: 1px solid rgba(215, 208, 194, 0.78);
+      border-bottom: 1px solid var(--line-soft);
       padding-bottom: 14px;
     }
     .pipeline-rail,
@@ -630,7 +641,7 @@ const html = String.raw`<!doctype html>
       left: 0;
       right: 0;
       height: 4px;
-      background: rgba(104, 114, 118, 0.24);
+      background: rgba(102, 112, 133, 0.24);
       z-index: 0;
     }
     .rail-step:first-child::before {
@@ -643,7 +654,7 @@ const html = String.raw`<!doctype html>
       width: 20px;
       height: 20px;
       border-radius: 999px;
-      border: 3px solid rgba(104, 114, 118, 0.45);
+      border: 3px solid rgba(102, 112, 133, 0.42);
       background: var(--paper);
       box-shadow: 0 0 0 4px var(--paper);
       position: relative;
@@ -653,7 +664,7 @@ const html = String.raw`<!doctype html>
       color: var(--green);
     }
     .rail-step[data-state="done"]::before {
-      background: rgba(46, 125, 79, 0.48);
+      background: rgba(32, 116, 74, 0.45);
     }
     .rail-step[data-state="done"] .rail-dot {
       border-color: var(--green);
@@ -663,18 +674,18 @@ const html = String.raw`<!doctype html>
       color: var(--ink);
     }
     .rail-step[data-state="active"]::before {
-      background: linear-gradient(90deg, rgba(46, 125, 79, 0.48) 0 50%, rgba(104, 114, 118, 0.24) 50% 100%);
+      background: linear-gradient(90deg, rgba(32, 116, 74, 0.45) 0 50%, rgba(102, 112, 133, 0.24) 50% 100%);
     }
     .rail-step[data-state="active"] .rail-dot {
       border-color: var(--teal);
       background: var(--teal);
-      box-shadow: 0 0 0 4px var(--paper), 0 0 0 7px rgba(29, 118, 111, 0.16);
+      box-shadow: 0 0 0 4px var(--paper), 0 0 0 7px rgba(15, 118, 110, 0.13);
     }
     .rail-step[data-state="unknown"] {
       color: var(--red);
     }
     .rail-step[data-state="unknown"]::before {
-      background: rgba(181, 106, 21, 0.34);
+      background: rgba(183, 110, 0, 0.32);
     }
     .rail-step[data-state="unknown"] .rail-dot {
       border-color: var(--amber);
@@ -699,8 +710,8 @@ const html = String.raw`<!doctype html>
       min-height: 15px;
     }
     .pipeline-note {
-      border: 1px dashed rgba(104, 114, 118, 0.36);
-      border-radius: 8px;
+      border: 1px dashed rgba(102, 112, 133, 0.34);
+      border-radius: 6px;
       padding: 10px;
       color: var(--muted);
       overflow-wrap: anywhere;
@@ -709,7 +720,7 @@ const html = String.raw`<!doctype html>
     .detail-section summary {
       color: var(--muted);
       font-size: 12px;
-      font-weight: 720;
+      font-weight: 700;
       text-transform: uppercase;
     }
     .detail-section summary {
@@ -726,7 +737,7 @@ const html = String.raw`<!doctype html>
       grid-template-columns: 112px minmax(0, 1fr);
       gap: 8px;
       padding-bottom: 10px;
-      border-bottom: 1px solid rgba(215, 208, 194, 0.7);
+      border-bottom: 1px solid var(--line-soft);
     }
     .kv.compact {
       grid-template-columns: 92px minmax(0, 1fr);
