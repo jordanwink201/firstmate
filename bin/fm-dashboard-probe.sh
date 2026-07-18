@@ -877,13 +877,18 @@ print_arrival_fleet_rows() {
     source=teardown
     case "$status_verb" in
       needs-decision|needs_captain|blocked|failed)
-        station=needs_captain
-        reason="arrival ledger latest status requires captain attention"
-        attention=needs_action
-        current_state=parked
-        case "$status_verb" in blocked|failed) current_state=$status_verb ;; esac
+        if [ "$arrived_day" = "$today" ]; then
+          station=needs_captain
+          reason="same-day arrival ledger latest status requires captain attention"
+          attention=needs_action
+          current_state=parked
+          case "$status_verb" in blocked|failed) current_state=$status_verb ;; esac
+          source=arrival-ledger
+        else
+          station=done_earlier
+          reason="archived prior attention row from arrival ledger"
+        fi
         current_detail=${status_note:-$latest_status}
-        source=arrival-ledger
         ;;
       *)
         if [ "$arrived_day" = "$today" ]; then

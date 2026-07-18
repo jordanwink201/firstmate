@@ -331,6 +331,8 @@ test_arrival_ledger_keeps_landed_ships_visible_today() {
 {"task_id":"blocked-arrival-t2","arrived_at":"${today}T13:00:00Z","display_title":"Blocked arrival","latest_status":"blocked: cleanup blocked by dirty worktree","pr_url":"https://github.com/example/repo/pull/2","mode":"no-mistakes","source":"teardown"}
 {"task_id":"decision-arrival-t3","arrived_at":"${today}T14:00:00Z","display_title":"Decision arrival","latest_status":"needs-decision: cleanup blocked by missing report","pr_url":"https://github.com/example/repo/pull/3","mode":"no-mistakes","source":"teardown"}
 {"task_id":"old-t1","arrived_at":"${yesterday}T12:00:00Z","display_title":"Old task","latest_status":"done: old","source":"teardown"}
+{"task_id":"old-blocked-arrival-t4","arrived_at":"${yesterday}T15:00:00Z","display_title":"Old blocked arrival","latest_status":"blocked: stale cleanup blocker","pr_url":"https://github.com/example/repo/pull/4","mode":"no-mistakes","source":"teardown"}
+{"task_id":"old-decision-arrival-t5","arrived_at":"${yesterday}T16:00:00Z","display_title":"Old decision arrival","latest_status":"needs-decision: stale cleanup decision","pr_url":"https://github.com/example/repo/pull/5","mode":"direct-PR","source":"teardown"}
 EOF
 
   run_probe_json "$dir" "$out"
@@ -352,6 +354,12 @@ EOF
     "$out" "needs-decision arrival ledger row did not stay in the captain-attention pipeline"
   [ "$(jq_value '.stations[] | select(.task_id == "old-t1") | .station' "$out")" = done_earlier ] \
     || fail "previous-day arrival did not map to done_earlier"
+  [ "$(jq_value '.stations[] | select(.task_id == "old-blocked-arrival-t4") | .station' "$out")" = done_earlier ] \
+    || fail "previous-day blocked arrival stayed in needs_captain"
+  [ "$(jq_value '.stations[] | select(.task_id == "old-decision-arrival-t5") | .station' "$out")" = done_earlier ] \
+    || fail "previous-day needs-decision arrival stayed in needs_captain"
+  assert_jq_true '[.stations[] | select(.station == "needs_captain") | .task_id] == ["blocked-arrival-t2", "decision-arrival-t3"]' \
+    "$out" "prior-day attention arrivals polluted current Needs Captain lane"
   [ "$(jq_value '.fleet[] | select(.task_id == "old-t1") | .pr_url' "$out")" = "" ] \
     || fail "missing arrival pr_url did not remain empty"
   assert_jq_true '[.stations[] | select(.task_id == "old-t1" and .station == "arrived_today")] | length == 0' \
