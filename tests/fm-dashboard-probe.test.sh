@@ -46,6 +46,7 @@ case "${1:-}" in
   dead-t7) printf 'state: unknown · source: none · backend target gone: sess:dead-target\n' ;;
   currentdone-t8) printf 'state: done · source: run-step · checks green: PR ready for review\n' ;;
   parked-t9) printf 'state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: captain decision)\n' ;;
+  current-old-t13) printf 'state: done · source: run-step · completed without status timestamp\n' ;;
   git-t1) printf 'state: working · source: pane · implementing the dashboard detail panel\n' ;;
   nm-run-t1) printf 'state: working · source: run-step · validating (running)\n' ;;
   nm-parked-t2) printf 'state: parked · source: run-step · parked at review: 2 finding(s) (ask-user: captain decision)\n' ;;
@@ -83,6 +84,22 @@ jq_value() {
 assert_jq_true() {
   local expr=$1 file=$2 msg=$3
   jq -e "$expr" "$file" >/dev/null || fail "$msg: $(cat "$file")"
+}
+
+old_touch_spec() {
+  if [ "$(uname)" = Darwin ]; then
+    date -v-2d '+%Y%m%d%H%M.%S'
+  else
+    date -d '2 days ago' '+%Y%m%d%H%M.%S'
+  fi
+}
+
+old_local_date() {
+  if [ "$(uname)" = Darwin ]; then
+    date -v-2d '+%Y-%m-%d'
+  else
+    date -d '2 days ago' '+%Y-%m-%d'
+  fi
 }
 
 test_fleet_meta_and_station_mapping() {
@@ -311,7 +328,11 @@ test_arrival_ledger_keeps_landed_ships_visible_today() {
   yesterday=$(date -v-1d '+%Y-%m-%d' 2>/dev/null || date -d yesterday '+%Y-%m-%d')
   cat > "$data/dashboard-arrivals.jsonl" <<EOF
 {"task_id":"landed-t1","arrived_at":"${today}T12:00:00Z","display_title":"Landed task","latest_status":"done: landed cleanly","pr_url":"https://github.com/example/repo/pull/1","branch":"fm/landed-t1","commit_short":"abc123def","project":"repo","worktree":"/tmp/wt","mode":"no-mistakes","source":"teardown"}
+{"task_id":"blocked-arrival-t2","arrived_at":"${today}T13:00:00Z","display_title":"Blocked arrival","latest_status":"blocked: cleanup blocked by dirty worktree","pr_url":"https://github.com/example/repo/pull/2","mode":"no-mistakes","source":"teardown"}
+{"task_id":"decision-arrival-t3","arrived_at":"${today}T14:00:00Z","display_title":"Decision arrival","latest_status":"needs-decision: cleanup blocked by missing report","pr_url":"https://github.com/example/repo/pull/3","mode":"no-mistakes","source":"teardown"}
 {"task_id":"old-t1","arrived_at":"${yesterday}T12:00:00Z","display_title":"Old task","latest_status":"done: old","source":"teardown"}
+{"task_id":"old-blocked-arrival-t4","arrived_at":"${yesterday}T15:00:00Z","display_title":"Old blocked arrival","latest_status":"blocked: stale cleanup blocker","pr_url":"https://github.com/example/repo/pull/4","mode":"no-mistakes","source":"teardown"}
+{"task_id":"old-decision-arrival-t5","arrived_at":"${yesterday}T16:00:00Z","display_title":"Old decision arrival","latest_status":"needs-decision: stale cleanup decision","pr_url":"https://github.com/example/repo/pull/5","mode":"direct-PR","source":"teardown"}
 EOF
 
   run_probe_json "$dir" "$out"
@@ -319,9 +340,153 @@ EOF
     "$out" "same-day arrival ledger row did not appear as archived fleet item"
   [ "$(jq_value '.stations[] | select(.task_id == "landed-t1") | .station' "$out")" = arrived_today ] \
     || fail "same-day arrival did not map to arrived_today"
-  assert_jq_true '[.fleet[] | select(.task_id == "old-t1")] | length == 0' \
-    "$out" "previous-day arrival ledger row was not filtered out"
-  pass "arrival ledger keeps same-day landed ships visible and filters old rows"
+  assert_jq_true '[.stations[] | select(.station == "arrived_today") | .task_id] == ["landed-t1"]' \
+    "$out" "same-day attention arrivals still appeared in arrived_today"
+  assert_jq_true '.fleet[] | select(.task_id == "landed-t1" and .timeline.source == "arrival-ledger" and .timeline.freshness == "today")' \
+    "$out" "same-day arrival did not expose today timeline fields"
+  [ "$(jq_value '.stations[] | select(.task_id == "blocked-arrival-t2") | .station' "$out")" = needs_captain ] \
+    || fail "same-day blocked arrival did not map to needs_captain"
+  assert_jq_true '.fleet[] | select(.task_id == "blocked-arrival-t2" and .attention == "needs_action" and .source == "arrival-ledger" and .current_state.state == "blocked" and .current_state.detail == "cleanup blocked by dirty worktree" and .latest_status.verb == "blocked" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and (.pipeline.evidence | index("source=arrival-ledger")))' \
+    "$out" "blocked arrival ledger row did not stay in the captain-attention pipeline"
+  [ "$(jq_value '.stations[] | select(.task_id == "decision-arrival-t3") | .station' "$out")" = needs_captain ] \
+    || fail "same-day needs-decision arrival did not map to needs_captain"
+  assert_jq_true '.fleet[] | select(.task_id == "decision-arrival-t3" and .attention == "needs_action" and .source == "arrival-ledger" and .current_state.state == "parked" and .current_state.detail == "cleanup blocked by missing report" and .latest_status.verb == "needs-decision" and .pipeline.main_stage == "validation_gate" and .pipeline.next_human_action == "answer gate finding" and (.pipeline.evidence | index("source=arrival-ledger")))' \
+    "$out" "needs-decision arrival ledger row did not stay in the captain-attention pipeline"
+  [ "$(jq_value '.stations[] | select(.task_id == "old-t1") | .station' "$out")" = done_earlier ] \
+    || fail "previous-day arrival did not map to done_earlier"
+  [ "$(jq_value '.stations[] | select(.task_id == "old-blocked-arrival-t4") | .station' "$out")" = done_earlier ] \
+    || fail "previous-day blocked arrival stayed in needs_captain"
+  [ "$(jq_value '.stations[] | select(.task_id == "old-decision-arrival-t5") | .station' "$out")" = done_earlier ] \
+    || fail "previous-day needs-decision arrival stayed in needs_captain"
+  assert_jq_true '[.stations[] | select(.station == "needs_captain") | .task_id] == ["blocked-arrival-t2", "decision-arrival-t3"]' \
+    "$out" "prior-day attention arrivals polluted current Needs Captain lane"
+  [ "$(jq_value '.fleet[] | select(.task_id == "old-t1") | .pr_url' "$out")" = "" ] \
+    || fail "missing arrival pr_url did not remain empty"
+  assert_jq_true '[.stations[] | select(.task_id == "old-t1" and .station == "arrived_today")] | length == 0' \
+    "$out" "previous-day arrival ledger row still appeared in arrived_today"
+  pass "arrival ledger separates landed ships from attention rows"
+}
+
+test_completion_timeline_drives_done_lanes_and_reconciliation() {
+  local dir state out today old_date old_spec wt
+  dir=$(make_case timeline)
+  state="$dir/state"
+  out="$dir/out.json"
+  today=$(date '+%Y-%m-%d')
+  old_date=$(old_local_date)
+  old_spec=$(old_touch_spec)
+
+  for wt in wt-inline-old wt-inline-today wt-mtime-old wt-current-old wt-reconcile wt-recent wt-prefix-done wt-prefix-complete wt-date-task-complete; do
+    mkdir -p "$dir/$wt"
+  done
+
+  fm_write_meta "$state/inline-old-t10.meta" \
+    "window=sess:alive-inline-old" \
+    "worktree=$dir/wt-inline-old" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: finished at %sT12:00:00Z\n' "$old_date" > "$state/inline-old-t10.status"
+
+  fm_write_meta "$state/inline-today-t11.meta" \
+    "window=sess:alive-inline-today" \
+    "worktree=$dir/wt-inline-today" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: finished at %sT12:00:00Z\n' "$today" > "$state/inline-today-t11.status"
+
+  fm_write_meta "$state/mtime-old-t12.meta" \
+    "window=sess:alive-mtime-old" \
+    "worktree=$dir/wt-mtime-old" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'done: finished without inline timestamp\n' > "$state/mtime-old-t12.status"
+  touch -t "$old_spec" "$state/mtime-old-t12.status"
+
+  fm_write_meta "$state/current-old-t13.meta" \
+    "window=sess:alive-current-old" \
+    "worktree=$dir/wt-current-old" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  touch -t "$old_spec" "$state/current-old-t13.meta"
+
+  fm_write_meta "$state/reconcile-t14.meta" \
+    "window=sess:alive-reconcile" \
+    "worktree=$dir/wt-reconcile" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  touch -t "$old_spec" "$state/reconcile-t14.meta"
+
+  fm_write_meta "$state/recent-t15.meta" \
+    "window=sess:alive-recent" \
+    "worktree=$dir/wt-recent" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+
+  fm_write_meta "$state/prefix-done-t16.meta" \
+    "window=sess:alive-prefix-done" \
+    "worktree=$dir/wt-prefix-done" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf '%s 13:52 done: implemented timestamp-prefixed status\n' "$old_date" > "$state/prefix-done-t16.status"
+
+  fm_write_meta "$state/prefix-complete-t17.meta" \
+    "window=sess:alive-prefix-complete" \
+    "worktree=$dir/wt-prefix-complete" \
+    "project=$dir/projects/cad" \
+    "kind=scout" \
+    "mode=report"
+  printf '%sT18:58:00-0500 completed source-first triage report\n' "$old_date" > "$state/prefix-complete-t17.status"
+
+  fm_write_meta "$state/date-task-complete-t18.meta" \
+    "window=sess:alive-date-task-complete" \
+    "worktree=$dir/wt-date-task-complete" \
+    "project=$dir/projects/cad" \
+    "kind=ship" \
+    "mode=direct-PR"
+  printf '%s sales-cleanup-q3-q6 complete: pushed branch and wrote report\n' "$old_date" > "$state/date-task-complete-t18.status"
+
+  run_probe_json "$dir" "$out"
+
+  assert_jq_true '.fleet[] | select(.task_id == "inline-old-t10" and .timeline.source == "status-line" and .timeline.done_date == "'"$old_date"'" and .timeline.freshness == "earlier")' \
+    "$out" "inline prior done timestamp did not expose status-line timeline"
+  [ "$(jq_value '.stations[] | select(.task_id == "inline-old-t10") | .station' "$out")" = done_earlier ] \
+    || fail "inline prior done timestamp did not map to done_earlier"
+  [ "$(jq_value '.stations[] | select(.task_id == "inline-today-t11") | .station' "$out")" = arrived_today ] \
+    || fail "inline same-day done timestamp did not map to arrived_today"
+  assert_jq_true '.fleet[] | select(.task_id == "mtime-old-t12" and .timeline.source == "status-file-mtime" and .timeline.freshness == "earlier")' \
+    "$out" "done status without inline timestamp did not use status file mtime"
+  [ "$(jq_value '.stations[] | select(.task_id == "mtime-old-t12") | .station' "$out")" = done_earlier ] \
+    || fail "prior status mtime did not map to done_earlier"
+  assert_jq_true '.fleet[] | select(.task_id == "current-old-t13" and .timeline.source == "meta-file-mtime" and .timeline.freshness == "earlier")' \
+    "$out" "current done state did not fall back to meta file mtime"
+  [ "$(jq_value '.stations[] | select(.task_id == "current-old-t13") | .station' "$out")" = done_earlier ] \
+    || fail "current done state with old meta mtime did not map to done_earlier"
+  [ "$(jq_value '.stations[] | select(.task_id == "reconcile-t14") | .station' "$out")" = needs_reconciliation ] \
+    || fail "old live metadata without state did not map to needs_reconciliation"
+  assert_jq_true '.fleet[] | select(.task_id == "reconcile-t14" and .pipeline.main_stage == "unknown" and .pipeline.next_human_action == "reconcile task state")' \
+    "$out" "needs_reconciliation task did not expose reconcile pipeline action"
+  [ "$(jq_value '.stations[] | select(.task_id == "recent-t15") | .station' "$out")" = casting_off ] \
+    || fail "recent no-status metadata did not remain casting_off"
+  assert_jq_true '.fleet[] | select(.task_id == "prefix-done-t16" and .latest_status.verb == "done" and .latest_status.note == "implemented timestamp-prefixed status" and .timeline.done_date == "'"$old_date"'" and .timeline.source == "status-line")' \
+    "$out" "leading timestamp done status did not parse as dated completion"
+  [ "$(jq_value '.stations[] | select(.task_id == "prefix-done-t16") | .station' "$out")" = done_earlier ] \
+    || fail "leading timestamp done status did not map to done_earlier"
+  assert_jq_true '.fleet[] | select(.task_id == "prefix-complete-t17" and .latest_status.verb == "done" and .latest_status.note == "source-first triage report" and .timeline.done_date == "'"$old_date"'" and .timeline.source == "status-line")' \
+    "$out" "leading timestamp completed status did not parse as dated completion"
+  [ "$(jq_value '.stations[] | select(.task_id == "prefix-complete-t17") | .station' "$out")" = done_earlier ] \
+    || fail "leading timestamp completed status did not map to done_earlier"
+  assert_jq_true '.fleet[] | select(.task_id == "date-task-complete-t18" and .latest_status.verb == "done" and .latest_status.note == "pushed branch and wrote report" and .timeline.done_date == "'"$old_date"'" and .timeline.source == "status-line")' \
+    "$out" "date-plus-task complete status did not parse as dated completion"
+  [ "$(jq_value '.stations[] | select(.task_id == "date-task-complete-t18") | .station' "$out")" = done_earlier ] \
+    || fail "date-plus-task complete status did not map to done_earlier"
+  pass "completion timelines drive today/earlier done lanes and reconciliation"
 }
 
 test_pipeline_snapshot_profiles_and_stages() {
@@ -481,6 +646,8 @@ EOF
     "$out" "file mtimes did not include replay inputs"
   assert_jq_true '.replay_sources.minimum_event_ledger.implemented == true and (.replay_sources.minimum_event_ledger.files[] | contains("dashboard-arrivals.jsonl"))' \
     "$out" "minimum event ledger fields changed"
+  assert_jq_true '.supervision.watcher.stale == true and .supervision.wake_queue.pending == 1' \
+    "$out" "supervision summary did not expose stale watcher or pending wake queue"
   pass "replay sources include status mtimes, watcher timestamps, wake epochs, task ledger, and ledger recommendation"
 }
 
@@ -500,6 +667,7 @@ test_display_title_precedence_and_subtitle
 test_git_and_pr_fields_are_extracted
 test_empty_fleet_output
 test_arrival_ledger_keeps_landed_ships_visible_today
+test_completion_timeline_drives_done_lanes_and_reconciliation
 test_pipeline_snapshot_profiles_and_stages
 test_replay_sources_are_extracted
 test_report_output

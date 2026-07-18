@@ -107,18 +107,20 @@ const html = String.raw`<!doctype html>
   <title>Firstmate Fleet Dashboard</title>
   <style>
     :root {
-      --bg: #f4f1ea;
-      --paper: #fffdf8;
-      --ink: #1d2528;
-      --muted: #687276;
-      --line: #d7d0c2;
-      --teal: #1d766f;
-      --blue: #3867ad;
-      --amber: #b56a15;
-      --red: #b43d32;
-      --green: #2e7d4f;
-      --gray: #7d8281;
-      --shadow: 0 16px 40px rgba(29, 37, 40, 0.12);
+      --bg: #f7f8fa;
+      --paper: #ffffff;
+      --paper-muted: #f3f5f7;
+      --ink: #18212a;
+      --muted: #667085;
+      --line: #d9dee7;
+      --line-soft: #e8ebf0;
+      --teal: #0f766e;
+      --blue: #2563eb;
+      --amber: #b76e00;
+      --red: #b42318;
+      --green: #20744a;
+      --gray: #6b7280;
+      --shadow: 0 1px 2px rgba(24, 33, 42, 0.06), 0 8px 24px rgba(24, 33, 42, 0.06);
     }
     * {
       box-sizing: border-box;
@@ -127,25 +129,21 @@ const html = String.raw`<!doctype html>
     body {
       margin: 0;
       min-height: 100vh;
-      background:
-        linear-gradient(180deg, rgba(255, 253, 248, 0.85), rgba(244, 241, 234, 0.92)),
-        radial-gradient(circle at 8% 16%, rgba(29, 118, 111, 0.18), transparent 28%),
-        radial-gradient(circle at 88% 12%, rgba(181, 106, 21, 0.16), transparent 26%),
-        var(--bg);
+      background: var(--bg);
       color: var(--ink);
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 15px;
+      font-size: 14px;
     }
     button {
       font: inherit;
     }
     .shell {
-      width: min(1600px, 100%);
+      width: min(1500px, 100%);
       margin: 0 auto;
-      padding: 20px;
+      padding: 18px 20px;
       display: grid;
       grid-template-rows: auto auto minmax(0, 1fr);
-      gap: 14px;
+      gap: 12px;
     }
     .topbar {
       display: grid;
@@ -153,13 +151,13 @@ const html = String.raw`<!doctype html>
       align-items: end;
       gap: 16px;
       border-bottom: 1px solid var(--line);
-      padding-bottom: 14px;
+      padding-bottom: 12px;
     }
     h1 {
       margin: 0;
-      font-size: clamp(24px, 3vw, 42px);
-      line-height: 1.04;
-      font-weight: 760;
+      font-size: clamp(24px, 2.2vw, 34px);
+      line-height: 1.08;
+      font-weight: 720;
     }
     .meta {
       display: flex;
@@ -168,26 +166,26 @@ const html = String.raw`<!doctype html>
       justify-content: flex-end;
       flex-wrap: wrap;
       color: var(--muted);
-      font-size: 13px;
-      min-height: 32px;
+      font-size: 12px;
+      min-height: 30px;
     }
     .pill {
       border: 1px solid var(--line);
-      background: rgba(255, 253, 248, 0.78);
+      background: var(--paper);
       color: var(--ink);
       border-radius: 999px;
-      padding: 6px 10px;
+      padding: 5px 10px;
       white-space: nowrap;
     }
-    .pill[data-tone="ok"] { border-color: rgba(46, 125, 79, 0.35); color: var(--green); }
-    .pill[data-tone="warn"] { border-color: rgba(181, 106, 21, 0.4); color: var(--amber); }
-    .pill[data-tone="bad"] { border-color: rgba(180, 61, 50, 0.4); color: var(--red); }
+    .pill[data-tone="ok"] { border-color: rgba(32, 116, 74, 0.3); color: var(--green); }
+    .pill[data-tone="warn"] { border-color: rgba(183, 110, 0, 0.32); color: var(--amber); }
+    .pill[data-tone="bad"] { border-color: rgba(180, 35, 24, 0.32); color: var(--red); }
     .banner {
       display: none;
       border: 1px solid var(--line);
-      background: rgba(255, 253, 248, 0.9);
+      background: var(--paper);
       box-shadow: var(--shadow);
-      border-radius: 8px;
+      border-radius: 6px;
       padding: 10px 12px;
       color: var(--ink);
       min-height: 44px;
@@ -200,32 +198,77 @@ const html = String.raw`<!doctype html>
     .banner strong {
       color: var(--red);
     }
-    .fleet-strip {
+    .selected-pipeline {
+      border: 1px solid var(--line);
+      background: var(--paper);
+      border-radius: 6px;
+      padding: 12px 12px 10px;
       display: grid;
-      grid-auto-flow: column;
-      grid-auto-columns: minmax(180px, 240px);
       gap: 10px;
+      min-width: 0;
+      box-shadow: var(--shadow);
       overflow-x: auto;
-      padding: 2px 2px 10px;
-      scrollbar-color: var(--line) transparent;
+    }
+    .selected-pipeline-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: start;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .selected-pipeline-title {
+      display: grid;
+      gap: 3px;
+      min-width: min(280px, 100%);
+    }
+    .selected-pipeline-title strong {
+      font-size: 17px;
+      line-height: 1.2;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .selected-pipeline-title span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .selected-pipeline-next {
+      display: grid;
+      gap: 3px;
+      min-width: min(360px, 100%);
+      max-width: 520px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.3;
+    }
+    .selected-pipeline-next strong {
+      color: var(--ink);
+      font-size: 12px;
+      text-transform: uppercase;
+      font-weight: 700;
     }
     .ship-tab {
       min-height: 88px;
       text-align: left;
       border: 1px solid var(--line);
-      background: rgba(255, 253, 248, 0.88);
-      border-radius: 8px;
+      background: var(--paper);
+      border-radius: 6px;
       padding: 10px;
       color: var(--ink);
       cursor: pointer;
       display: grid;
       gap: 6px;
-      box-shadow: 0 4px 16px rgba(29, 37, 40, 0.06);
+      box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
     }
     .ship-tab[data-attention="needs_action"],
     .ship-card[data-attention="needs_action"] {
-      border-color: rgba(180, 61, 50, 0.42);
-      background: rgba(255, 247, 245, 0.96);
+      border-color: rgba(180, 35, 24, 0.34);
+      background: #fff7f6;
     }
     .ship-tab[aria-selected="true"] {
       outline: 2px solid var(--teal);
@@ -233,9 +276,9 @@ const html = String.raw`<!doctype html>
     }
     .ship-title {
       overflow: hidden;
-      font-weight: 720;
+      font-weight: 650;
       min-width: 0;
-      line-height: 1.22;
+      line-height: 1.25;
       display: -webkit-box;
       -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
@@ -251,7 +294,7 @@ const html = String.raw`<!doctype html>
     .task-id {
       color: var(--muted);
       font-size: 11px;
-      font-weight: 650;
+      font-weight: 600;
       line-height: 1.2;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -273,6 +316,7 @@ const html = String.raw`<!doctype html>
       color: #fff;
       font-size: 11px;
       line-height: 1.25;
+      font-weight: 650;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -283,6 +327,8 @@ const html = String.raw`<!doctype html>
     .station-chip[data-station="needs_captain"] { background: var(--red); }
     .station-chip[data-station="at_port"] { background: var(--green); }
     .station-chip[data-station="arrived_today"] { background: var(--green); }
+    .station-chip[data-station="done_earlier"] { background: var(--gray); }
+    .station-chip[data-station="needs_reconciliation"] { background: var(--amber); }
     .station-chip[data-station="unknown"] { background: var(--gray); }
     .attention-badge {
       width: fit-content;
@@ -291,9 +337,9 @@ const html = String.raw`<!doctype html>
       padding: 3px 8px;
       font-size: 11px;
       line-height: 1.25;
-      border: 1px solid rgba(180, 61, 50, 0.36);
+      border: 1px solid rgba(180, 35, 24, 0.28);
       color: var(--red);
-      background: rgba(180, 61, 50, 0.08);
+      background: rgba(180, 35, 24, 0.07);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -301,25 +347,25 @@ const html = String.raw`<!doctype html>
     .main {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(300px, 390px);
-      gap: 14px;
+      gap: 12px;
       min-height: 560px;
     }
     .map {
       position: relative;
       min-width: 0;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 6px;
       background:
-        linear-gradient(90deg, rgba(29, 118, 111, 0.12) 1px, transparent 1px),
-        linear-gradient(180deg, rgba(29, 37, 40, 0.08) 1px, transparent 1px),
-        rgba(255, 253, 248, 0.78);
+        linear-gradient(90deg, rgba(24, 33, 42, 0.055) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(24, 33, 42, 0.05) 1px, transparent 1px),
+        var(--paper);
       background-size: 80px 80px;
       overflow: hidden;
-      box-shadow: var(--shadow);
+      box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
     }
     .lanes {
       display: grid;
-      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
       gap: 0;
       height: 100%;
       min-height: 560px;
@@ -327,8 +373,8 @@ const html = String.raw`<!doctype html>
     .lane {
       position: relative;
       min-width: 0;
-      padding: 14px 10px;
-      border-right: 1px solid rgba(215, 208, 194, 0.75);
+      padding: 12px 10px;
+      border-right: 1px solid rgba(217, 222, 231, 0.78);
       display: grid;
       grid-template-rows: auto 1fr;
       gap: 12px;
@@ -339,36 +385,39 @@ const html = String.raw`<!doctype html>
     .lane-title {
       display: grid;
       gap: 3px;
-      min-height: 58px;
+      min-height: 52px;
     }
     .lane-title strong {
-      font-size: 13px;
+      font-size: 11px;
       text-transform: uppercase;
       color: var(--muted);
+      font-weight: 700;
     }
     .lane-title span {
-      font-size: 28px;
-      font-weight: 780;
+      font-size: 26px;
+      font-weight: 720;
       line-height: 1;
     }
     .lane-ships {
       display: grid;
       align-content: start;
-      gap: 10px;
+      gap: 8px;
       min-width: 0;
     }
     .ship-card {
-      border: 1px solid rgba(29, 37, 40, 0.13);
-      border-left: 5px solid var(--gray);
-      background: rgba(255, 253, 248, 0.94);
-      border-radius: 8px;
-      padding: 10px;
-      min-height: 104px;
+      text-align: left;
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--gray);
+      background: rgba(255, 255, 255, 0.94);
+      border-radius: 6px;
+      padding: 9px 11px;
+      min-height: 68px;
       display: grid;
-      gap: 7px;
+      gap: 6px;
       align-content: start;
       cursor: pointer;
-      box-shadow: 0 8px 20px rgba(29, 37, 40, 0.07);
+      box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
+      transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
     }
     .ship-card[data-station="casting_off"] { border-left-color: var(--blue); }
     .ship-card[data-station="underway"] { border-left-color: var(--teal); }
@@ -376,14 +425,21 @@ const html = String.raw`<!doctype html>
     .ship-card[data-station="needs_captain"] { border-left-color: var(--red); }
     .ship-card[data-station="at_port"] { border-left-color: var(--green); }
     .ship-card[data-station="arrived_today"] { border-left-color: var(--green); }
+    .ship-card[data-station="done_earlier"] { border-left-color: var(--gray); }
+    .ship-card[data-station="needs_reconciliation"] { border-left-color: var(--amber); }
     .ship-card[data-station="unknown"] { border-left-color: var(--gray); }
     .ship-card[aria-selected="true"] {
-      outline: 2px solid var(--teal);
+      outline: 2px solid rgba(15, 118, 110, 0.78);
       outline-offset: 1px;
+    }
+    .ship-card:hover {
+      border-color: #c7ced8;
+      box-shadow: 0 2px 8px rgba(24, 33, 42, 0.08);
     }
     .ship-card .line {
       display: flex;
       justify-content: space-between;
+      align-items: flex-start;
       gap: 8px;
       min-width: 0;
     }
@@ -399,10 +455,31 @@ const html = String.raw`<!doctype html>
       font-style: normal;
       font-size: 12px;
     }
+    .card-meta {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+    .done-chip {
+      width: fit-content;
+      max-width: 100%;
+      border-radius: 999px;
+      padding: 3px 7px;
+      font-size: 11px;
+      line-height: 1.25;
+      color: var(--green);
+      border: 1px solid rgba(32, 116, 74, 0.22);
+      background: rgba(32, 116, 74, 0.07);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .empty-lane {
       min-height: 84px;
-      border: 1px dashed rgba(104, 114, 118, 0.38);
-      border-radius: 8px;
+      border: 1px dashed rgba(102, 112, 133, 0.34);
+      border-radius: 6px;
       display: grid;
       place-items: center;
       color: var(--muted);
@@ -415,7 +492,7 @@ const html = String.raw`<!doctype html>
       inset: 0;
       display: none;
       place-items: center;
-      background: rgba(244, 241, 234, 0.78);
+      background: rgba(247, 248, 250, 0.82);
       padding: 24px;
       text-align: center;
       color: var(--muted);
@@ -427,20 +504,20 @@ const html = String.raw`<!doctype html>
     .overlay-state strong {
       display: block;
       color: var(--ink);
-      font-size: 22px;
+      font-size: 20px;
       margin-bottom: 6px;
     }
     .detail {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255, 253, 248, 0.92);
+      border-radius: 6px;
+      background: var(--paper);
       box-shadow: var(--shadow);
       min-width: 0;
       display: grid;
       grid-template-rows: auto 1fr;
     }
     .detail-head {
-      padding: 18px;
+      padding: 16px;
       border-bottom: 1px solid var(--line);
       display: grid;
       gap: 10px;
@@ -448,8 +525,9 @@ const html = String.raw`<!doctype html>
     }
     .detail h2 {
       margin: 0;
-      font-size: 24px;
-      line-height: 1.12;
+      font-size: 22px;
+      line-height: 1.16;
+      font-weight: 720;
       overflow-wrap: anywhere;
     }
     .detail-meta {
@@ -460,7 +538,7 @@ const html = String.raw`<!doctype html>
       min-width: 0;
     }
     .detail-body {
-      padding: 18px;
+      padding: 16px;
       display: grid;
       align-content: start;
       gap: 16px;
@@ -469,29 +547,30 @@ const html = String.raw`<!doctype html>
     .detail-summary {
       display: grid;
       gap: 10px;
-      border-bottom: 1px solid rgba(215, 208, 194, 0.78);
+      border-bottom: 1px solid var(--line-soft);
       padding-bottom: 14px;
     }
     .detail-status {
       display: grid;
       gap: 6px;
-      padding: 12px;
-      border-radius: 8px;
-      background: rgba(29, 118, 111, 0.08);
-      border: 1px solid rgba(29, 118, 111, 0.18);
+      padding: 11px;
+      border-radius: 6px;
+      background: rgba(15, 118, 110, 0.06);
+      border: 1px solid rgba(15, 118, 110, 0.16);
     }
     .detail-status[data-tone="needs_action"] {
-      background: rgba(180, 61, 50, 0.08);
-      border-color: rgba(180, 61, 50, 0.2);
+      background: rgba(180, 35, 24, 0.06);
+      border-color: rgba(180, 35, 24, 0.18);
     }
     .detail-status[data-tone="landed"] {
-      background: rgba(46, 125, 79, 0.08);
-      border-color: rgba(46, 125, 79, 0.2);
+      background: rgba(32, 116, 74, 0.06);
+      border-color: rgba(32, 116, 74, 0.18);
     }
     .detail-status strong {
       font-size: 13px;
       text-transform: uppercase;
       color: var(--muted);
+      font-weight: 700;
     }
     .detail-status span {
       overflow-wrap: anywhere;
@@ -507,12 +586,12 @@ const html = String.raw`<!doctype html>
       display: inline-flex;
       min-height: 32px;
       align-items: center;
-      border-radius: 8px;
+      border-radius: 6px;
       padding: 6px 10px;
-      border: 1px solid rgba(56, 103, 173, 0.32);
-      background: rgba(56, 103, 173, 0.08);
+      border: 1px solid rgba(37, 99, 235, 0.25);
+      background: rgba(37, 99, 235, 0.06);
       color: var(--blue);
-      font-weight: 720;
+      font-weight: 700;
       text-decoration: none;
     }
     .action-link:hover {
@@ -524,42 +603,93 @@ const html = String.raw`<!doctype html>
       min-width: 0;
     }
     .pipeline-section {
-      border-bottom: 1px solid rgba(215, 208, 194, 0.78);
+      border-bottom: 1px solid var(--line-soft);
       padding-bottom: 14px;
     }
     .pipeline-rail,
     .validation-rail {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
-      gap: 6px;
       min-width: 0;
+      padding: 8px 0 4px;
+    }
+    .selected-pipeline .pipeline-rail {
+      grid-template-columns: repeat(9, minmax(96px, 1fr));
+      min-width: 860px;
+      padding: 12px 0 6px;
     }
     .rail-step {
-      min-height: 54px;
-      border: 1px solid rgba(104, 114, 118, 0.24);
-      border-radius: 8px;
-      padding: 7px;
+      position: relative;
+      min-height: 68px;
+      border: 0;
+      border-radius: 0;
+      padding: 0 8px;
       display: grid;
-      align-content: center;
-      gap: 3px;
-      background: rgba(255, 253, 248, 0.72);
+      grid-template-rows: 24px auto auto;
+      justify-items: center;
+      align-content: start;
+      gap: 4px;
+      background: transparent;
       color: var(--muted);
-      overflow: hidden;
+      overflow: visible;
+      text-align: center;
+    }
+    .rail-step::before {
+      content: "";
+      position: absolute;
+      top: 10px;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: rgba(102, 112, 133, 0.24);
+      z-index: 0;
+    }
+    .rail-step:first-child::before {
+      left: 50%;
+    }
+    .rail-step:last-child::before {
+      right: 50%;
+    }
+    .rail-dot {
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      border: 3px solid rgba(102, 112, 133, 0.42);
+      background: var(--paper);
+      box-shadow: 0 0 0 4px var(--paper);
+      position: relative;
+      z-index: 1;
     }
     .rail-step[data-state="done"] {
-      border-color: rgba(46, 125, 79, 0.28);
-      background: rgba(46, 125, 79, 0.06);
       color: var(--green);
     }
+    .rail-step[data-state="done"]::before {
+      background: rgba(32, 116, 74, 0.45);
+    }
+    .rail-step[data-state="done"] .rail-dot {
+      border-color: var(--green);
+      background: var(--green);
+    }
     .rail-step[data-state="active"] {
-      border-color: rgba(29, 118, 111, 0.42);
-      background: rgba(29, 118, 111, 0.1);
       color: var(--ink);
     }
+    .rail-step[data-state="active"]::before {
+      background: linear-gradient(90deg, rgba(32, 116, 74, 0.45) 0 50%, rgba(102, 112, 133, 0.24) 50% 100%);
+    }
+    .rail-step[data-state="active"] .rail-dot {
+      border-color: var(--teal);
+      background: var(--teal);
+      box-shadow: 0 0 0 4px var(--paper), 0 0 0 7px rgba(15, 118, 110, 0.13);
+    }
     .rail-step[data-state="unknown"] {
-      border-color: rgba(180, 61, 50, 0.28);
-      background: rgba(180, 61, 50, 0.07);
       color: var(--red);
+    }
+    .rail-step[data-state="unknown"]::before {
+      background: rgba(183, 110, 0, 0.32);
+    }
+    .rail-step[data-state="unknown"] .rail-dot {
+      border-color: var(--amber);
+      background: var(--paper);
     }
     .rail-step strong,
     .rail-step span {
@@ -576,9 +706,12 @@ const html = String.raw`<!doctype html>
       font-size: 12px;
       color: inherit;
     }
+    .rail-caption {
+      min-height: 15px;
+    }
     .pipeline-note {
-      border: 1px dashed rgba(104, 114, 118, 0.36);
-      border-radius: 8px;
+      border: 1px dashed rgba(102, 112, 133, 0.34);
+      border-radius: 6px;
       padding: 10px;
       color: var(--muted);
       overflow-wrap: anywhere;
@@ -587,7 +720,7 @@ const html = String.raw`<!doctype html>
     .detail-section summary {
       color: var(--muted);
       font-size: 12px;
-      font-weight: 720;
+      font-weight: 700;
       text-transform: uppercase;
     }
     .detail-section summary {
@@ -604,7 +737,7 @@ const html = String.raw`<!doctype html>
       grid-template-columns: 112px minmax(0, 1fr);
       gap: 8px;
       padding-bottom: 10px;
-      border-bottom: 1px solid rgba(215, 208, 194, 0.7);
+      border-bottom: 1px solid var(--line-soft);
     }
     .kv.compact {
       grid-template-columns: 92px minmax(0, 1fr);
@@ -644,7 +777,7 @@ const html = String.raw`<!doctype html>
       }
       .lanes {
         overflow-x: auto;
-        grid-template-columns: repeat(6, minmax(220px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       }
     }
     @media (max-width: 720px) {
@@ -657,9 +790,6 @@ const html = String.raw`<!doctype html>
       }
       .meta {
         justify-content: flex-start;
-      }
-      .fleet-strip {
-        grid-auto-columns: minmax(164px, 82vw);
       }
       .kv {
         grid-template-columns: 1fr;
@@ -679,7 +809,7 @@ const html = String.raw`<!doctype html>
       </div>
     </header>
     <div class="banner" id="banner"></div>
-    <nav class="fleet-strip" id="fleetStrip" aria-label="Fleet"></nav>
+    <section class="selected-pipeline" id="fleetStrip" aria-label="Selected task pipeline"></section>
     <main class="main">
       <section class="map" aria-label="Voyage map">
         <div class="lanes" id="lanes"></div>
@@ -697,6 +827,8 @@ const html = String.raw`<!doctype html>
       { id: 'gate_run', label: 'Gate Run' },
       { id: 'needs_captain', label: 'Needs Captain' },
       { id: 'arrived_today', label: 'Arrived Today' },
+      { id: 'done_earlier', label: 'Done Earlier' },
+      { id: 'needs_reconciliation', label: 'Needs Reconciliation' },
       { id: 'unknown', label: 'Unknown' }
     ];
     var pipelineStages = [
@@ -716,7 +848,7 @@ const html = String.raw`<!doctype html>
       { id: 'push', label: 'Push' },
       { id: 'ci', label: 'CI' }
     ];
-    var selectPriority = ['needs_captain', 'gate_run', 'underway', 'casting_off', 'unknown', 'arrived_today'];
+    var selectPriority = ['needs_captain', 'needs_reconciliation', 'gate_run', 'underway', 'casting_off', 'unknown', 'arrived_today', 'done_earlier'];
     var state = {
       snapshot: null,
       selectedId: null,
@@ -760,11 +892,70 @@ const html = String.raw`<!doctype html>
     function stationLabel(station) {
       station = normalizeStation(station);
       if (station === 'arrived_today') return 'Arrived Today';
+      if (station === 'done_earlier') return 'Done Earlier';
+      if (station === 'needs_reconciliation') return 'Needs Reconciliation';
       return String(station || 'unknown').replace(/_/g, ' ');
+    }
+
+    function isDoneStation(station) {
+      return station === 'arrived_today' || station === 'done_earlier';
     }
 
     function displayTitle(ship) {
       return (ship && (ship.display_title || ship.task_id)) || 'Untitled task';
+    }
+
+    function stationCounts() {
+      var counts = {};
+      stationDefs.forEach(function(def) { counts[def.id] = 0; });
+      ((state.snapshot && state.snapshot.fleet) || []).forEach(function(ship) {
+        var station = stationOf(ship.task_id);
+        counts[station] = (counts[station] || 0) + 1;
+      });
+      return counts;
+    }
+
+    function formatDoneDate(value) {
+      var match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!match) return value || '';
+      var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      var month = months[Math.max(0, Math.min(11, Number(match[2]) - 1))];
+      return month + ' ' + String(Number(match[3]));
+    }
+
+    function cardTaskIdHtml(ship) {
+      var title = displayTitle(ship);
+      var taskId = ship && ship.task_id ? String(ship.task_id) : '';
+      if (!taskId || taskId === title) return '';
+      return '<span class="task-id">' + escapeHtml(taskId) + '</span>';
+    }
+
+    function doneChipHtml(ship) {
+      if (!ship) return '';
+      var station = stationOf(ship.task_id);
+      if (!isDoneStation(station)) return '';
+      var timeline = ship.timeline || {};
+      var label = timeline.done_date ? 'Done ' + formatDoneDate(timeline.done_date) : (station === 'arrived_today' ? 'Done today' : 'Done earlier');
+      return '<span class="done-chip">' + escapeHtml(label) + '</span>';
+    }
+
+    function doneTimelineText(ship) {
+      if (!ship || !ship.timeline || !ship.timeline.done_date) return '';
+      var source = ship.timeline.source && ship.timeline.source !== 'none' ? ' via ' + ship.timeline.source : '';
+      return 'Done ' + formatDoneDate(ship.timeline.done_date) + source;
+    }
+
+    function laneCardMetaHtml(ship) {
+      var pieces = [cardTaskIdHtml(ship), doneChipHtml(ship)].filter(Boolean);
+      if (!pieces.length) return '';
+      return '<span class="card-meta">' + pieces.join('') + '</span>';
+    }
+
+    function supervisionLagging() {
+      var supervision = (state.snapshot && state.snapshot.supervision) || {};
+      var watcher = supervision.watcher || {};
+      var queue = supervision.wake_queue || {};
+      return watcher.stale === true || Number(queue.pending || 0) > 0;
     }
 
     function attentionBadge(ship) {
@@ -823,6 +1014,8 @@ const html = String.raw`<!doctype html>
       text = text.replace(/\bworktree isolation\b/ig, 'setup checks');
       text = text.replace(/\breading required skill instructions\b/ig, 'reading instructions');
       if (!text && station === 'arrived_today') return 'Finished and archived for today.';
+      if (!text && station === 'done_earlier') return 'Finished before today.';
+      if (!text && station === 'needs_reconciliation') return 'State needs reconciliation.';
       if (!text && station === 'underway') return 'Work is in progress.';
       if (!text && station === 'gate_run') return 'Validation is running.';
       return text || stationLabel(station);
@@ -834,9 +1027,11 @@ const html = String.raw`<!doctype html>
     }
 
     function nextStepText(ship, station) {
+      if (station === 'needs_reconciliation') return 'Reconcile task state.';
       if (ship && ship.attention === 'needs_action') return 'Review the latest update.';
       if (station === 'needs_captain') return 'Review the latest update.';
       if (station === 'arrived_today') return 'No action. Kept here until tomorrow.';
+      if (station === 'done_earlier') return 'No action. Earlier completion retained for context.';
       if (station === 'gate_run') return 'Wait for validation to finish.';
       if (station === 'underway') return 'Wait for the next progress update.';
       if (station === 'casting_off') return 'Starting up.';
@@ -861,7 +1056,8 @@ const html = String.raw`<!doctype html>
 
     function fallbackPipelineStage(ship, station) {
       if (station === 'gate_run') return 'validation_gate';
-      if (station === 'arrived_today') return 'landed';
+      if (isDoneStation(station)) return 'landed';
+      if (station === 'needs_reconciliation') return 'unknown';
       if (station === 'underway') return 'run_work';
       if (station === 'casting_off') return 'spawn';
       if (station === 'needs_captain') return 'human_followthrough';
@@ -899,8 +1095,9 @@ const html = String.raw`<!doctype html>
         if (step.id === active) stateName = active === 'unknown' ? 'unknown' : 'active';
         else if (activeIndex > -1 && index < activeIndex && active !== 'unknown') stateName = 'done';
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
+          '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span>' + escapeHtml(stateName === 'active' ? 'Now' : (stateName === 'done' ? 'Done' : '')) + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? 'Now' : (stateName === 'done' ? 'Done' : '')) + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
@@ -914,8 +1111,9 @@ const html = String.raw`<!doctype html>
       return '<div class="validation-rail" aria-label="No-mistakes validation">' + stages.map(function(step) {
         var stateName = step.id === stepId ? 'active' : 'pending';
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
+          '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span>' + escapeHtml(step.id === stepId ? (branch.status || 'Current') : '') + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(step.id === stepId ? (branch.status || 'Current') : '') + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
@@ -937,11 +1135,38 @@ const html = String.raw`<!doctype html>
         '</dl>';
     }
 
+    function noMistakesNeedsDetail(branch) {
+      if (!branch) return false;
+      var status = String(branch.status || '').toLowerCase();
+      var findings = Number(branch.findings || 0);
+      return ['running', 'fixing', 'failed', 'cancelled'].indexOf(status) !== -1 || findings > 0;
+    }
+
+    function noMistakesNote(branch) {
+      if (!branch) return 'No active no-mistakes detail for this task.';
+      var status = branch.status || 'unknown';
+      return 'No active no-mistakes findings. Last status: ' + status + '.';
+    }
+
+    function noMistakesSectionHtml(pipeline) {
+      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') return '';
+      var branch = pipeline.validation_branch;
+      var body = noMistakesNeedsDetail(branch)
+        ? validationBranchHtml(pipeline)
+        : '<div class="pipeline-note">' + escapeHtml(noMistakesNote(branch)) + '</div>';
+      return '<section class="detail-section pipeline-section">' +
+        '<div class="detail-section-title">No-mistakes</div>' +
+        body +
+      '</section>';
+    }
+
     function actionState(ship, station) {
+      if (station === 'needs_reconciliation') return { label: 'Needs reconciliation', tone: 'needs_action' };
       if (ship && ship.attention === 'needs_action') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'needs_captain') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'gate_run') return { label: 'Validating', tone: 'active' };
       if (station === 'arrived_today') return { label: 'Landed today', tone: 'landed' };
+      if (station === 'done_earlier') return { label: 'Done earlier', tone: 'landed' };
       if (station === 'underway') return { label: 'In progress', tone: 'active' };
       if (station === 'casting_off') return { label: 'Starting', tone: 'active' };
       return { label: 'Monitoring', tone: 'active' };
@@ -960,9 +1185,20 @@ const html = String.raw`<!doctype html>
       return '<div class="kv' + (compact ? ' compact' : '') + '"><dt>' + escapeHtml(label) + '</dt><dd' + (muted ? ' data-muted="true"' : '') + '>' + (html ? value : escapeHtml(value || '-')) + '</dd></div>';
     }
 
+    function whatMattersHtml(ship, station, nextStep) {
+      var done = doneTimelineText(ship);
+      return '<dl class="detail-facts">' +
+        kvRow('Next', nextStep, false, false, false) +
+        (done && isDoneStation(station) ? kvRow('Done', done, false, false, false) : '') +
+      '</dl>';
+    }
+
     function renderMeta() {
       var meta = document.getElementById('meta');
       var fleet = (state.snapshot && state.snapshot.fleet) || [];
+      var counts = stationCounts();
+      var active = (counts.casting_off || 0) + (counts.underway || 0) + (counts.gate_run || 0);
+      var reconciliation = counts.needs_reconciliation || 0;
       var age = state.lastGoodAt ? Math.round((Date.now() - state.lastGoodAt) / 1000) : null;
       var tone = state.error ? 'bad' : ((state.stale || state.serverRefreshing) ? 'warn' : 'ok');
       var label = 'Live';
@@ -972,7 +1208,10 @@ const html = String.raw`<!doctype html>
       else if (state.serverRefreshing) label = 'Refreshing';
       else if (state.stale) label = 'Stale';
       var html = '<span class="pill" data-tone="' + tone + '">' + escapeHtml(label) + '</span>';
-      html += '<span class="pill">' + fleet.length + ' ship' + (fleet.length === 1 ? '' : 's') + '</span>';
+      html += '<span class="pill">' + fleet.length + ' record' + (fleet.length === 1 ? '' : 's') + '</span>';
+      if (active) html += '<span class="pill">' + active + ' active</span>';
+      if (reconciliation) html += '<span class="pill" data-tone="warn">' + reconciliation + ' reconcile</span>';
+      if (supervisionLagging()) html += '<span class="pill" data-tone="warn">state lag</span>';
       if (age != null) html += '<span class="pill">' + age + 's ago</span>';
       meta.innerHTML = html;
     }
@@ -987,22 +1226,27 @@ const html = String.raw`<!doctype html>
       banner.className = 'banner' + (pieces.length ? ' show' : '');
     }
 
-    function renderStrip() {
+    function renderSelectedPipelineRail() {
       var strip = document.getElementById('fleetStrip');
-      var fleet = (state.snapshot && state.snapshot.fleet) || [];
-      if (!fleet.length) {
-        strip.innerHTML = '';
+      var ship = state.selectedId ? taskById(state.selectedId) : null;
+      if (!ship) {
+        strip.innerHTML = '<div class="detail-empty">No ship selected.</div>';
         return;
       }
-      strip.innerHTML = fleet.map(function(ship) {
-        var station = stationOf(ship.task_id);
-        var selected = ship.task_id === state.selectedId ? 'true' : 'false';
-        return '<button class="ship-tab" type="button" aria-selected="' + selected + '" data-ship="' + escapeHtml(ship.task_id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '">' +
-          '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
-          '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
-          '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(station) + '">' + escapeHtml(stationLabel(station)) + '</span>' + attentionBadge(ship) + '</span>' +
-        '</button>';
-      }).join('');
+      var station = stationOf(ship.task_id);
+      var pipeline = pipelineOf(ship, station);
+      var nextStep = pipeline.next_human_action || nextStepText(ship, station);
+      strip.innerHTML = '<div class="selected-pipeline-head">' +
+        '<div class="selected-pipeline-title">' +
+          '<strong>' + escapeHtml(displayTitle(ship)) + '</strong>' +
+          '<span>' + escapeHtml(ship.task_id) + ' · ' + escapeHtml(profileLabel(pipeline.profile)) + '</span>' +
+        '</div>' +
+        '<div class="selected-pipeline-next">' +
+          '<strong>Next</strong>' +
+          '<span>' + escapeHtml(nextStep) + '</span>' +
+        '</div>' +
+      '</div>' +
+      pipelineRailHtml(pipeline);
     }
 
     function renderLanes() {
@@ -1010,15 +1254,14 @@ const html = String.raw`<!doctype html>
       var groups = groupFleet();
       lanes.innerHTML = stationDefs.map(function(def) {
         var ships = groups[def.id] || [];
+        if (!ships.length) return '';
         var cards = ships.map(function(ship) {
           var selected = ship.task_id === state.selectedId ? 'true' : 'false';
           return '<button class="ship-card" type="button" data-station="' + escapeHtml(def.id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '" data-ship="' + escapeHtml(ship.task_id) + '" aria-selected="' + selected + '">' +
             '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
-            '<span class="task-id">' + escapeHtml(ship.task_id) + '</span>' +
-            '<span class="chip-row"><span class="station-chip" data-station="' + escapeHtml(def.id) + '">' + escapeHtml(stationLabel(def.id)) + '</span>' + attentionBadge(ship) + '</span>' +
+            laneCardMetaHtml(ship) +
           '</button>';
         }).join('');
-        if (!cards) cards = '<div class="empty-lane">No ships</div>';
         return '<section class="lane" data-station="' + escapeHtml(def.id) + '">' +
           '<div class="lane-title"><strong>' + escapeHtml(def.label) + '</strong><span>' + ships.length + '</span></div>' +
           '<div class="lane-ships">' + cards + '</div>' +
@@ -1069,23 +1312,16 @@ const html = String.raw`<!doctype html>
         '</section>' +
         '<section class="detail-section">' +
           '<div class="detail-section-title">What matters</div>' +
-          '<dl class="detail-facts">' +
-            kvRow('Next', nextStep, false, false, false) +
-            kvRow('Update', update, false, false, false) +
-          '</dl>' +
+          whatMattersHtml(ship, station, nextStep) +
         '</section>' +
         '<section class="detail-section pipeline-section">' +
-          '<div class="detail-section-title">Pipeline</div>' +
-          pipelineRailHtml(pipeline) +
+          '<div class="detail-section-title">Pipeline status</div>' +
           '<dl class="detail-facts">' +
             kvRow('Stage', pipeline.stage_label || titleize(pipeline.main_stage), false, true, false) +
             kvRow('Confidence', pipeline.source_confidence || 'unknown', false, true, pipeline.source_confidence !== 'live') +
           '</dl>' +
         '</section>' +
-        '<section class="detail-section pipeline-section">' +
-          '<div class="detail-section-title">No-mistakes</div>' +
-          validationBranchHtml(pipeline) +
-        '</section>' +
+        noMistakesSectionHtml(pipeline) +
         '<details class="detail-section">' +
           '<summary>Operational refs</summary>' +
           '<dl class="detail-facts">' +
@@ -1107,7 +1343,7 @@ const html = String.raw`<!doctype html>
       }
       renderMeta();
       renderBanner();
-      renderStrip();
+      renderSelectedPipelineRail();
       renderLanes();
       renderOverlay();
       renderDetail();
