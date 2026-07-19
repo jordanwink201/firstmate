@@ -26,6 +26,19 @@ test_worker_owns_synchronous_driver() {
   pass "Validate contract assigns the complete synchronous driver loop to the initiating task worker"
 }
 
+test_worker_captures_registration_failure_preflight() {
+  local contract
+  contract=$(validate_contract)
+
+  assert_contains "$contract" "Before reporting a no-mistakes registration or run failure" \
+    "Validate contract does not require a preflight before reporting no-mistakes failure"
+  assert_contains "$contract" "\`git rev-parse --short HEAD\`" \
+    "Validate contract does not capture the intended HEAD"
+  assert_contains "$contract" "confirm the no-mistakes \`current_branch\` and run \`head\` match the final branch and commit" \
+    "Validate contract does not require branch/head alignment before escalation"
+  pass "Validate contract requires branch/head preflight before no-mistakes failure escalation"
+}
+
 test_firstmate_never_responds_for_crew_run() {
   local contract
   contract=$(validate_contract)
@@ -36,4 +49,5 @@ test_firstmate_never_responds_for_crew_run() {
 }
 
 test_worker_owns_synchronous_driver
+test_worker_captures_registration_failure_preflight
 test_firstmate_never_responds_for_crew_run

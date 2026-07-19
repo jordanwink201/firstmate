@@ -480,6 +480,7 @@ Load `harness-adapters` for the target harness's skill invocation form; natural 
 The task worker that starts a no-mistakes run drives the pipeline (review, test, document, lint, push, PR, CI) itself and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
 Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, and CI-green completion is reported as `done: PR {url} checks green`.
+Before reporting a no-mistakes registration or run failure, the worker must capture `pwd -P`, `git branch --show-current`, `git rev-parse --short HEAD`, and `no-mistakes axi`, then confirm the no-mistakes `current_branch` and run `head` match the final branch and commit it intends to validate.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 Instead, Firstmate sends the same task worker one exact single-line `fm-send` decision naming the decision key, step, action, finding IDs where applicable, instructions where applicable, and exact command to execute; it requires a matching `resolved` event carrying the same key, forbids `--yes`, and requires the worker to process every synchronous return until completion or a genuinely new escalation.
 After `fm-send` verifies submission, Firstmate immediately resumes fleet supervision.

@@ -316,6 +316,17 @@ You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
+Before invoking /no-mistakes, and before reporting any no-mistakes registration or run failure, capture this validation preflight:
+
+\`\`\`sh
+pwd -P
+git branch --show-current
+git rev-parse --short HEAD
+no-mistakes axi
+\`\`\`
+
+Confirm the no-mistakes \`current_branch\` and run \`head\` match the final branch and commit you intend to validate. If they point at an old branch or commit, re-run from this worktree and do not report no-mistakes as broken until this preflight matches.
+
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are not yours to answer: escalate to firstmate (rule 7) and stop.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.

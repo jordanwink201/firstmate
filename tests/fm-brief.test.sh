@@ -78,6 +78,14 @@ test_no_mistakes_dod_wording() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
+  assert_grep "Before invoking /no-mistakes, and before reporting any no-mistakes registration or run failure" "$brief" \
+    "no-mistakes DOD lost the validation preflight trigger"
+  assert_grep "git rev-parse --short HEAD" "$brief" \
+    "no-mistakes DOD lost the HEAD preflight command"
+  assert_grep "Confirm the no-mistakes \`current_branch\` and run \`head\` match the final branch and commit" "$brief" \
+    "no-mistakes DOD lost the branch/head match check"
+  assert_grep "do not report no-mistakes as broken until this preflight matches" "$brief" \
+    "no-mistakes DOD lost the stale run guard"
   assert_no_grep "no-mistakes' own guidance" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
