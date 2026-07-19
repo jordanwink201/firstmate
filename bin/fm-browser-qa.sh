@@ -105,6 +105,17 @@ browser_reachable() {
   curl -fsS --max-time "${FM_BROWSER_QA_CURL_TIMEOUT:-2}" "$(browser_json_url)" >/dev/null 2>&1
 }
 
+browser_debugging_port() {
+  case "$BROWSER_URL" in
+    http://127.0.0.1:*|http://localhost:*)
+      printf '%s\n' "$BROWSER_URL" | sed -n 's#^http://[^:/]*:\([0-9][0-9]*\).*$#\1#p'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 browser_profile_dir() {
   if [ -n "${FM_BROWSER_QA_PROFILE_DIR:-}" ]; then
     printf '%s\n' "$FM_BROWSER_QA_PROFILE_DIR"
@@ -119,16 +130,65 @@ focus_browser_window() {
   osascript -e 'tell application "Google Chrome" to activate' >/dev/null 2>&1 || true
 }
 
-start_browser() {
-  local port profile_dir
-  case "$BROWSER_URL" in
-    http://127.0.0.1:*|http://localhost:*)
-      port=$(printf '%s\n' "$BROWSER_URL" | sed -n 's#^http://[^:/]*:\([0-9][0-9]*\).*$#\1#p')
+extract_user_data_dir() {
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^--user-data-dir=/) {
+          sub(/^--user-data-dir=/, "", $i)
+          print $i
+          exit
+        }
+        if ($i == "--user-data-dir" && i < NF) {
+          print $(i + 1)
+          exit
+        }
+      }
+    }
+  '
+}
+
+is_temporary_profile_dir() {
+  case "$1" in
+    /tmp/*|/private/tmp/*|/var/folders/*/T/*|*/fm-visible-*|*/fm-browser-qa.*)
+      return 0
       ;;
     *)
-      blocked "--start-if-needed only knows how to start a local http://127.0.0.1:<port> or http://localhost:<port> Chrome"
+      return 1
       ;;
   esac
+}
+
+verify_existing_browser_profile() {
+  local port pids pid command profile expected_profile
+  [ "$START_IF_NEEDED" -eq 1 ] || return 0
+  port=$(browser_debugging_port) || return 0
+  [ -n "$port" ] || return 0
+  command -v lsof >/dev/null 2>&1 || return 0
+  command -v ps >/dev/null 2>&1 || return 0
+
+  pids=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+  [ -n "$pids" ] || return 0
+  expected_profile=$(browser_profile_dir)
+
+  for pid in $pids; do
+    command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    [ -n "$command" ] || continue
+    profile=$(printf '%s\n' "$command" | extract_user_data_dir)
+    [ -n "$profile" ] || continue
+    if is_temporary_profile_dir "$profile"; then
+      blocked "Chrome remote-debugging endpoint at $BROWSER_URL is already using a temporary profile ($profile, pid $pid). Close that Chrome window or run: kill $pid; then rerun with --start-if-needed so the persistent QA profile starts at $expected_profile"
+    fi
+    if [ "$profile" != "$expected_profile" ]; then
+      append_warning "Chrome remote-debugging endpoint uses profile $profile instead of $expected_profile; assuming it is the intended authenticated profile."
+    fi
+  done
+}
+
+start_browser() {
+  local port profile_dir
+  port=$(browser_debugging_port) \
+    || blocked "--start-if-needed only knows how to start a local http://127.0.0.1:<port> or http://localhost:<port> Chrome"
   [ -n "$port" ] || blocked "could not parse Chrome remote-debugging port from $BROWSER_URL"
   command -v open >/dev/null 2>&1 || blocked "--start-if-needed requires macOS open(1); start Chrome with --remote-debugging-port=$port and retry"
   profile_dir=$(browser_profile_dir)
@@ -152,7 +212,9 @@ wait_for_browser() {
   return 1
 }
 
-if ! browser_reachable; then
+if browser_reachable; then
+  verify_existing_browser_profile
+else
   if [ "$START_IF_NEEDED" -eq 1 ]; then
     start_browser
     wait_for_browser || blocked "Chrome remote-debugging endpoint did not become reachable at $BROWSER_URL"

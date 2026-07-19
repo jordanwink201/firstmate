@@ -46,6 +46,29 @@ exit 0
 SH
   chmod +x "$fakebin/osascript"
 
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FM_FAKE_BROWSER_DIR/lsof.out" ]; then
+  cat "$FM_FAKE_BROWSER_DIR/lsof.out"
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fakebin/lsof"
+
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-p" ]; then
+  pid=${2:?}
+  if [ -f "$FM_FAKE_BROWSER_DIR/ps_$pid.out" ]; then
+    cat "$FM_FAKE_BROWSER_DIR/ps_$pid.out"
+    exit 0
+  fi
+fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$fakebin/ps"
+
   cat > "$fakebin/chrome-devtools-axi" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -285,6 +308,52 @@ test_start_if_needed_uses_persistent_visible_profile() {
   pass "fm-browser-qa.sh: --start-if-needed uses a persistent visible Chrome profile"
 }
 
+test_start_if_needed_refuses_existing_temporary_profile() {
+  local dir fakebin out status
+  dir="$TMP_ROOT/temp-profile"
+  fakebin=$(make_fake_browser_tools "$dir")
+  mkdir -p "$dir/browser"
+  printf '12345\n' > "$dir/browser/lsof.out"
+  printf '%s\n' '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=9222 --user-data-dir=/tmp/fm-visible-cad-chrome --new-window https://example.test/qa' > "$dir/browser/ps_12345.out"
+
+  set +e
+  out=$(FM_BROWSER_QA_PROFILE_DIR="$dir/profile" \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence" --start-if-needed)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "existing temporary profile should exit 1"
+  assert_contains "$out" "already using a temporary profile" \
+    "temporary profile should be refused clearly"
+  assert_contains "$out" "/tmp/fm-visible-cad-chrome" \
+    "temporary profile path should be included"
+  assert_contains "$out" "kill 12345" \
+    "temporary profile blocker should name the PID cleanup"
+  assert_absent "$dir/browser/open.log" \
+    "temporary profile blocker should not start another Chrome"
+  pass "fm-browser-qa.sh: --start-if-needed refuses an existing temporary Chrome profile"
+}
+
+test_start_if_needed_allows_existing_operator_profile() {
+  local dir fakebin evidence profile
+  dir="$TMP_ROOT/operator-profile"
+  fakebin=$(make_fake_browser_tools "$dir")
+  profile="/Users/test/.local/share/operator-chrome-profile"
+  mkdir -p "$dir/browser"
+  printf '23456\n' > "$dir/browser/lsof.out"
+  printf '%s\n' "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=9222 --user-data-dir=$profile --new-window https://example.test/qa" > "$dir/browser/ps_23456.out"
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  evidence="$dir/evidence"
+
+  FM_BROWSER_QA_PROFILE_DIR="$dir/profile" \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" --start-if-needed >/dev/null
+
+  assert_grep "uses profile $profile instead of $dir/profile" "$evidence/report.md" \
+    "non-default operator profile should be allowed with a warning"
+  assert_present "$evidence/identity.json" "identity evidence missing for operator profile"
+  pass "fm-browser-qa.sh: --start-if-needed allows a stable operator Chrome profile"
+}
+
 test_exact_tab_selected_and_evidence_written() {
   local dir fakebin evidence identity
   dir="$TMP_ROOT/exact"
@@ -498,6 +567,8 @@ test_requires_url_and_out
 test_missing_chrome_devtools_axi_blocks
 test_browser_unreachable_without_start_blocks
 test_start_if_needed_uses_persistent_visible_profile
+test_start_if_needed_refuses_existing_temporary_profile
+test_start_if_needed_allows_existing_operator_profile
 test_exact_tab_selected_and_evidence_written
 test_no_exact_tab_opens_new_page_then_verifies
 test_multiple_exact_tabs_refused
