@@ -31,10 +31,20 @@ SH
 
   cat > "$fakebin/open" <<'SH'
 #!/usr/bin/env bash
+mkdir -p "$FM_FAKE_BROWSER_DIR"
+printf '%s\n' "$*" >> "$FM_FAKE_BROWSER_DIR/open.log"
 rm -f "$FM_FAKE_BROWSER_DIR/browser_down"
 exit 0
 SH
   chmod +x "$fakebin/open"
+
+  cat > "$fakebin/osascript" <<'SH'
+#!/usr/bin/env bash
+mkdir -p "$FM_FAKE_BROWSER_DIR"
+printf '%s\n' "$*" >> "$FM_FAKE_BROWSER_DIR/osascript.log"
+exit 0
+SH
+  chmod +x "$fakebin/osascript"
 
   cat > "$fakebin/chrome-devtools-axi" <<'SH'
 #!/usr/bin/env bash
@@ -179,9 +189,17 @@ write_page() {
 
 run_qa() {
   local fakebin=$1 browser_dir=$2
+  local -a env_args
   shift 2
-  PATH="$fakebin:/usr/bin:/bin" FM_FAKE_BROWSER_DIR="$browser_dir" \
-    FM_BROWSER_QA_OPEN_SETTLE=0 bash "$ROOT/bin/fm-browser-qa.sh" "$@" 2>&1
+  env_args=(
+    "PATH=$fakebin:/usr/bin:/bin"
+    "FM_FAKE_BROWSER_DIR=$browser_dir"
+    "FM_BROWSER_QA_OPEN_SETTLE=0"
+  )
+  if [ "${FM_BROWSER_QA_PROFILE_DIR+x}" = x ]; then
+    env_args+=("FM_BROWSER_QA_PROFILE_DIR=$FM_BROWSER_QA_PROFILE_DIR")
+  fi
+  env "${env_args[@]}" bash "$ROOT/bin/fm-browser-qa.sh" "$@" 2>&1
 }
 
 test_requires_url_and_out() {
@@ -240,6 +258,31 @@ test_browser_unreachable_without_start_blocks() {
   assert_contains "$out" "blocked: Chrome remote-debugging endpoint is not reachable" \
     "unreachable browser should be blocked"
   pass "fm-browser-qa.sh: unreachable browser blocks without --start-if-needed"
+}
+
+test_start_if_needed_uses_persistent_visible_profile() {
+  local dir fakebin evidence
+  dir="$TMP_ROOT/start-browser"
+  fakebin=$(make_fake_browser_tools "$dir")
+  mkdir -p "$dir/browser"
+  : > "$dir/browser/browser_down"
+  evidence="$dir/evidence"
+
+  FM_BROWSER_QA_PROFILE_DIR="$dir/profile" \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" --start-if-needed >/dev/null
+
+  assert_grep "--remote-debugging-port=9222" "$dir/browser/open.log" \
+    "started Chrome without the requested DevTools port"
+  assert_grep "--user-data-dir=$dir/profile" "$dir/browser/open.log" \
+    "started Chrome without a persistent QA profile"
+  assert_grep "--new-window" "$dir/browser/open.log" \
+    "started Chrome without a visible new window"
+  assert_grep "https://example.test/qa" "$dir/browser/open.log" \
+    "started Chrome without the exact QA URL"
+  assert_grep "Google Chrome" "$dir/browser/osascript.log" \
+    "started Chrome without foregrounding the QA window"
+  assert_present "$evidence/identity.json" "identity evidence missing after starting browser"
+  pass "fm-browser-qa.sh: --start-if-needed uses a persistent visible Chrome profile"
 }
 
 test_exact_tab_selected_and_evidence_written() {
@@ -325,6 +368,8 @@ test_auth_blocked_reported() {
   expect_code 1 "$status" "auth page should exit 1"
   assert_contains "$out" "blocked: authenticated browser session expired" \
     "auth page should be reported as authenticated-session blocked"
+  assert_grep "Google Chrome" "$dir/browser/osascript.log" \
+    "auth block should foreground the QA Chrome window"
   pass "fm-browser-qa.sh: auth/sign-in pages block clearly"
 }
 
@@ -452,6 +497,7 @@ test_console_and_network_failures_warn_only() {
 test_requires_url_and_out
 test_missing_chrome_devtools_axi_blocks
 test_browser_unreachable_without_start_blocks
+test_start_if_needed_uses_persistent_visible_profile
 test_exact_tab_selected_and_evidence_written
 test_no_exact_tab_opens_new_page_then_verifies
 test_multiple_exact_tabs_refused

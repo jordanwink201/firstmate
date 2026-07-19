@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deterministic browser QA wrapper for firstmate tasks.
-# Attaches to an already-authenticated Chrome remote-debugging endpoint, proves
-# the exact active URL/title through chrome-devtools-axi, and writes evidence.
+# Attaches to an authenticated Chrome remote-debugging endpoint, proves the
+# exact active URL/title through chrome-devtools-axi, and writes evidence.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 set -eu
@@ -105,8 +105,22 @@ browser_reachable() {
   curl -fsS --max-time "${FM_BROWSER_QA_CURL_TIMEOUT:-2}" "$(browser_json_url)" >/dev/null 2>&1
 }
 
+browser_profile_dir() {
+  if [ -n "${FM_BROWSER_QA_PROFILE_DIR:-}" ]; then
+    printf '%s\n' "$FM_BROWSER_QA_PROFILE_DIR"
+    return 0
+  fi
+  [ -n "${HOME:-}" ] || blocked "HOME is not set; cannot choose a persistent Chrome QA profile"
+  printf '%s\n' "$HOME/.local/share/fm-browser-qa/chrome-profile"
+}
+
+focus_browser_window() {
+  command -v osascript >/dev/null 2>&1 || return 0
+  osascript -e 'tell application "Google Chrome" to activate' >/dev/null 2>&1 || true
+}
+
 start_browser() {
-  local port
+  local port profile_dir
   case "$BROWSER_URL" in
     http://127.0.0.1:*|http://localhost:*)
       port=$(printf '%s\n' "$BROWSER_URL" | sed -n 's#^http://[^:/]*:\([0-9][0-9]*\).*$#\1#p')
@@ -117,8 +131,15 @@ start_browser() {
   esac
   [ -n "$port" ] || blocked "could not parse Chrome remote-debugging port from $BROWSER_URL"
   command -v open >/dev/null 2>&1 || blocked "--start-if-needed requires macOS open(1); start Chrome with --remote-debugging-port=$port and retry"
-  open -na "Google Chrome" --args "--remote-debugging-port=$port" >/dev/null 2>&1 \
+  profile_dir=$(browser_profile_dir)
+  mkdir -p "$profile_dir" || blocked "could not create Chrome QA profile directory: $profile_dir"
+  open -na "Google Chrome" --args \
+    "--remote-debugging-port=$port" \
+    "--user-data-dir=$profile_dir" \
+    "--new-window" \
+    "$TARGET_URL" >/dev/null 2>&1 \
     || blocked "could not start Google Chrome with --remote-debugging-port=$port"
+  focus_browser_window
 }
 
 wait_for_browser() {
@@ -231,6 +252,11 @@ process.exit(1);
 NODE
 }
 
+auth_blocked() {
+  focus_browser_window
+  blocked "authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun"
+}
+
 count_lines() {
   wc -l < "$1" | tr -d '[:space:]'
 }
@@ -321,7 +347,7 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
       identity_json="$SCAN_DIR/page-$(safe_page_id "$page_id").json"
       [ -f "$identity_json" ] || continue
       if is_auth_blocked "$(json_field "$identity_json" href)" "$(json_field "$identity_json" title)"; then
-        blocked "authenticated browser session expired"
+        auth_blocked
       fi
     done
     blocked "exact QA URL is not open after navigation: $TARGET_URL"
@@ -342,7 +368,7 @@ FINAL_HREF=$(json_field "$FINAL_IDENTITY" href)
 FINAL_TITLE=$(json_field "$FINAL_IDENTITY" title)
 
 if is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE"; then
-  blocked "authenticated browser session expired"
+  auth_blocked
 fi
 
 if [ "$FINAL_HREF" != "$NORM_TARGET_URL" ]; then
