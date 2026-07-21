@@ -103,11 +103,115 @@ make_case() {
       },
       "current_state": {"state": "done", "source": "status-log", "detail": "completed earlier", "raw": "done: completed earlier"},
       "latest_status": {"path": "/tmp/state/beta-t2.status", "verb": "done", "note": "completed earlier", "raw": "2026-07-16 done: completed earlier"}
+    },
+    {
+      "task_id": "gamma-report",
+      "display_title": "Gamma answered report",
+      "display_subtitle": "gamma-report · scout report",
+      "attention": "done",
+      "branch": "",
+      "commit_short": "",
+      "pr_url": "",
+      "report_url": "/api/reports/gamma-report",
+      "report_path": "/tmp/fmhome/data/gamma-report/report.md",
+      "project": "cad",
+      "worktree": "",
+      "kind": "scout",
+      "mode": "report",
+      "harness": "",
+      "model": "",
+      "effort": "",
+      "backend": "archived",
+      "backend_liveness": "archived",
+      "timeline": {"done_at": "2026-07-18T12:00:00Z", "done_date": "2026-07-18", "source": "report-file-mtime", "freshness": "today"},
+      "pipeline": {
+        "profile": "scout_report",
+        "main_stage": "review_ready",
+        "stage_label": "Review Ready",
+        "next_human_action": "review scout report",
+        "source_confidence": "approximate",
+        "evidence": ["source=report-store"],
+        "validation_branch": null
+      },
+      "current_state": {"state": "done", "source": "report-store", "detail": "Report summary", "raw": "/tmp/fmhome/data/gamma-report/report.md"},
+      "latest_status": {"path": "/tmp/fmhome/data/gamma-report/report.md", "verb": "done", "note": "Report summary", "raw": "done: scout report written"}
+    },
+    {
+      "task_id": "delta-report",
+      "display_title": "Delta newer report",
+      "display_subtitle": "delta-report · scout report",
+      "attention": "done",
+      "branch": "",
+      "commit_short": "",
+      "pr_url": "",
+      "report_url": "/api/reports/delta-report",
+      "report_path": "/tmp/fmhome/data/delta-report/report.md",
+      "project": "cad",
+      "worktree": "",
+      "kind": "scout",
+      "mode": "report",
+      "harness": "",
+      "model": "",
+      "effort": "",
+      "backend": "archived",
+      "backend_liveness": "archived",
+      "timeline": {"done_at": "2026-07-18T16:20:00Z", "done_date": "2026-07-18", "source": "report-file-mtime", "freshness": "today"},
+      "pipeline": {
+        "profile": "scout_report",
+        "main_stage": "review_ready",
+        "stage_label": "Review Ready",
+        "next_human_action": "review scout report",
+        "source_confidence": "approximate",
+        "evidence": ["source=report-store"],
+        "validation_branch": null
+      },
+      "current_state": {"state": "done", "source": "report-store", "detail": "Newer report summary", "raw": "/tmp/fmhome/data/delta-report/report.md"},
+      "latest_status": {"path": "/tmp/fmhome/data/delta-report/report.md", "verb": "done", "note": "Newer report summary", "raw": "done: scout report written"}
+    },
+    {
+      "task_id": "epsilon-unknown-branch",
+      "display_title": "Unknown no-mistakes branch",
+      "display_subtitle": "needs reconciliation",
+      "attention": "needs_action",
+      "branch": "fm/epsilon-unknown-branch",
+      "commit_short": "feed123",
+      "pr_url": "",
+      "project": "/tmp/projects/epsilon",
+      "worktree": "/tmp/worktrees/epsilon-unknown-branch",
+      "kind": "ship",
+      "mode": "no-mistakes",
+      "harness": "codex",
+      "model": "gpt-5",
+      "effort": "high",
+      "backend": "archived",
+      "backend_liveness": "archived",
+      "timeline": {"done_at": "", "done_date": "", "source": "none", "freshness": "none"},
+      "pipeline": {
+        "profile": "cad_no_mistakes",
+        "main_stage": "unknown",
+        "stage_label": "Unknown",
+        "next_human_action": "reconcile task state",
+        "source_confidence": "unknown",
+        "evidence": ["worktree=missing"],
+        "validation_branch": {
+          "name": "no-mistakes",
+          "step": "",
+          "status": "unknown",
+          "findings": 0,
+          "pr_url": "",
+          "superseded_status_log": false
+        }
+      },
+      "current_state": {"state": "unknown", "source": "missing", "detail": "state needs reconciliation", "raw": ""},
+      "latest_status": {"path": "/tmp/state/epsilon-unknown-branch.status", "verb": "unknown", "note": "state needs reconciliation", "raw": ""}
     }
   ],
   "stations": [
     {"task_id": "alpha-t1", "station": "gate_run", "reason": "working run-step has validation or test wording"},
-    {"task_id": "beta-t2", "station": "done_earlier", "reason": "done signal has prior-date evidence"}
+    {"task_id": "beta-t2", "station": "done_earlier", "reason": "done signal has prior-date evidence"},
+    {"task_id": "gamma-report", "station": "answered", "reason": "completed scout report is available"},
+    {"task_id": "delta-report", "station": "answered", "reason": "completed scout report is available"},
+    {"task_id": "epsilon-unknown-branch", "station": "unknown", "reason": "state needs reconciliation"}
   ],
   "supervision": {
     "watcher": {"fresh": true, "stale": false, "age_seconds": 12},
@@ -119,6 +223,19 @@ make_case() {
   }
 }
 JSON
+  mkdir -p "$dir/fmhome/data/gamma-report" "$dir/fmhome/data/delta-report"
+  cat > "$dir/fmhome/data/gamma-report/report.md" <<'EOF'
+# Gamma Report
+
+## Finding
+Report summary
+EOF
+  cat > "$dir/fmhome/data/delta-report/report.md" <<'EOF'
+# Delta Report
+
+## Finding
+Newer report summary
+EOF
   printf 'ok\n' > "$dir/fake/behavior"
   cat > "$dir/fake/fm-dashboard-probe.sh" <<'SH'
 #!/usr/bin/env bash
@@ -250,7 +367,7 @@ start_server() {
 
 assert_dashboard_render_contract() {
   local html=$1 snapshot=$2
-  node - "$html" "$snapshot" <<'NODE'
+  node - "$html" "$snapshot" <<'NODE' || fail "dashboard render contract failed"
 const fs = require('node:fs');
 const vm = require('node:vm');
 
@@ -264,6 +381,7 @@ class Element {
     this.id = id;
     this.innerHTML = '';
     this.className = '';
+    this.style = {};
   }
 }
 
@@ -307,26 +425,100 @@ context.render();
 const strip = elements.get('fleetStrip').innerHTML;
 const detail = elements.get('detail').innerHTML;
 const lanes = elements.get('lanes').innerHTML;
+const laneTracks = elements.get('lanes').style.gridTemplateColumns || '';
 const meta = elements.get('meta').innerHTML;
-const railSteps = (strip.match(/class="rail-step"/g) || []).length;
+const mainRail = strip.slice(strip.indexOf('class="pipeline-rail"'), strip.indexOf('class="pipeline-branch"'));
+const branchRail = strip.slice(strip.indexOf('class="pipeline-branch"'));
+const mainRailSteps = (mainRail.match(/class="rail-step"/g) || []).length;
+const branchRailSteps = (branchRail.match(/class="rail-step"/g) || []).length;
 
 assert(context.state.selectedId === 'alpha-t1', `expected selected alpha-t1, got ${context.state.selectedId}`);
 assert(strip.includes('selected-pipeline-title'), 'top strip must keep selected task identity');
 assert(strip.includes('class="pipeline-rail"'), 'top strip must render the selected task pipeline rail');
-assert(railSteps === 9, `top pipeline rail should render 9 stages, got ${railSteps}`);
+assert(mainRailSteps === 9, `top pipeline rail should render 9 main stages, got ${mainRailSteps}`);
+assert(strip.includes('class="pipeline-branch"'), 'top strip should render the no-mistakes branch from validation');
+assert(branchRailSteps === 5, `top no-mistakes branch should render 5 stages, got ${branchRailSteps}`);
+assert(strip.indexOf('class="pipeline-branch"') > strip.indexOf('class="pipeline-rail"'), 'no-mistakes branch should sit under the main rail');
+assert(strip.includes('aria-label="No-mistakes validation branch"'), 'top strip should identify the no-mistakes validation branch');
 assert(strip.includes('class="rail-dot"'), 'top pipeline rail should render status dots');
 assert(strip.includes('Validation') && strip.includes('Now'), 'top pipeline rail should mark Validation as current');
+assert(strip.includes('No-mistakes') && strip.includes('Awaiting Approval'), 'top branch should expose no-mistakes status');
+assert(!mainRail.includes('<span class="rail-caption">Done</span>'), 'top pipeline rail should use dots instead of repeated Done captions');
+assert(!branchRail.includes('<span class="rail-caption">Done</span>'), 'top no-mistakes branch should use dots instead of repeated Done captions');
 assert(!strip.includes('ship-tab'), 'top strip must not regress to fleet task cards');
 assert(!strip.includes('data-ship='), 'top strip must not contain selectable ship cards');
 assert(detail.includes('Pipeline status'), 'detail panel should keep compact pipeline status');
 assert(!detail.includes('class="pipeline-rail"'), 'detail panel must not duplicate the top pipeline rail');
+assert(!detail.includes('class="validation-rail"'), 'detail panel must not duplicate the no-mistakes validation branch rail');
+assert(!detail.includes('detail-section-title">No-mistakes</div>'), 'detail panel should not carry a second no-mistakes rail section');
+
+const completedSnapshot = JSON.parse(JSON.stringify(snapshot));
+completedSnapshot.fleet[0].task_id = 'completed-no-mistakes';
+completedSnapshot.fleet[0].display_title = 'Completed no-mistakes task';
+completedSnapshot.fleet[0].attention = 'done';
+completedSnapshot.fleet[0].pipeline.main_stage = 'landed';
+completedSnapshot.fleet[0].pipeline.validation_branch.step = 'validation';
+completedSnapshot.fleet[0].pipeline.validation_branch.status = 'completed';
+completedSnapshot.stations[0].task_id = 'completed-no-mistakes';
+completedSnapshot.stations[0].station = 'arrived_today';
+context.state.snapshot = completedSnapshot;
+context.state.selectedId = 'completed-no-mistakes';
+context.render();
+const completedStrip = elements.get('fleetStrip').innerHTML;
+const completedBranchRail = completedStrip.slice(completedStrip.indexOf('class="pipeline-branch"'));
+assert(completedBranchRail.includes('No-mistakes'), 'completed no-mistakes branch should still render in the top strip');
+assert(!completedBranchRail.includes('<span>Completed</span>'), 'completed top no-mistakes branch should use dots instead of status text');
+
+assert(lanes.includes('Answered Today'), 'lanes should render the Answered Today station');
+assert(lanes.includes('Gamma answered report'), 'answered lane should render completed report rows');
+const deltaIndex = lanes.indexOf('Delta newer report');
+const gammaIndex = lanes.indexOf('Gamma answered report');
+assert(deltaIndex > -1 && gammaIndex > -1 && deltaIndex < gammaIndex, 'answered lane should sort cards by latest timestamp first');
+assert(/Reported \d{1,2}:\d{2}(am|pm) Jul 18/.test(lanes), 'answered report cards should render compact time and date chips');
 assert(lanes.includes('Done Earlier'), 'lanes should render the Done Earlier station');
-assert(lanes.includes('Done Jul 16'), 'done cards should render the completion date chip');
+assert(lanes.includes('data-station="done_earlier" data-collapsed="true"'), 'Done Earlier lane should start collapsed');
+assert(lanes.includes('data-lane-toggle="done_earlier"'), 'Done Earlier lane should expose an expand control');
+assert(lanes.includes('aria-expanded="false"'), 'Done Earlier expand control should advertise collapsed state');
+assert(laneTracks.includes('var(--collapsed-lane-width)'), 'collapsed Done Earlier lane should use a narrow grid track');
+assert(!lanes.includes('Beta completed task'), 'collapsed Done Earlier lane should hide older cards');
+assert(!/Done \d{1,2}:\d{2}(am|pm) Jul 16/.test(lanes), 'collapsed Done Earlier lane should hide old done chips');
+context.state.expandedLanes.done_earlier = true;
+context.render();
+const expandedLanes = elements.get('lanes').innerHTML;
+const expandedLaneTracks = elements.get('lanes').style.gridTemplateColumns || '';
+assert(expandedLanes.includes('data-station="done_earlier" data-collapsed="false"'), 'expanded Done Earlier lane should render expanded state');
+assert(expandedLanes.includes('aria-expanded="true"'), 'Done Earlier expand control should advertise expanded state');
+assert(!expandedLaneTracks.includes('var(--collapsed-lane-width)'), 'expanded Done Earlier lane should restore normal grid width');
+assert(expandedLanes.includes('Beta completed task'), 'expanded Done Earlier lane should reveal older cards');
+assert(/Done \d{1,2}:\d{2}(am|pm) Jul 16/.test(expandedLanes), 'expanded done cards should render compact time and date chips');
 assert(!lanes.includes('empty-lane'), 'zero-count lanes should stay hidden at runtime');
 assert(!lanes.includes('station-chip'), 'lane cards should not repeat station chips at runtime');
 assert(!lanes.includes('attention-badge'), 'lane cards should not repeat needs-action badges at runtime');
-assert(meta.includes('2 records'), 'meta should count restored fleet records');
+assert(meta.includes('5 records'), 'meta should count restored fleet records');
 assert(meta.includes('state lag'), 'meta should surface supervision lag when wake queue is pending');
+
+context.state.selectedId = 'gamma-report';
+context.render();
+const reportStrip = elements.get('fleetStrip').innerHTML;
+const reportDetail = elements.get('detail').innerHTML;
+assert(reportStrip.includes('Gamma answered report'), 'answered report should render in the selected pipeline identity');
+assert(reportStrip.includes('Review') && reportStrip.includes('Now'), 'answered report should mark Review as current in the top rail');
+assert(!reportStrip.includes('class="pipeline-branch"'), 'answered report should not render a no-mistakes branch');
+assert(reportDetail.includes('Answered Today'), 'answered report detail should keep the current station context');
+assert(reportDetail.includes('Report ready'), 'answered report detail should expose report-ready action state');
+assert(reportDetail.includes('Open report'), 'answered report detail should link to the Markdown report');
+assert(reportDetail.includes('/tmp/fmhome/data/gamma-report/report.md'), 'answered report detail should expose the local report path in operational refs');
+assert(!reportDetail.includes('<span class="pill">Scout report</span>'), 'answered report detail should not repeat the profile pill');
+assert(!reportDetail.includes('<span class="task-id">gamma-report</span>'), 'answered report detail should not repeat the task id header');
+assert(!reportDetail.includes('<span class="pill">gamma-report</span>'), 'answered report detail should not repeat the task id action pill');
+assert(!reportDetail.includes('What matters'), 'answered report detail should not duplicate the top-rail next action');
+assert(!reportDetail.includes('Pipeline status'), 'answered report detail should not duplicate the top-rail pipeline status');
+
+context.state.selectedId = 'epsilon-unknown-branch';
+context.render();
+const unknownStrip = elements.get('fleetStrip').innerHTML;
+assert(unknownStrip.includes('Unknown no-mistakes branch'), 'unknown no-mistakes row should render in the selected pipeline identity');
+assert(!unknownStrip.includes('class="pipeline-branch"'), 'unknown no-mistakes branch detail should not draw a fake branch');
 NODE
 }
 
@@ -343,6 +535,7 @@ test_routes_and_methods() {
   assert_grep 'displayTitle(ship)' "$body" "dashboard HTML does not prefer display_title for cards"
   assert_grep 'Open PR' "$body" "dashboard HTML does not render a PR link in details"
   assert_grep 'attention-badge' "$body" "dashboard HTML does not include needs-action badge markup"
+  assert_grep 'Answered Today' "$body" "dashboard HTML does not expose Answered Today lane"
   assert_grep 'Arrived Today' "$body" "dashboard HTML does not expose Arrived Today lane"
   assert_grep 'Done Earlier' "$body" "dashboard HTML does not expose Done Earlier lane"
   assert_grep 'Needs Reconciliation' "$body" "dashboard HTML does not expose Needs Reconciliation lane"
@@ -351,16 +544,16 @@ test_routes_and_methods() {
   assert_grep 'selected-pipeline-title' "$body" "top rail does not expose selected task identity"
   assert_grep 'selected-pipeline-next' "$body" "top rail does not expose selected task next action"
   assert_grep 'rail-dot' "$body" "dashboard pipeline rail does not render Jenkins-style status dots"
+  assert_grep 'pipeline-branch' "$body" "dashboard top rail does not render the no-mistakes branch"
+  assert_grep 'noMistakesBranchHtml' "$body" "dashboard HTML does not include top-rail no-mistakes branch renderer"
   assert_grep 'doneChipHtml' "$body" "dashboard HTML does not include done date chip renderer"
+  assert_grep 'reportChipHtml' "$body" "dashboard HTML does not include report date chip renderer"
+  assert_grep 'Open report' "$body" "dashboard HTML does not render a report link in details"
   assert_no_grep 'function shipSummaryCardInnerHtml' "$body" "top rail still carries fleet-card summary rendering"
   assert_grep 'What matters' "$body" "dashboard detail does not prioritize captain-facing fields"
   assert_grep 'Pipeline status' "$body" "dashboard detail does not render compact pipeline status"
-  assert_no_grep 'pipelineRailHtml(pipeline) +' "$body" "dashboard detail still duplicates the top pipeline rail"
   assert_grep 'pipelineRailHtml' "$body" "dashboard HTML does not include pipeline rail renderer"
-  assert_grep 'No-mistakes' "$body" "dashboard detail does not render the no-mistakes sub-rail section"
-  assert_grep 'validationBranchHtml' "$body" "dashboard HTML does not include validation branch renderer"
-  assert_grep 'Validation detail not tracked for this profile.' "$body" "dashboard HTML does not include fallback copy for non-no-mistakes profiles"
-  assert_grep 'Validation detail unavailable for this task.' "$body" "dashboard HTML does not include unavailable copy for no-mistakes rows without validation detail"
+  assert_no_grep '<div class="detail-section-title">No-mistakes</div>' "$body" "dashboard detail still carries the no-mistakes sub-rail section"
   assert_grep 'Operational refs' "$body" "dashboard detail does not de-emphasize operational fields"
   assert_grep 'Needs you' "$body" "dashboard detail does not expose the action state"
   assert_no_grep '>At Port<' "$body" "dashboard still renders the old At Port lane"
@@ -369,7 +562,7 @@ test_routes_and_methods() {
   headers="$dir/snapshot.headers"
   code=$(http_request_with_headers GET "$base" /api/snapshot "$body" "$headers")
   [ "$code" = 200 ] || fail "/api/snapshot returned HTTP $code: $(cat "$body")"
-  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
+  jq -e '.fleet[0].task_id == "alpha-t1" and .fleet[0].display_title == "Alpha task title" and .fleet[0].pr_url == "https://github.com/example/alpha/pull/12" and .fleet[0].pipeline.main_stage == "validation_gate" and .fleet[0].pipeline.validation_branch.findings == 2 and .fleet[0].timeline.source == "none" and .stations[0].station == "gate_run" and .fleet[1].timeline.freshness == "earlier" and .stations[1].station == "done_earlier" and .fleet[2].kind == "scout" and .fleet[2].report_url == "/api/reports/gamma-report" and .fleet[2].pipeline.main_stage == "review_ready" and .stations[2].station == "answered" and .fleet[3].task_id == "delta-report" and .stations[3].station == "answered" and .fleet[4].task_id == "epsilon-unknown-branch" and .stations[4].station == "unknown" and .supervision.wake_queue.pending == 1' "$body" >/dev/null \
     || fail "/api/snapshot did not return valid probe JSON: $(cat "$body")"
   [ "$(header_value "$headers" x-firstmate-cache)" = fresh ] \
     || fail "/api/snapshot did not mark a fresh cache response: $(cat "$headers")"
@@ -382,6 +575,23 @@ test_routes_and_methods() {
   code=$(http_request GET "$base" /api/report "$body")
   [ "$code" = 200 ] || fail "/api/report returned HTTP $code: $(cat "$body")"
   assert_contains "$(cat "$body")" "Fleet report" "/api/report did not return probe report text"
+
+  body="$dir/report-file.md"
+  code=$(http_request GET "$base" /api/reports/gamma-report "$body")
+  [ "$code" = 200 ] || fail "/api/reports/gamma-report returned HTTP $code: $(cat "$body")"
+  assert_contains "$(cat "$body")" "# Gamma Report" "/api/reports/gamma-report did not return the stored Markdown report"
+
+  body="$dir/bad-report.json"
+  code=$(http_request GET "$base" /api/reports/bad%2Fid "$body")
+  [ "$code" = 400 ] || fail "/api/reports/bad%2Fid returned HTTP $code instead of 400: $(cat "$body")"
+  jq -e '.error == "bad_report_id"' "$body" >/dev/null \
+    || fail "bad report id body was not clear JSON: $(cat "$body")"
+
+  body="$dir/missing-report.json"
+  code=$(http_request GET "$base" /api/reports/missing-report "$body")
+  [ "$code" = 404 ] || fail "/api/reports/missing-report returned HTTP $code instead of 404: $(cat "$body")"
+  jq -e '.error == "report_not_found"' "$body" >/dev/null \
+    || fail "missing report body was not clear JSON: $(cat "$body")"
 
   body="$dir/health.json"
   code=$(http_request GET "$base" /healthz "$body")
@@ -403,7 +613,7 @@ test_routes_and_methods() {
   [ "$code" = 404 ] || fail "unknown route returned HTTP $code instead of 404"
   jq -e '.error == "not_found"' "$body" >/dev/null || fail "404 body was not clear JSON: $(cat "$body")"
 
-  pass "dashboard server serves HTML, cached snapshot, report, health, 405, and 404"
+  pass "dashboard server serves HTML, cached snapshot, reports, health, 405, and 404"
 }
 
 test_dashboard_runtime_keeps_top_pipeline_rail() {

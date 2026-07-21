@@ -651,6 +651,63 @@ EOF
   pass "replay sources include status mtimes, watcher timestamps, wake epochs, task ledger, and ledger recommendation"
 }
 
+test_completed_scout_reports_feed_answered_lane() {
+  local dir state data out active_report_path new_report_path
+  dir=$(make_case reports)
+  state="$dir/state"
+  data="$dir/data"
+  out="$dir/out.json"
+
+  mkdir -p "$data/scout-active" "$data/scout-new" "$data/scout-old" "$dir/wt-scout-active"
+  active_report_path="$data/scout-active/report.md"
+  new_report_path="$data/scout-new/report.md"
+  cat > "$active_report_path" <<'EOF'
+# Active report should not duplicate
+
+## Finding
+The active row should win.
+EOF
+  cat > "$new_report_path" <<'EOF'
+# CAD ShowMe scout
+Card: ShowMe is aggregate but this is teaching arithmetic
+Scout date: 2026-07-18
+Checkout: `/Users/jordanwinkelman/Documents/GitHub/computer-applications-demo`
+
+## Finding
+The lesson teaches scalar arithmetic. The source already appears fixed.
+EOF
+  cat > "$data/scout-old/report.md" <<'EOF'
+# Older report
+
+## Finding
+Older context.
+EOF
+  touch -t 202607181300.00 "$active_report_path"
+  touch -t 202607181200.00 "$new_report_path"
+  touch -t 202607171200.00 "$data/scout-old/report.md"
+
+  fm_write_meta "$state/scout-active.meta" \
+    "window=sess:alive-scout-active" \
+    "worktree=$dir/wt-scout-active" \
+    "project=$dir/projects/cad" \
+    "kind=scout" \
+    "mode=report"
+
+  FM_DASHBOARD_REPORT_LIMIT=12 run_probe_json "$dir" "$out"
+
+  assert_jq_true '.fleet | map(select(.task_id == "scout-active")) | length == 1' \
+    "$out" "active scout with a report file should not duplicate"
+  assert_jq_true '.fleet[] | select(.task_id == "scout-new" and .display_title == "ShowMe is aggregate but this is teaching arithmetic" and .kind == "scout" and .mode == "report" and .attention == "done" and .backend_liveness == "archived" and .source == "report-store" and .report_url == "/api/reports/scout-new" and .current_state.source == "report-store" and (.current_state.detail | contains("scalar arithmetic")) and .pipeline.profile == "scout_report" and .pipeline.main_stage == "review_ready" and .pipeline.next_human_action == "review scout report" and .pipeline.source_confidence == "approximate" and (.pipeline.evidence | index("source=report-store")) and (.pipeline.evidence | index("worktree=missing") | not))' \
+    "$out" "completed scout report row did not expose answered report metadata"
+  [ "$(jq_value '.fleet[] | select(.task_id == "scout-new") | .report_path' "$out")" = "$new_report_path" ] \
+    || fail "completed scout report did not expose the local report path"
+  assert_jq_true '[.stations[] | select(.station == "answered") | .task_id] == ["scout-new"]' \
+    "$out" "completed scout reports did not feed the answered lane with the report limit applied"
+  assert_jq_true '.fleet | map(.task_id) | index("scout-old") | not' \
+    "$out" "completed scout reports did not filter to today"
+  pass "completed scout reports remain visible as answered dashboard rows"
+}
+
 test_report_output() {
   local dir out
   dir=$(make_case report)
@@ -670,4 +727,5 @@ test_arrival_ledger_keeps_landed_ships_visible_today
 test_completion_timeline_drives_done_lanes_and_reconciliation
 test_pipeline_snapshot_profiles_and_stages
 test_replay_sources_are_extracted
+test_completed_scout_reports_feed_answered_lane
 test_report_output

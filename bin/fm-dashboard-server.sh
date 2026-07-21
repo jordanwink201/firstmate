@@ -5,13 +5,14 @@
 # to 127.0.0.1 by default, accepts only GET requests, and exposes:
 #   /api/snapshot  cached JSON from a background fm-dashboard-probe.sh --json loop
 #   /api/report    on-demand text report from fm-dashboard-probe.sh --report
+#   /api/reports/<task-id>  completed scout report Markdown
 #   /healthz       tiny JSON health check
 #
 # /api/snapshot is the sole data source the dashboard UI polls. The detail
 # panel renders the selected task's main pipeline rail from the snapshot's
 # per-task "pipeline" object (with a client-side fallback when a row lacks
-# one) and shows the no-mistakes validation sub-rail only for the
-# cad_no_mistakes profile.
+# one). CAD/no-mistakes tasks render their validation sub-pipeline as a branch
+# under the selected top rail.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,6 +62,8 @@ esac
 command -v node >/dev/null 2>&1 || { printf 'fm-dashboard-server.sh: node not found\n' >&2; exit 127; }
 
 FM_DASHBOARD_PROBE_BIN="${FM_DASHBOARD_PROBE_BIN:-$SCRIPT_DIR/fm-dashboard-probe.sh}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+FM_DASHBOARD_DATA_DIR="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 [ -x "$FM_DASHBOARD_PROBE_BIN" ] || {
   printf 'fm-dashboard-server.sh: probe is not executable: %s\n' "$FM_DASHBOARD_PROBE_BIN" >&2
   exit 1
@@ -69,12 +72,15 @@ FM_DASHBOARD_PROBE_BIN="${FM_DASHBOARD_PROBE_BIN:-$SCRIPT_DIR/fm-dashboard-probe
 export FM_DASHBOARD_HOST="$HOST"
 export FM_DASHBOARD_PORT="$PORT"
 export FM_DASHBOARD_PROBE_BIN
+export FM_DASHBOARD_DATA_DIR
 
 exec node <<'NODE'
 'use strict';
 
 const http = require('node:http');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const host = process.env.FM_DASHBOARD_HOST || '127.0.0.1';
 const port = Number(process.env.FM_DASHBOARD_PORT || '8765');
@@ -85,6 +91,7 @@ const refreshMsRaw = Number(process.env.FM_DASHBOARD_REFRESH_MS || '10000');
 const refreshMs = Number.isFinite(refreshMsRaw) && refreshMsRaw > 0 ? refreshMsRaw : 10000;
 const maxOutputBytesRaw = Number(process.env.FM_DASHBOARD_PROBE_MAX_OUTPUT_BYTES || String(4 * 1024 * 1024));
 const maxOutputBytes = Number.isFinite(maxOutputBytesRaw) && maxOutputBytesRaw > 0 ? maxOutputBytesRaw : 4 * 1024 * 1024;
+const dataDir = path.resolve(process.env.FM_DASHBOARD_DATA_DIR || path.join(process.cwd(), 'data'));
 
 const cache = {
   snapshot: null,
@@ -120,6 +127,7 @@ const html = String.raw`<!doctype html>
       --red: #b42318;
       --green: #20744a;
       --gray: #6b7280;
+      --collapsed-lane-width: 92px;
       --shadow: 0 1px 2px rgba(24, 33, 42, 0.06), 0 8px 24px rgba(24, 33, 42, 0.06);
     }
     * {
@@ -202,9 +210,9 @@ const html = String.raw`<!doctype html>
       border: 1px solid var(--line);
       background: var(--paper);
       border-radius: 6px;
-      padding: 12px 12px 10px;
+      padding: 10px 12px 8px;
       display: grid;
-      gap: 10px;
+      gap: 6px;
       min-width: 0;
       box-shadow: var(--shadow);
       overflow-x: auto;
@@ -325,6 +333,7 @@ const html = String.raw`<!doctype html>
     .station-chip[data-station="underway"] { background: var(--teal); }
     .station-chip[data-station="gate_run"] { background: var(--amber); }
     .station-chip[data-station="needs_captain"] { background: var(--red); }
+    .station-chip[data-station="answered"] { background: var(--teal); }
     .station-chip[data-station="at_port"] { background: var(--green); }
     .station-chip[data-station="arrived_today"] { background: var(--green); }
     .station-chip[data-station="done_earlier"] { background: var(--gray); }
@@ -355,11 +364,7 @@ const html = String.raw`<!doctype html>
       min-width: 0;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background:
-        linear-gradient(90deg, rgba(24, 33, 42, 0.055) 1px, transparent 1px),
-        linear-gradient(180deg, rgba(24, 33, 42, 0.05) 1px, transparent 1px),
-        var(--paper);
-      background-size: 80px 80px;
+      background: var(--paper);
       overflow: hidden;
       box-shadow: 0 1px 2px rgba(24, 33, 42, 0.05);
     }
@@ -373,8 +378,9 @@ const html = String.raw`<!doctype html>
     .lane {
       position: relative;
       min-width: 0;
-      padding: 12px 10px;
-      border-right: 1px solid rgba(217, 222, 231, 0.78);
+      padding: 12px;
+      border-right: 1px solid var(--line);
+      background: #fff;
       display: grid;
       grid-template-rows: auto 1fr;
       gap: 12px;
@@ -383,9 +389,20 @@ const html = String.raw`<!doctype html>
       border-right: 0;
     }
     .lane-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+      margin: -12px -12px 0;
+      padding: 10px 12px 9px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #fafbfc;
+      min-height: 52px;
+    }
+    .lane-title-copy {
       display: grid;
       gap: 3px;
-      min-height: 52px;
+      min-width: 0;
     }
     .lane-title strong {
       font-size: 11px;
@@ -393,10 +410,60 @@ const html = String.raw`<!doctype html>
       color: var(--muted);
       font-weight: 700;
     }
-    .lane-title span {
+    .lane-count {
       font-size: 26px;
       font-weight: 720;
       line-height: 1;
+    }
+    .lane-toggle {
+      appearance: none;
+      width: calc(100% + 24px);
+      border: 0;
+      border-bottom: 1px solid var(--line-soft);
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: background-color 120ms ease;
+    }
+    .lane-toggle:hover {
+      background: #f5f7f9;
+    }
+    .lane-toggle-mark {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+      line-height: 1;
+      margin-top: 2px;
+    }
+    .lane-toggle[aria-expanded="true"] .lane-toggle-mark {
+      border-color: rgba(15, 118, 110, 0.35);
+      color: var(--teal);
+    }
+    .lane[data-collapsed="true"] .lane-title {
+      gap: 6px;
+      padding-left: 8px;
+      padding-right: 8px;
+    }
+    .lane[data-collapsed="true"] .lane-title strong {
+      font-size: 10px;
+      line-height: 1.12;
+      overflow-wrap: anywhere;
+    }
+    .lane[data-collapsed="true"] .lane-count {
+      font-size: 24px;
+    }
+    .lane[data-collapsed="true"] .lane-toggle-mark {
+      width: 22px;
+      height: 22px;
+      font-size: 15px;
     }
     .lane-ships {
       display: grid;
@@ -423,14 +490,21 @@ const html = String.raw`<!doctype html>
     .ship-card[data-station="underway"] { border-left-color: var(--teal); }
     .ship-card[data-station="gate_run"] { border-left-color: var(--amber); }
     .ship-card[data-station="needs_captain"] { border-left-color: var(--red); }
+    .ship-card[data-station="answered"] { border-left-color: var(--teal); }
     .ship-card[data-station="at_port"] { border-left-color: var(--green); }
     .ship-card[data-station="arrived_today"] { border-left-color: var(--green); }
     .ship-card[data-station="done_earlier"] { border-left-color: var(--gray); }
     .ship-card[data-station="needs_reconciliation"] { border-left-color: var(--amber); }
     .ship-card[data-station="unknown"] { border-left-color: var(--gray); }
     .ship-card[aria-selected="true"] {
-      outline: 2px solid rgba(15, 118, 110, 0.78);
-      outline-offset: 1px;
+      border-color: rgba(15, 118, 110, 0.72);
+      background: #f2faf7;
+      outline: 2px solid rgba(15, 118, 110, 0.7);
+      outline-offset: 2px;
+      box-shadow:
+        inset 0 0 0 1px rgba(15, 118, 110, 0.2),
+        0 0 0 3px rgba(15, 118, 110, 0.12),
+        0 3px 10px rgba(15, 118, 110, 0.12);
     }
     .ship-card:hover {
       border-color: #c7ced8;
@@ -616,7 +690,83 @@ const html = String.raw`<!doctype html>
     .selected-pipeline .pipeline-rail {
       grid-template-columns: repeat(9, minmax(96px, 1fr));
       min-width: 860px;
-      padding: 12px 0 6px;
+      padding: 8px 0 0;
+    }
+    .pipeline-flow {
+      display: grid;
+      gap: 0;
+      min-width: 860px;
+    }
+    .pipeline-branch {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(96px, 1fr));
+      min-width: 860px;
+      margin-top: -8px;
+    }
+    .pipeline-branch-body {
+      grid-column: 5 / -1;
+      position: relative;
+      display: grid;
+      gap: 2px;
+      padding: 8px 0 0;
+    }
+    .pipeline-branch-body::before {
+      content: "";
+      position: absolute;
+      top: -10px;
+      left: calc(10% - 1px);
+      width: 2px;
+      height: 14px;
+      background: rgba(32, 116, 74, 0.45);
+    }
+    .pipeline-branch-head {
+      display: flex;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.2;
+      min-width: 0;
+      padding-left: 8px;
+    }
+    .pipeline-branch-head strong {
+      color: var(--ink);
+      font-size: 11px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .pipeline-branch-head span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .selected-pipeline .pipeline-branch .validation-rail {
+      grid-template-columns: repeat(5, minmax(72px, 1fr));
+      padding: 0;
+    }
+    .selected-pipeline .pipeline-branch .rail-step {
+      min-height: 40px;
+      grid-template-rows: 16px auto auto;
+      gap: 2px;
+      padding: 0 2px;
+    }
+    .selected-pipeline .pipeline-branch .rail-step::before {
+      top: 7px;
+      height: 3px;
+    }
+    .selected-pipeline .pipeline-branch .rail-dot {
+      width: 14px;
+      height: 14px;
+      border-width: 2px;
+      box-shadow: 0 0 0 4px var(--paper);
+    }
+    .selected-pipeline .pipeline-branch .rail-step[data-state="active"] .rail-dot {
+      box-shadow: 0 0 0 4px var(--paper), 0 0 0 7px rgba(15, 118, 110, 0.13);
+    }
+    .selected-pipeline .pipeline-branch .rail-step strong {
+      font-size: 10px;
     }
     .rail-step {
       position: relative;
@@ -707,7 +857,10 @@ const html = String.raw`<!doctype html>
       color: inherit;
     }
     .rail-caption {
-      min-height: 15px;
+      min-height: 0;
+    }
+    .rail-caption:empty {
+      display: none;
     }
     .pipeline-note {
       border: 1px dashed rgba(102, 112, 133, 0.34);
@@ -826,8 +979,9 @@ const html = String.raw`<!doctype html>
       { id: 'underway', label: 'Underway' },
       { id: 'gate_run', label: 'Gate Run' },
       { id: 'needs_captain', label: 'Needs Captain' },
+      { id: 'answered', label: 'Answered Today' },
       { id: 'arrived_today', label: 'Arrived Today' },
-      { id: 'done_earlier', label: 'Done Earlier' },
+      { id: 'done_earlier', label: 'Done Earlier', collapsible: true },
       { id: 'needs_reconciliation', label: 'Needs Reconciliation' },
       { id: 'unknown', label: 'Unknown' }
     ];
@@ -846,9 +1000,10 @@ const html = String.raw`<!doctype html>
       { id: 'intent', label: 'Intent' },
       { id: 'review', label: 'Review' },
       { id: 'push', label: 'Push' },
-      { id: 'ci', label: 'CI' }
+      { id: 'ci', label: 'CI' },
+      { id: 'validation', label: 'Validation' }
     ];
-    var selectPriority = ['needs_captain', 'needs_reconciliation', 'gate_run', 'underway', 'casting_off', 'unknown', 'arrived_today', 'done_earlier'];
+    var selectPriority = ['needs_captain', 'needs_reconciliation', 'gate_run', 'underway', 'casting_off', 'unknown', 'answered', 'arrived_today', 'done_earlier'];
     var state = {
       snapshot: null,
       selectedId: null,
@@ -857,7 +1012,8 @@ const html = String.raw`<!doctype html>
       stale: false,
       lastGoodAt: 0,
       requesting: false,
-      serverRefreshing: false
+      serverRefreshing: false,
+      expandedLanes: {}
     };
 
     function escapeHtml(value) {
@@ -893,6 +1049,7 @@ const html = String.raw`<!doctype html>
       station = normalizeStation(station);
       if (station === 'arrived_today') return 'Arrived Today';
       if (station === 'done_earlier') return 'Done Earlier';
+      if (station === 'answered') return 'Answered Today';
       if (station === 'needs_reconciliation') return 'Needs Reconciliation';
       return String(station || 'unknown').replace(/_/g, ' ');
     }
@@ -915,12 +1072,38 @@ const html = String.raw`<!doctype html>
       return counts;
     }
 
+    var monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
     function formatDoneDate(value) {
       var match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
       if (!match) return value || '';
-      var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-      var month = months[Math.max(0, Math.min(11, Number(match[2]) - 1))];
+      var month = monthNames[Math.max(0, Math.min(11, Number(match[2]) - 1))];
       return month + ' ' + String(Number(match[3]));
+    }
+
+    function formatTimelineTimestamp(timeline) {
+      timeline = timeline || {};
+      var raw = timeline.done_at || '';
+      if (raw && /[T ][0-9]{2}:[0-9]{2}/.test(raw)) {
+        var parsed = Date.parse(raw);
+        if (!Number.isNaN(parsed)) {
+          var date = new Date(parsed);
+          var hour = date.getHours();
+          var suffix = hour >= 12 ? 'pm' : 'am';
+          var displayHour = hour % 12 || 12;
+          var minute = String(date.getMinutes()).padStart(2, '0');
+          return displayHour + ':' + minute + suffix + ' ' + monthNames[date.getMonth()] + ' ' + String(date.getDate());
+        }
+      }
+      return timeline.done_date ? formatDoneDate(timeline.done_date) : '';
+    }
+
+    function timelineTimestampMs(ship) {
+      var timeline = (ship && ship.timeline) || {};
+      var parsed = timeline.done_at ? Date.parse(timeline.done_at) : NaN;
+      if (!Number.isNaN(parsed)) return parsed;
+      parsed = timeline.done_date ? Date.parse(timeline.done_date + 'T00:00:00') : NaN;
+      return Number.isNaN(parsed) ? 0 : parsed;
     }
 
     function cardTaskIdHtml(ship) {
@@ -935,18 +1118,27 @@ const html = String.raw`<!doctype html>
       var station = stationOf(ship.task_id);
       if (!isDoneStation(station)) return '';
       var timeline = ship.timeline || {};
-      var label = timeline.done_date ? 'Done ' + formatDoneDate(timeline.done_date) : (station === 'arrived_today' ? 'Done today' : 'Done earlier');
+      var stamp = formatTimelineTimestamp(timeline);
+      var label = stamp ? 'Done ' + stamp : (station === 'arrived_today' ? 'Done today' : 'Done earlier');
+      return '<span class="done-chip">' + escapeHtml(label) + '</span>';
+    }
+
+    function reportChipHtml(ship) {
+      if (!ship || stationOf(ship.task_id) !== 'answered') return '';
+      var timeline = ship.timeline || {};
+      var stamp = formatTimelineTimestamp(timeline);
+      var label = stamp ? 'Reported ' + stamp : 'Report ready';
       return '<span class="done-chip">' + escapeHtml(label) + '</span>';
     }
 
     function doneTimelineText(ship) {
       if (!ship || !ship.timeline || !ship.timeline.done_date) return '';
       var source = ship.timeline.source && ship.timeline.source !== 'none' ? ' via ' + ship.timeline.source : '';
-      return 'Done ' + formatDoneDate(ship.timeline.done_date) + source;
+      return 'Done ' + formatTimelineTimestamp(ship.timeline) + source;
     }
 
     function laneCardMetaHtml(ship) {
-      var pieces = [cardTaskIdHtml(ship), doneChipHtml(ship)].filter(Boolean);
+      var pieces = [cardTaskIdHtml(ship), doneChipHtml(ship), reportChipHtml(ship)].filter(Boolean);
       if (!pieces.length) return '';
       return '<span class="card-meta">' + pieces.join('') + '</span>';
     }
@@ -983,13 +1175,42 @@ const html = String.raw`<!doctype html>
 
     function groupFleet() {
       var groups = {};
+      var originalOrder = {};
       stationDefs.forEach(function(def) { groups[def.id] = []; });
-      ((state.snapshot && state.snapshot.fleet) || []).forEach(function(ship) {
+      ((state.snapshot && state.snapshot.fleet) || []).forEach(function(ship, index) {
+        originalOrder[ship.task_id] = index;
         var station = stationOf(ship.task_id);
         if (!groups[station]) groups.unknown.push(ship);
         else groups[station].push(ship);
       });
+      Object.keys(groups).forEach(function(station) {
+        groups[station].sort(function(left, right) {
+          var byTime = timelineTimestampMs(right) - timelineTimestampMs(left);
+          if (byTime !== 0) return byTime;
+          return (originalOrder[left.task_id] || 0) - (originalOrder[right.task_id] || 0);
+        });
+      });
       return groups;
+    }
+
+    function laneCollapsed(def, ships) {
+      if (!def.collapsible || !ships.length) return false;
+      if (state.expandedLanes[def.id]) return false;
+      return !ships.some(function(ship) { return ship.task_id === state.selectedId; });
+    }
+
+    function laneTitleHtml(def, count, collapsed) {
+      var bodyId = 'lane-ships-' + def.id;
+      var copy = '<span class="lane-title-copy"><strong>' + escapeHtml(def.label) + '</strong><span class="lane-count">' + count + '</span></span>';
+      if (!def.collapsible) return '<div class="lane-title">' + copy + '</div>';
+      return '<button class="lane-title lane-toggle" type="button" data-lane-toggle="' + escapeHtml(def.id) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" aria-controls="' + escapeHtml(bodyId) + '">' +
+        copy +
+        '<span class="lane-toggle-mark" aria-hidden="true">' + (collapsed ? '+' : '-') + '</span>' +
+      '</button>';
+    }
+
+    function laneGridTrack(lane) {
+      return lane.collapsed ? 'var(--collapsed-lane-width)' : 'minmax(170px, 1fr)';
     }
 
     function shortPath(value) {
@@ -1013,6 +1234,7 @@ const html = String.raw`<!doctype html>
       text = text.replace(/\s+\(commit\s+[a-f0-9]{7,40}\)/ig, '');
       text = text.replace(/\bworktree isolation\b/ig, 'setup checks');
       text = text.replace(/\breading required skill instructions\b/ig, 'reading instructions');
+      if (!text && station === 'answered') return 'Report is ready for review.';
       if (!text && station === 'arrived_today') return 'Finished and archived for today.';
       if (!text && station === 'done_earlier') return 'Finished before today.';
       if (!text && station === 'needs_reconciliation') return 'State needs reconciliation.';
@@ -1030,6 +1252,7 @@ const html = String.raw`<!doctype html>
       if (station === 'needs_reconciliation') return 'Reconcile task state.';
       if (ship && ship.attention === 'needs_action') return 'Review the latest update.';
       if (station === 'needs_captain') return 'Review the latest update.';
+      if (station === 'answered') return 'Review the report.';
       if (station === 'arrived_today') return 'No action. Kept here until tomorrow.';
       if (station === 'done_earlier') return 'No action. Earlier completion retained for context.';
       if (station === 'gate_run') return 'Wait for validation to finish.';
@@ -1040,7 +1263,7 @@ const html = String.raw`<!doctype html>
 
     function titleize(value) {
       return String(value || 'unknown')
-        .replace(/_/g, ' ')
+        .replace(/[-_]/g, ' ')
         .replace(/\b\w/g, function(letter) { return letter.toUpperCase(); });
     }
 
@@ -1058,6 +1281,7 @@ const html = String.raw`<!doctype html>
       if (station === 'gate_run') return 'validation_gate';
       if (isDoneStation(station)) return 'landed';
       if (station === 'needs_reconciliation') return 'unknown';
+      if (station === 'answered') return 'review_ready';
       if (station === 'underway') return 'run_work';
       if (station === 'casting_off') return 'spawn';
       if (station === 'needs_captain') return 'human_followthrough';
@@ -1097,67 +1321,67 @@ const html = String.raw`<!doctype html>
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
           '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? 'Now' : (stateName === 'done' ? 'Done' : '')) + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? 'Now' : '') + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
 
-    function validationRailHtml(branch) {
+    function validationBranchComplete(pipeline, branch) {
+      if (!branch) return false;
+      var status = String(branch.status || '').toLowerCase();
+      if (['passed', 'checks-passed', 'success', 'succeeded', 'completed'].indexOf(status) !== -1) return true;
+      var mainStage = (pipeline && pipeline.main_stage) || 'unknown';
+      if (mainStage === 'unknown') return false;
+      var activeIndex = pipelineStages.findIndex(function(step) { return step.id === mainStage; });
+      var validationIndex = pipelineStages.findIndex(function(step) { return step.id === 'validation_gate'; });
+      return validationIndex > -1 && activeIndex > validationIndex;
+    }
+
+    function validationBranchStatusLabel(branch) {
+      return titleize((branch && branch.status) || 'current');
+    }
+
+    function hasValidationBranchDetail(branch) {
+      if (!branch) return false;
+      var status = String(branch.status || '').toLowerCase();
+      return Boolean(branch.step || (status && status !== 'unknown') || branch.pr_url || branch.superseded_status_log || Number(branch.findings || 0) > 0);
+    }
+
+    function validationRailHtml(branch, pipeline) {
       var stepId = (branch && branch.step) || 'validation';
       var stages = validationStages.slice();
       if (!stages.some(function(step) { return step.id === stepId; })) {
         stages.push({ id: stepId, label: titleize(stepId) });
       }
-      return '<div class="validation-rail" aria-label="No-mistakes validation">' + stages.map(function(step) {
-        var stateName = step.id === stepId ? 'active' : 'pending';
+      var activeIndex = stages.findIndex(function(step) { return step.id === stepId; });
+      var complete = validationBranchComplete(pipeline, branch);
+      return '<div class="validation-rail" aria-label="No-mistakes validation">' + stages.map(function(step, index) {
+        var stateName = 'pending';
+        if (complete) stateName = 'done';
+        else if (step.id === stepId) stateName = 'active';
+        else if (activeIndex > -1 && index < activeIndex) stateName = 'done';
         return '<div class="rail-step" data-state="' + escapeHtml(stateName) + '">' +
           '<span class="rail-dot" aria-hidden="true"></span>' +
           '<strong>' + escapeHtml(step.label) + '</strong>' +
-          '<span class="rail-caption">' + escapeHtml(step.id === stepId ? (branch.status || 'Current') : '') + '</span>' +
+          '<span class="rail-caption">' + escapeHtml(stateName === 'active' ? validationBranchStatusLabel(branch) : '') + '</span>' +
         '</div>';
       }).join('') + '</div>';
     }
 
-    function validationBranchHtml(pipeline) {
+    function noMistakesBranchHtml(pipeline) {
       var branch = pipeline && pipeline.validation_branch;
-      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') {
-        return '<div class="pipeline-note">Validation detail not tracked for this profile.</div>';
-      }
-      if (!branch) {
-        return '<div class="pipeline-note">Validation detail unavailable for this task.</div>';
-      }
-      return validationRailHtml(branch) +
-        '<dl class="detail-facts">' +
-          kvRow('Step', branch.step || '', false, true, false) +
-          kvRow('Status', branch.status || '', false, true, false) +
-          kvRow('Findings', branch.findings == null ? '-' : String(branch.findings), false, true, false) +
-          kvRow('Superseded', branch.superseded_status_log ? 'yes' : 'no', false, true, branch.superseded_status_log ? false : true) +
-        '</dl>';
-    }
-
-    function noMistakesNeedsDetail(branch) {
-      if (!branch) return false;
-      var status = String(branch.status || '').toLowerCase();
-      var findings = Number(branch.findings || 0);
-      return ['running', 'fixing', 'failed', 'cancelled'].indexOf(status) !== -1 || findings > 0;
-    }
-
-    function noMistakesNote(branch) {
-      if (!branch) return 'No active no-mistakes detail for this task.';
-      var status = branch.status || 'unknown';
-      return 'No active no-mistakes findings. Last status: ' + status + '.';
-    }
-
-    function noMistakesSectionHtml(pipeline) {
-      if (!pipeline || pipeline.profile !== 'cad_no_mistakes') return '';
-      var branch = pipeline.validation_branch;
-      var body = noMistakesNeedsDetail(branch)
-        ? validationBranchHtml(pipeline)
-        : '<div class="pipeline-note">' + escapeHtml(noMistakesNote(branch)) + '</div>';
-      return '<section class="detail-section pipeline-section">' +
-        '<div class="detail-section-title">No-mistakes</div>' +
-        body +
-      '</section>';
+      if (!pipeline || pipeline.profile !== 'cad_no_mistakes' || !hasValidationBranchDetail(branch)) return '';
+      var branchStatus = validationBranchStatusLabel(branch);
+      var branchStatusHtml = validationBranchComplete(pipeline, branch) ? '' : '<span>' + escapeHtml(branchStatus) + '</span>';
+      return '<div class="pipeline-branch" aria-label="No-mistakes validation branch">' +
+        '<div class="pipeline-branch-body">' +
+          '<div class="pipeline-branch-head">' +
+            '<strong>No-mistakes</strong>' +
+            branchStatusHtml +
+          '</div>' +
+          validationRailHtml(branch, pipeline) +
+        '</div>' +
+      '</div>';
     }
 
     function actionState(ship, station) {
@@ -1165,6 +1389,7 @@ const html = String.raw`<!doctype html>
       if (ship && ship.attention === 'needs_action') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'needs_captain') return { label: 'Needs you', tone: 'needs_action' };
       if (station === 'gate_run') return { label: 'Validating', tone: 'active' };
+      if (station === 'answered') return { label: 'Report ready', tone: 'landed' };
       if (station === 'arrived_today') return { label: 'Landed today', tone: 'landed' };
       if (station === 'done_earlier') return { label: 'Done earlier', tone: 'landed' };
       if (station === 'underway') return { label: 'In progress', tone: 'active' };
@@ -1177,8 +1402,23 @@ const html = String.raw`<!doctype html>
       if (ship.pr_url) {
         links.push('<a class="action-link" href="' + escapeHtml(ship.pr_url) + '" target="_blank" rel="noopener noreferrer">Open PR</a>');
       }
-      links.push('<span class="pill">' + escapeHtml(ship.task_id || '') + '</span>');
+      if (ship.report_url) {
+        links.push('<a class="action-link" href="' + escapeHtml(ship.report_url) + '" target="_blank" rel="noopener noreferrer">Open report</a>');
+      }
       return links.join('');
+    }
+
+    function detailMetaHtml(ship, pipeline, station) {
+      var pieces = [];
+      if (ship.task_id && station !== 'answered') {
+        pieces.push('<span class="task-id">' + escapeHtml(ship.task_id) + '</span>');
+      }
+      if (station !== 'answered') {
+        pieces.push('<span class="pill">' + escapeHtml(profileLabel(pipeline.profile)) + '</span>');
+      }
+      var badge = attentionBadge(ship);
+      if (badge) pieces.push(badge);
+      return pieces.length ? '<div class="detail-meta">' + pieces.join('') + '</div>' : '';
     }
 
     function kvRow(label, value, html, compact, muted) {
@@ -1191,6 +1431,25 @@ const html = String.raw`<!doctype html>
         kvRow('Next', nextStep, false, false, false) +
         (done && isDoneStation(station) ? kvRow('Done', done, false, false, false) : '') +
       '</dl>';
+    }
+
+    function whatMattersSectionHtml(ship, station, nextStep) {
+      if (station === 'answered') return '';
+      return '<section class="detail-section">' +
+        '<div class="detail-section-title">What matters</div>' +
+        whatMattersHtml(ship, station, nextStep) +
+      '</section>';
+    }
+
+    function pipelineStatusSectionHtml(pipeline, station) {
+      if (station === 'answered') return '';
+      return '<section class="detail-section pipeline-section">' +
+        '<div class="detail-section-title">Pipeline status</div>' +
+        '<dl class="detail-facts">' +
+          kvRow('Stage', pipeline.stage_label || titleize(pipeline.main_stage), false, true, false) +
+          kvRow('Confidence', pipeline.source_confidence || 'unknown', false, true, pipeline.source_confidence !== 'live') +
+        '</dl>' +
+      '</section>';
     }
 
     function renderMeta() {
@@ -1246,25 +1505,35 @@ const html = String.raw`<!doctype html>
           '<span>' + escapeHtml(nextStep) + '</span>' +
         '</div>' +
       '</div>' +
-      pipelineRailHtml(pipeline);
+      '<div class="pipeline-flow">' +
+        pipelineRailHtml(pipeline) +
+        noMistakesBranchHtml(pipeline) +
+      '</div>';
     }
 
     function renderLanes() {
       var lanes = document.getElementById('lanes');
       var groups = groupFleet();
-      lanes.innerHTML = stationDefs.map(function(def) {
+      var renderedLanes = stationDefs.map(function(def) {
         var ships = groups[def.id] || [];
         if (!ships.length) return '';
-        var cards = ships.map(function(ship) {
+        var collapsed = laneCollapsed(def, ships);
+        return { def: def, ships: ships, collapsed: collapsed };
+      }).filter(Boolean);
+      lanes.style.gridTemplateColumns = renderedLanes.map(laneGridTrack).join(' ');
+      lanes.innerHTML = renderedLanes.map(function(lane) {
+        var def = lane.def;
+        var collapsed = lane.collapsed;
+        var cards = collapsed ? '' : lane.ships.map(function(ship) {
           var selected = ship.task_id === state.selectedId ? 'true' : 'false';
           return '<button class="ship-card" type="button" data-station="' + escapeHtml(def.id) + '" data-attention="' + escapeHtml(ship.attention || 'normal') + '" data-ship="' + escapeHtml(ship.task_id) + '" aria-selected="' + selected + '">' +
             '<span class="ship-title">' + escapeHtml(displayTitle(ship)) + '</span>' +
             laneCardMetaHtml(ship) +
           '</button>';
         }).join('');
-        return '<section class="lane" data-station="' + escapeHtml(def.id) + '">' +
-          '<div class="lane-title"><strong>' + escapeHtml(def.label) + '</strong><span>' + ships.length + '</span></div>' +
-          '<div class="lane-ships">' + cards + '</div>' +
+        return '<section class="lane" data-station="' + escapeHtml(def.id) + '" data-collapsed="' + (collapsed ? 'true' : 'false') + '">' +
+          laneTitleHtml(def, lane.ships.length, collapsed) +
+          '<div class="lane-ships" id="lane-ships-' + escapeHtml(def.id) + '"' + (collapsed ? ' hidden' : '') + '>' + cards + '</div>' +
         '</section>';
       }).join('');
     }
@@ -1300,31 +1569,23 @@ const html = String.raw`<!doctype html>
       var update = humanUpdate(ship, station);
       var nextStep = pipeline.next_human_action || nextStepText(ship, station);
       var current = currentStateText(ship);
+      var actionLinks = actionLinksHtml(ship);
       detail.innerHTML = '<div class="detail-head">' +
         '<span class="station-chip" data-station="' + escapeHtml(station) + '">' + escapeHtml(stationLabel(station)) + '</span>' +
         '<h2>' + escapeHtml(displayTitle(ship)) + '</h2>' +
-        '<div class="detail-meta"><span class="task-id">' + escapeHtml(ship.task_id) + '</span><span class="pill">' + escapeHtml(profileLabel(pipeline.profile)) + '</span>' + attentionBadge(ship) + '</div>' +
+        detailMetaHtml(ship, pipeline, station) +
       '</div>' +
       '<div class="detail-body">' +
         '<section class="detail-summary">' +
           '<div class="detail-status" data-tone="' + escapeHtml(action.tone) + '"><strong>' + escapeHtml(action.label) + '</strong><span>' + escapeHtml(update) + '</span></div>' +
-          '<div class="detail-actions">' + actionLinksHtml(ship) + '</div>' +
+          (actionLinks ? '<div class="detail-actions">' + actionLinks + '</div>' : '') +
         '</section>' +
-        '<section class="detail-section">' +
-          '<div class="detail-section-title">What matters</div>' +
-          whatMattersHtml(ship, station, nextStep) +
-        '</section>' +
-        '<section class="detail-section pipeline-section">' +
-          '<div class="detail-section-title">Pipeline status</div>' +
-          '<dl class="detail-facts">' +
-            kvRow('Stage', pipeline.stage_label || titleize(pipeline.main_stage), false, true, false) +
-            kvRow('Confidence', pipeline.source_confidence || 'unknown', false, true, pipeline.source_confidence !== 'live') +
-          '</dl>' +
-        '</section>' +
-        noMistakesSectionHtml(pipeline) +
+        whatMattersSectionHtml(ship, station, nextStep) +
+        pipelineStatusSectionHtml(pipeline, station) +
         '<details class="detail-section">' +
           '<summary>Operational refs</summary>' +
           '<dl class="detail-facts">' +
+            (ship.report_path ? kvRow('Report', ship.report_path, false, true, false) : '') +
             kvRow('State', current, false, true, true) +
             kvRow('Reason', reason, false, true, true) +
             kvRow('Branch', branchCommit, false, true, true) +
@@ -1350,6 +1611,13 @@ const html = String.raw`<!doctype html>
     }
 
     document.addEventListener('click', function(event) {
+      var laneToggle = event.target.closest('[data-lane-toggle]');
+      if (laneToggle) {
+        var lane = laneToggle.getAttribute('data-lane-toggle');
+        state.expandedLanes[lane] = laneToggle.getAttribute('aria-expanded') !== 'true';
+        render();
+        return;
+      }
       var button = event.target.closest('[data-ship]');
       if (!button) return;
       state.selectedId = button.getAttribute('data-ship');
@@ -1618,6 +1886,32 @@ async function serveProbe(res, kind) {
   else sendProbeFailure(res, kind, result.error);
 }
 
+function reportPathForTask(taskId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(taskId)) return null;
+  const candidate = path.resolve(dataDir, taskId, 'report.md');
+  const root = dataDir.endsWith(path.sep) ? dataDir : `${dataDir}${path.sep}`;
+  return candidate.startsWith(root) ? candidate : null;
+}
+
+async function serveReportFile(res, taskId) {
+  const reportPath = reportPathForTask(taskId);
+  if (!reportPath) {
+    sendJson(res, 400, { error: 'bad_report_id' });
+    return;
+  }
+
+  try {
+    const body = await fs.promises.readFile(reportPath, 'utf8');
+    send(res, 200, baseHeaders('text/markdown; charset=utf-8'), body);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      sendJson(res, 404, { error: 'report_not_found' });
+      return;
+    }
+    sendJson(res, 500, { error: 'report_read_failed', message: trimmedError(error) });
+  }
+}
+
 async function serveSnapshot(res) {
   if (cache.snapshot) {
     sendSnapshotSuccess(res);
@@ -1666,6 +1960,14 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === '/api/report') {
     serveProbe(res, 'report').catch(error => sendProbeFailure(res, 'report', error));
+    return;
+  }
+
+  const reportMatch = url.pathname.match(/^\/api\/reports\/([^/]+)$/);
+  if (reportMatch) {
+    serveReportFile(res, decodeURIComponent(reportMatch[1])).catch(error => {
+      sendJson(res, 500, { error: 'report_read_failed', message: trimmedError(error) });
+    });
     return;
   }
 
