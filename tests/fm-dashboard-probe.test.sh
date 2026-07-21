@@ -652,11 +652,13 @@ EOF
 }
 
 test_completed_scout_reports_feed_answered_lane() {
-  local dir state data out active_report_path new_report_path
+  local dir state data out active_report_path new_report_path today_touch old_touch
   dir=$(make_case reports)
   state="$dir/state"
   data="$dir/data"
   out="$dir/out.json"
+  today_touch=$(date '+%Y%m%d')
+  old_touch=$(old_touch_spec)
 
   mkdir -p "$data/scout-active" "$data/scout-new" "$data/scout-old" "$dir/wt-scout-active"
   active_report_path="$data/scout-active/report.md"
@@ -682,9 +684,9 @@ EOF
 ## Finding
 Older context.
 EOF
-  touch -t 202607181300.00 "$active_report_path"
-  touch -t 202607181200.00 "$new_report_path"
-  touch -t 202607171200.00 "$data/scout-old/report.md"
+  touch -t "${today_touch}1300.00" "$active_report_path"
+  touch -t "${today_touch}1200.00" "$new_report_path"
+  touch -t "$old_touch" "$data/scout-old/report.md"
 
   fm_write_meta "$state/scout-active.meta" \
     "window=sess:alive-scout-active" \
