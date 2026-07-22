@@ -7,23 +7,26 @@
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A first-progress watchdog also
-# surfaces old spawns that have no status line and no progress evidence. A declared
-# external-wait pause is the separate idle absorb case and re-surfaces only on
-# its long bounded cadence, although its initial no-verb status signal still
-# surfaces in normal mode.
+# surfaces old ship/scout spawns that have no status line and no progress
+# evidence. A declared external-wait pause is the separate idle absorb case and
+# re-surfaces only on its long bounded cadence, although its initial no-verb
+# status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
-#                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
-#   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
-#                          timer) regardless of what the status log says - an active
-#                          run-step or busy pane outranks even a captain-relevant log
-#                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
+#                          has a captain-relevant verb, a launch watchdog reason,
+#                          OR a no-verb signal's crew is not provably working,
+#                          unless afk is active
+#   stale: <window>        a launch-watchdog stale surfaces before absorb checks.
+#                          Otherwise, a provably-working stale is absorbed (with a
+#                          wedge timer) regardless of what the status log says -
+#                          an active run-step or busy pane outranks even a
+#                          captain-relevant log line, since the crew's own log
+#                          gets no new entry once firstmate hands it to a
+#                          no-mistakes validation. A declared external-wait pause
+#                          is absorbed instead with its own long re-surface
+#                          cadence, never as a wedge. Only when neither absorb
+#                          class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -50,8 +53,8 @@ mkdir -p "$STATE"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
-# predicates), the SAME library the away-mode daemon uses, so the triage policy
-# has one definition.
+# predicates + launch watchdog), the SAME library the away-mode daemon uses, so
+# the triage policy has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives

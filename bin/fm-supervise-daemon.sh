@@ -4,12 +4,13 @@
 # Wraps bin/fm-watch.sh: runs it as a child, classifies each wake reason, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events plus bounded declared-pause rechecks. This is the
+# captain-relevant events, first-progress launch stalls, and bounded
+# declared-pause rechecks. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
 # signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
-# declared-pause recheck reach the LLM, and even then as one pre-read digest per
-# batch window.
+# needs-decision/blocked/failed/persistent-wedge/check-output events,
+# first-progress launch stalls, and declared-pause rechecks reach the LLM, and
+# even then as one pre-read digest per batch window.
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
@@ -50,8 +51,9 @@
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
-#     state/*.status for a captain-relevant line the per-wake classifier might
-#     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#     state/*.status for a captain-relevant line and scans launch-watchdog
+#     predicates for a first-progress stall the per-wake classifier might have
+#     missed, then escalates any hit.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -88,9 +90,13 @@
 #                                   as a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
 #                                   re-surfaces as a recheck (default 3600)
+#          FM_FIRST_PROGRESS_SECS   seconds after spawn_ts before a ship/scout
+#                                   with no first-progress evidence escalates as
+#                                   stuck-at-launch (default 480)
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
-#          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
+#          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status and launch
+#                                   watchdog scan
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
@@ -189,9 +195,9 @@ MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_LAST_EPOCH=0
 WEDGE_ALARM_NOTIFIER_PID=
-# The captain-relevant verb set and the status classifiers (last_status_line,
-# status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
-# live in bin/fm-classify-lib.sh, shared with the always-on watcher.
+# The captain-relevant verb set, status classifiers, and launch-watchdog
+# predicates now live in bin/fm-classify-lib.sh, shared with the always-on
+# watcher.
 # Composer-empty detection and the tmux busy-footer fallback live in
 # bin/fm-tmux-lib.sh (FM_TMUX_BUSY_REGEX_DEFAULT / fm_tmux_composer_state);
 # FM_BUSY_REGEX still overrides the fallback busy set here, as before.
@@ -971,8 +977,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  2b) pause re-surface: for each declared-pause marker past PAUSE_RESURFACE_SECS,
 #     re-peek; busy/gone -> clear; still idle + still paused -> escalate a recheck
 #     digest and reset the window (repeating bounded re-surface, never a wedge).
-#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
-#     captain-relevant line the per-wake classifier missed and escalate it.
+#  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, find captain-relevant statuses
+#     and launch stalls the per-wake classifier missed and escalate them.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
   now=$(_now)
