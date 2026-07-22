@@ -396,7 +396,7 @@ classify_stale() {  # <window> <state>
     launch_sig=$(launch_watchdog_signature "$task" "$state" 2>/dev/null || true)
     seen="$state/.subsuper-seen-launch-$(_stale_key "$task")"
     if [ -n "$launch_sig" ] && [ "$(cat "$seen" 2>/dev/null || true)" = "$launch_sig" ]; then
-      printf 'self|launch watchdog already escalated: %s' "$launch_reason"
+      printf 'launch-watchdog-seen|launch watchdog already escalated: %s' "$launch_reason"
       return
     fi
     printf 'escalate|%s' "$launch_reason"
@@ -1255,6 +1255,10 @@ handle_wake() {  # <reason> <state>
       [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
       mark_escalated_seen "$kind" "$arg" "$state"
       [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
+      ;;
+    launch-watchdog-seen)
+      [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+      log "self-handle: $reason -> $distilled"
       ;;
     pause)
       # Declared external-wait pause: record a pause marker (long re-surface

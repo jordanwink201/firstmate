@@ -213,6 +213,24 @@ test_housekeeping_launch_watchdog_scan_escalates() {
   pass "daemon catch-all scan escalates stuck-at-launch and records a stable seen marker"
 }
 
+test_handle_wake_seen_launch_watchdog_does_not_start_stale_marker() {
+  local rec key win
+  rec=$(make_launch_daemon_case daemon-launch-seen-stale daemon-launch-seen-stale ship 900)
+  read_launch_daemon_record "$rec"
+  key=$(printf '%s' "$TASK_ID" | tr ':/.' '___')
+  win="sess:fm-$TASK_ID"
+  FM_FIRST_PROGRESS_SECS=480 mark_launch_seen "$STATE_DIR" "$TASK_ID"
+
+  FM_STATE_OVERRIDE="$STATE_DIR" FM_FIRST_PROGRESS_SECS=480 handle_wake "stale: $win" "$STATE_DIR"
+  [ ! -e "$STATE_DIR/.subsuper-stale-$key" ] || fail "already-seen launch watchdog stale created a generic stale marker"
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ] || fail "already-seen launch watchdog stale escalated again"
+
+  date +%s > "$STATE_DIR/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$STATE_DIR" FM_FIRST_PROGRESS_SECS=480 handle_wake "stale: $win" "$STATE_DIR"
+  [ ! -e "$STATE_DIR/.subsuper-stale-$key" ] || fail "already-seen launch watchdog stale retained a generic stale marker"
+  pass "already-seen launch watchdog stale does not start generic stale tracking"
+}
+
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
 # marker (so a working->paused pane is not still wedge-aged), and does NOT escalate
 # on the wake itself - the recheck is housekeeping's job on the long cadence.
@@ -1711,6 +1729,7 @@ test_stale_terminal_escalates
 test_stale_paused_classifies_pause
 test_stale_launch_watchdog_escalates
 test_housekeeping_launch_watchdog_scan_escalates
+test_handle_wake_seen_launch_watchdog_does_not_start_stale_marker
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
