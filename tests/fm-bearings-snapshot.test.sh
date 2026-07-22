@@ -157,6 +157,42 @@ EOF
   printf 'needs-decision [key=race]: pick subscribe order\n' > "$mate/state/mate.status"
 }
 
+write_supervision_advice_fixture() {  # <home>
+  local home=$1
+  write_fixture "$home"
+  mkdir -p "$home/projects/failed-task" "$home/projects/blocked-task" "$home/projects/dead-endpoint" "$home/projects/unknown-task"
+  fm_write_meta "$home/state/failed-task.meta" \
+    "window=firstmate:fm-failed-task" \
+    "worktree=$home/projects/failed-task" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'failed: validation gate stopped on unit failure\n' > "$home/state/failed-task.status"
+  fm_write_meta "$home/state/blocked-task.meta" \
+    "window=firstmate:fm-blocked-task" \
+    "worktree=$home/projects/blocked-task" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'blocked [key=dependency]: waiting for local dependency check\n' > "$home/state/blocked-task.status"
+  fm_write_meta "$home/state/dead-endpoint.meta" \
+    "window=firstmate:fm-dead-endpoint" \
+    "worktree=$home/projects/dead-endpoint" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working: endpoint should be missing despite status\n' > "$home/state/dead-endpoint.status"
+  fm_write_meta "$home/state/unknown-task.meta" \
+    "worktree=$home/projects/unknown-task" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+}
+
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
@@ -854,6 +890,82 @@ test_toon_json_parity() {
   pass "TOON and JSON are parity representations of the same model"
 }
 
+test_supervision_advice_default_is_bounded_local_only_and_classified() {
+  local home fakebin toon json canon
+  home=$(make_home advice); write_supervision_advice_fixture "$home"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  toon=$(run "$home" "$fakebin" --supervision-advice)
+  json=$(run "$home" "$fakebin" --supervision-advice --json)
+  canon=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  [ "${#toon}" -lt 50000 ] || fail "supervision advice TOON must stay under the display bound, got ${#toon}"
+  [ "${#toon}" -lt "${#canon}" ] || fail "supervision advice must be smaller than the canonical snapshot"
+  [ ! -s "$home/net.log" ] || fail "supervision advice default must make no gh/gh-axi call, got: $(cat "$home/net.log")"
+  assert_contains "$toon" 'schema: fm-supervision-advice.v1' "TOON advice schema missing"
+  printf '%s' "$json" | jq -e --arg home "$home" '
+    .schema == "fm-supervision-advice.v1"
+      and (.counts.total_tasks >= 7)
+      and (.counts.recommendations == (.recommendations | length))
+      and (.counts.captain_actions == ([.recommendations[] | select(.bucket == "captain_action")] | length))
+      and (.counts.firstmate_actions == ([.recommendations[] | select(.bucket == "firstmate_action")] | length))
+      and (.counts.monitor_only_items == ([.recommendations[] | select(.bucket == "monitor")] | length))
+      and (.counts.landed_reports == ([.recommendations[] | select(.bucket == "landed_report")] | length))
+      and (.counts.omitted_details == (.omitted | length))
+      and (.recommendations | any(.[]; .id == "mate" and .bucket == "captain_action" and .state == "needs-decision"))
+      and (.recommendations | any(.[]; .id == "failed-task" and .bucket == "firstmate_action" and .state == "failed"))
+      and (.recommendations | any(.[]; .id == "blocked-task" and .bucket == "firstmate_action" and .state == "blocked"))
+      and (.recommendations | any(.[]; .id == "unknown-task" and .bucket == "firstmate_action"))
+      and (.recommendations | any(.[]; .id == "dead-endpoint" and .bucket == "firstmate_action" and .state == "endpoint_unhealthy"))
+      and (.recommendations | any(.[]; .id == "ship-task" and .bucket == "monitor" and .state == "working"))
+      and (.recommendations | any(.[]; .id == "external-wait" and .bucket == "monitor" and .state == "paused"))
+      and (.recommendations | any(.[]; .id == "live-gate" and .bucket == "monitor" and .state == "queued"))
+      and (.recommendations | any(.[]; .id == "scout-x" and .bucket == "landed_report" and .state == "report" and .detail_ref == "report:data/scout-x/report.md"))
+      and ([.. | strings] | all(contains("# Scout X") | not))
+      and ([.. | strings] | all(contains($home) | not))
+      and (.omitted | any(.surface == "status, backlog, and report bodies" and (.reveal | length > 0)))
+      and (.omitted | any(.surface == "full paths" and .reveal == "--fields paths"))
+      and (.omitted | any(.surface == "endpoint detail" and .reveal == "--fields endpoints"))
+      and (.omitted | any(.surface == "healthy monitor-only task detail" and .reveal == "--all-in-flight"))
+      and (.omitted | any(.surface == "full reports" and (.reveal | contains("--all-reports"))))
+  ' >/dev/null || fail "supervision advice did not classify or bound fixture correctly: $json"
+  pass "supervision advice is bounded, local-only, and classifies captain/firstmate/monitor/landed buckets"
+}
+
+test_supervision_advice_toon_json_parity() {
+  local home fakebin toon json keys k typ
+  home=$(make_home advice-parity); write_supervision_advice_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  toon=$(run "$home" "$fakebin" --supervision-advice)
+  json=$(run "$home" "$fakebin" --supervision-advice --json)
+  keys=$(printf '%s' "$json" | jq -r 'keys_unsorted[]')
+  for k in $keys; do
+    typ=$(printf '%s' "$json" | jq -r --arg k "$k" '.[$k] | type')
+    if [ "$typ" = array ]; then
+      local n hdr jfields tfields
+      n=$(printf '%s' "$json" | jq --arg k "$k" '.[$k] | length')
+      if [ "$n" = 0 ]; then
+        assert_contains "$toon" "$k: []" "empty array $k must render as 'key: []'"
+      else
+        hdr=$(printf '%s' "$toon" | grep -E "^$k\[[0-9]+\]\{" || true)
+        [ -n "$hdr" ] || fail "TOON missing tabular header for advice $k"
+        assert_contains "$hdr" "[$n]" "TOON advice $k row count must equal JSON length $n"
+        jfields=$(printf '%s' "$json" | jq -r --arg k "$k" '.[$k][0] | keys_unsorted | join(",")')
+        tfields=$(printf '%s' "$hdr" | sed -E 's/^[^{]*\{//; s/\}:.*$//; s/"//g')
+        [ "$jfields" = "$tfields" ] || fail "TOON advice $k fields ($tfields) must equal JSON fields ($jfields)"
+      fi
+    elif [ "$typ" = object ]; then
+      local hdr jfields tfields
+      hdr=$(printf '%s' "$toon" | grep -E "^$k\{" || true)
+      [ -n "$hdr" ] || fail "TOON missing object header for advice $k"
+      jfields=$(printf '%s' "$json" | jq -r --arg k "$k" '.[$k] | keys_unsorted | join(",")')
+      tfields=$(printf '%s' "$hdr" | sed -E 's/^[^{]*\{//; s/\}:.*$//; s/"//g')
+      [ "$jfields" = "$tfields" ] || fail "TOON advice object $k fields ($tfields) must equal JSON fields ($jfields)"
+    else
+      assert_contains "$toon" "$k: " "TOON advice must carry scalar field $k"
+    fi
+  done
+  pass "supervision advice TOON and JSON are parity representations"
+}
+
 test_open_decision_surfaces_end_to_end() {
   local home fakebin json
   home=$(make_home e2e-decision); write_fixture "$home"
@@ -1229,6 +1341,8 @@ test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
+test_supervision_advice_default_is_bounded_local_only_and_classified
+test_supervision_advice_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work

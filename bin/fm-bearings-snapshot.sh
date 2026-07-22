@@ -31,6 +31,9 @@
 # Flags:
 #   (default)        compact projection, TOON, local-only
 #   --json           the same projected model as JSON (machine/debug; parity form)
+#   --supervision-advice
+#                    firstmate-internal recovery/cleanup advice projection,
+#                    TOON by default, local-only, schema fm-supervision-advice.v1
 #   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
@@ -44,7 +47,8 @@
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Output contracts: `fm-bearings.v1` by default, or `fm-supervision-advice.v1`
+# under --supervision-advice. Read-only; no locks, no mutation, no reports.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,7 +85,7 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 
 usage() {
   cat <<'EOF'
-usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
+usage: fm-bearings-snapshot.sh [--json] [--supervision-advice] [--include-prs] [--fields <list>]
                                [--all-in-flight] [--all-decisions]
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
@@ -90,6 +94,9 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+--supervision-advice emits firstmate-internal advisory recovery/cleanup rows
+  from the same canonical local snapshot, schema fm-supervision-advice.v1.
+  It is local-only and never performs live PR discovery.
 
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
@@ -110,6 +117,7 @@ EOF
 }
 
 FORMAT=toon
+SUPERVISION_ADVICE=0
 INCLUDE_PRS=0
 ALL_REPORTS=0
 ALL_QUEUED=0
@@ -124,6 +132,7 @@ FIELDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
+    --supervision-advice) SUPERVISION_ADVICE=1 ;;
     --include-prs) INCLUDE_PRS=1 ;;
     --all-reports) ALL_REPORTS=1 ;;
     --all-queued) ALL_QUEUED=1 ;;
@@ -169,6 +178,10 @@ PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
+if [ "$SUPERVISION_ADVICE" = 1 ]; then
+  INCLUDE_PRS=0
+  PR_STATUS='not_applicable (supervision advice is local-only)'
+fi
 
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
 repo_slug() {  # <url>
@@ -259,6 +272,221 @@ EOF
   fi
 fi
 
+# --- projection: canonical snapshot -> fm-supervision-advice.v1 model (JSON) -
+if [ "$SUPERVISION_ADVICE" = 1 ]; then
+MODEL=$(printf '%s' "$SNAP" | jq \
+  --arg home "$HOME_LABEL" \
+  --arg now "$NOW" \
+  --arg fields "$FIELDS" \
+  --argjson landed_n "$FM_BEARINGS_LANDED" \
+  --argjson in_flight_n "$FM_BEARINGS_IN_FLIGHT" \
+  --argjson decisions_n "$FM_BEARINGS_DECISIONS" \
+  --argjson gates_n "$FM_BEARINGS_GATES" \
+  --argjson reports_n "$FM_BEARINGS_REPORTS" \
+  --argjson unhealthy_n "$FM_BEARINGS_UNHEALTHY" \
+  --argjson all_in_flight "$ALL_IN_FLIGHT" \
+  --argjson all_decisions "$ALL_DECISIONS" \
+  --argjson all_landed "$ALL_LANDED" \
+  --argjson all_reports "$ALL_REPORTS" \
+  --argjson all_queued "$ALL_QUEUED" \
+  --argjson all_unhealthy "$ALL_UNHEALTHY" '
+  def trunc($n): if . == null then null else
+    (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def relpath($p; $root; $full):
+    if ($p == null or $p == "") then "-"
+    elif $full then $p
+    elif ($p | startswith($root + "/")) then ($p | ltrimstr($root + "/"))
+    else ($p | split("/") | if length > 3 then .[-3:] else . end | join("/")) end;
+  def status_ref($t; $root; $full):
+    if $full then ($t.paths.status_log.path // ("status:" + $t.id))
+    else ("status:" + $t.id) end;
+  def report_ref($p; $root; $full): "report:" + relpath($p; $root; $full);
+  def backlog_ref($root; $full):
+    if $full then ($root + "/data/backlog.md") else "backlog:data/backlog.md" end;
+  def endpoint_ref($t; $show):
+    if $show then (($t.endpoint.target // "missing endpoint") | trunc(180))
+    else "--fields endpoints" end;
+  def child_endpoint_ref($e; $show):
+    if $show then (($e.endpoint.target // "missing endpoint") | trunc(180))
+    else "--fields endpoints" end;
+  def current_detail($t):
+    ((($t.current_state.detail // "") as $d
+      | if $d != "" then $d else ($t.hints.last_event_text // "") end) | trunc(140));
+  def captain_blocker($d):
+    (((($d.summary // "") + " " + ($d.verb // "")) | test("credential|login|log in|auth|oauth|token|password|2fa|permission|access"; "i")));
+  def endpoint_bad($t):
+    (($t.endpoint.target // null) == null or $t.endpoint.exists == false or $t.endpoint.agent_alive == "dead");
+  def superseded:
+    (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")));
+  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  | (($fl | index("bodies")) != null) as $f_bodies
+  | (($fl | index("paths")) != null) as $f_paths
+  | (($fl | index("actions")) != null) as $f_actions
+  | (($fl | index("endpoints")) != null) as $f_endpoints
+  | . as $snap
+  | ([ $snap.tasks[] as $t
+       | select($t.kind != "secondmate")
+       | ($t.hints.open_decisions // [])[]
+       | select(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))
+       | {id:$t.id,bucket:"captain_action",state:.verb,
+          reason:((.summary // "captain input needed") | trunc(140)),
+          next_action:(if .verb == "needs-decision" then "get the captain decision"
+                       else "get the captain credential or login unblock" end),
+          detail_ref:status_ref($t; $snap.fm_home; $f_paths)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | $m.decisions_open[]?
+         | select(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))
+         | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),
+            bucket:"captain_action",state:.verb,
+            reason:((.summary // "captain input needed") | trunc(140)),
+            next_action:(if .verb == "needs-decision" then "get the captain decision"
+                         else "get the captain credential or login unblock" end),
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]
+     + [ $snap.tasks[] as $t
+         | select($t.kind != "secondmate" and ($t.pr.url // null) != null)
+         | select(($t.current_state.state // "") == "done"
+                  or (($t.hints.last_event_text // "") | test("approved|ready to merge|ready for merge|mergeable"; "i")))
+         | {id:$t.id,bucket:"captain_action",state:"recorded_pr",
+            reason:(("local PR signal: " + ($t.pr.url // "")) | trunc(140)),
+            next_action:"captain approve or merge the recorded PR if still current",
+            detail_ref:(($t.pr.url // "-") | trunc(180))} ]) as $captain_all
+  | ([ $snap.tasks[] as $t
+       | select($t.kind != "secondmate")
+       | ($t.current_state.state // "unknown") as $s
+       | select($s == "failed" or $s == "blocked" or $s == "unknown")
+       | select((($t.hints.open_decisions // []) | any(.verb == "blocked" and captain_blocker(.))) | not)
+       | {id:$t.id,bucket:"firstmate_action",state:$s,
+          reason:((current_detail($t) // "current state requires firstmate inspection") | trunc(140)),
+          next_action:(if $s == "unknown" then "read targeted current state and reconcile task metadata"
+                       elif $s == "failed" then "inspect failure evidence before deciding recovery"
+                       else "inspect blocker and steer or escalate if captain-owned" end),
+          detail_ref:status_ref($t; $snap.fm_home; $f_paths)} ]
+     + [ $snap.tasks[] as $t
+         | select(endpoint_bad($t))
+         | {id:$t.id,bucket:"firstmate_action",state:"endpoint_unhealthy",
+            reason:(if ($t.endpoint.target // null) == null then "recorded direct-report endpoint is missing"
+                    elif $t.endpoint.exists == false then "recorded direct-report endpoint is absent"
+                    else "recorded direct-report agent is dead" end),
+            next_action:"recover or teardown the recorded direct report before broad supervision resumes",
+            detail_ref:endpoint_ref($t; $f_endpoints)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | select($m.current.state == "unknown")
+         | {id:$m.id,bucket:"firstmate_action",state:"unknown",
+            reason:(($m.current.reason // "secondmate state unavailable") | trunc(140)),
+            next_action:"recover the registered secondmate state before routing more work there",
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | $m.endpoints[]? as $e
+         | select(($e.endpoint.target // null) == null or $e.endpoint.exists == false or $e.endpoint.agent_alive == "dead")
+         | {id:($m.id + "/" + $e.id),bucket:"firstmate_action",state:"endpoint_unhealthy",
+            reason:(if ($e.endpoint.target // null) == null then "recorded child endpoint is missing"
+                    elif $e.endpoint.exists == false then "recorded child endpoint is absent"
+                    else "recorded child agent is dead" end),
+            next_action:"recover or reconcile the child direct report through its secondmate home",
+            detail_ref:child_endpoint_ref($e; $f_endpoints)} ]) as $firstmate_all
+  | ([ $snap.tasks[] as $t
+       | select($t.kind != "secondmate")
+       | ($t.current_state.state // "unknown") as $s
+       | select($s == "working" or $s == "paused" or $s == "parked")
+       | select(endpoint_bad($t) | not)
+       | select((($t.hints.open_decisions // [])
+                 | any(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))) | not)
+       | {id:$t.id,bucket:"monitor",state:$s,
+          reason:((current_detail($t) // (if $s == "paused" then "declared external wait" else "healthy active work" end)) | trunc(140)),
+          next_action:(if $s == "paused" then "monitor declared external wait"
+                       elif $s == "parked" then "monitor parked work until a wake changes it"
+                       else "monitor healthy active work" end),
+          detail_ref:status_ref($t; $snap.fm_home; $f_paths)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | select($m.current.state == "active_child_work" or $m.current.state == "externally_held")
+         | {id:$m.id,bucket:"monitor",state:$m.current.state,
+            reason:((if $m.current.state == "active_child_work" then
+                       ([ $m.active_children[]? | .id + ": " + (.doing // .state) ] | join("; "))
+                     else
+                       ([ $m.holds[]? | .id + ": " + (.reason // "held") ] | join("; "))
+                     end) | if . == "" then ($m.current.reason // "secondmate monitor state") else . end | trunc(140)),
+            next_action:(if $m.current.state == "active_child_work" then "monitor secondmate child work"
+                         else "monitor declared external wait" end),
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]) as $monitor_active_all
+  | ([ $snap.backlog.records[]
+       | select(.state == "queued" and .structured)
+       | select(($all_queued == 1) or (superseded | not))
+       | {id,bucket:"monitor",state:"queued",
+          reason:((if (.blocked_by // null) != null then
+                     ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
+                   else (.title // "queued work") end) | trunc(140)),
+          next_action:"monitor queued or gated work until its blocker clears",
+          detail_ref:backlog_ref($snap.fm_home; $f_paths)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | select($m.provenance.selected == "structured-home")
+         | $m.queued[]?
+         | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),
+            bucket:"monitor",state:"queued",
+            reason:((if (.blocked_by // null) != null then
+                       ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
+                     else (.title // "queued work") end) | trunc(140)),
+            next_action:"monitor queued secondmate work until its blocker clears",
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]) as $monitor_gates_all
+  | ([ $snap.backlog.records[]
+       | select(.state == "done" and .structured)
+       | {id,bucket:"landed_report",state:"done",
+          reason:((.title // "landed baseline item") | trunc(140)),
+          next_action:"keep as landed baseline; no immediate action",
+          detail_ref:((.pr_url // (if (.report_path // null) != null then report_ref(.report_path; $snap.fm_home; $f_paths) else (.local_note // "landed") end)) | trunc(180))} ]
+     + [ ($snap.secondmate_landed.records // [])[]
+         | {id,bucket:"landed_report",state:"done",
+            reason:((.title // "secondmate landed baseline item") | trunc(140)),
+            next_action:"keep as landed baseline; no immediate action",
+            detail_ref:((.pr_url // (if (.report_path // null) != null then report_ref(.report_path; $snap.fm_home; $f_paths) else (.local_note // "landed") end)) | trunc(180))} ]) as $landed_done_all
+  | ([ $snap.scout_reports[] as $r
+       | ([ $snap.tasks[] | select(.id == $r.id) ][0] // null) as $t
+       | ([ $snap.backlog.records[] | select(.structured and .id == $r.id) ][0] // null) as $b
+       | select(($all_reports == 1)
+                or (($t != null and ($t.current_state.state // "") == "done")
+                    or ($b != null and ($b.state // "") == "done")))
+       | {id:$r.id,bucket:"landed_report",state:"report",
+          reason:("scout/report pointer ready" | trunc(140)),
+          next_action:"read the referenced report only if its detail is needed",
+          detail_ref:report_ref($r.path; $snap.fm_home; $f_paths)} ]) as $report_all
+  | (if $all_decisions == 1 then $captain_all else $captain_all[:$decisions_n] end) as $captain
+  | (if $all_unhealthy == 1 then $firstmate_all else $firstmate_all[:$unhealthy_n] end) as $firstmate
+  | (if $all_in_flight == 1 then $monitor_active_all else $monitor_active_all[:$in_flight_n] end) as $monitor_active
+  | (if $all_queued == 1 then $monitor_gates_all else $monitor_gates_all[:$gates_n] end) as $monitor_gates
+  | (($monitor_active + $monitor_gates) | unique_by(.bucket + ":" + .id + ":" + .state + ":" + .detail_ref)) as $monitor
+  | (if $all_landed == 1 then $landed_done_all else $landed_done_all[:$landed_n] end) as $landed_done
+  | (if $all_reports == 1 then $report_all else $report_all[:$reports_n] end) as $landed_reports
+  | (($landed_done + $landed_reports) | unique_by(.bucket + ":" + .id + ":" + .state + ":" + .detail_ref)) as $landed
+  | ($captain + $firstmate + $monitor + $landed) as $recommendations
+  | ([ (if $f_bodies then empty else {surface:"status, backlog, and report bodies", reveal:"read targeted status/report files only after choosing a recommendation"} end),
+       (if $f_paths then empty else {surface:"full paths", reveal:"--fields paths"} end),
+       (if $f_actions then empty else {surface:"watch/steer command actions", reveal:"--fields actions"} end),
+       (if $f_endpoints then empty else {surface:"endpoint detail", reveal:"--fields endpoints"} end),
+       (if $all_in_flight == 1 then empty else {surface:"healthy monitor-only task detail", reveal:"--all-in-flight"} end),
+       (if $all_reports == 1 then empty else {surface:"full reports", reveal:"--all-reports for report inventory; open a referenced report only when needed"} end),
+       (if $all_decisions == 0 and ($captain_all | length) > ($captain | length) then {surface:("captain_action showing \($captain | length) of \($captain_all | length)"), reveal:"--all-decisions"} else empty end),
+       (if $all_unhealthy == 0 and ($firstmate_all | length) > ($firstmate | length) then {surface:("firstmate_action showing \($firstmate | length) of \($firstmate_all | length)"), reveal:"--all-unhealthy"} else empty end),
+       (if $all_in_flight == 0 and ($monitor_active_all | length) > ($monitor_active | length) then {surface:("monitor active work showing \($monitor_active | length) of \($monitor_active_all | length)"), reveal:"--all-in-flight"} else empty end),
+       (if $all_queued == 0 and ($monitor_gates_all | length) > ($monitor_gates | length) then {surface:("monitor queued/gated work showing \($monitor_gates | length) of \($monitor_gates_all | length)"), reveal:"--all-queued"} else empty end),
+       (if $all_landed == 0 and ($landed_done_all | length) > ($landed_done | length) then {surface:("landed baseline showing \($landed_done | length) of \($landed_done_all | length)"), reveal:"--all-landed"} else empty end),
+       (if $all_reports == 0 and ($report_all | length) > ($landed_reports | length) then {surface:("report pointers showing \($landed_reports | length) of \($report_all | length)"), reveal:"--all-reports"} else empty end) ]) as $omitted
+  | {
+      schema:"fm-supervision-advice.v1",
+      home:$home,
+      generated:$now,
+      counts:{
+        total_tasks:($snap.tasks | length),
+        recommendations:($recommendations | length),
+        captain_actions:($captain | length),
+        firstmate_actions:($firstmate | length),
+        monitor_only_items:($monitor | length),
+        landed_reports:($landed | length),
+        omitted_details:($omitted | length)
+      },
+      recommendations:$recommendations,
+      omitted:$omitted
+    }
+') || { echo "fm-bearings-snapshot: supervision advice projection failed" >&2; exit 1; }
+else
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
 MODEL=$(printf '%s' "$SNAP" | jq \
   --arg home "$HOME_LABEL" \
@@ -414,6 +642,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
+fi
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
@@ -421,10 +650,11 @@ if [ "$FORMAT" = json ]; then
 fi
 
 # --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
-# (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
-# per the TOON spec. Quoting follows the spec exactly.
+# The models are flat objects of scalar fields, scalar sub-objects such as
+# counts, and arrays of uniform scalar objects, so the encoder only needs object
+# scalars, the one-row object form (key{fields}: + comma row at +2 indent), the
+# tabular array form (key[N]{fields}: + comma rows at +2 indent), and the
+# empty-array form (key: []), per the TOON spec. Quoting follows the spec exactly.
 TOON=$(printf '%s\n' "$MODEL" | jq -r '
   def q:
     tostring
@@ -450,6 +680,10 @@ TOON=$(printf '%s\n' "$MODEL" | jq -r '
         | ( "\($k)[\($v | length)]{\($ks | map(q) | join(","))}:",
             ($v[] as $row | "  " + ([ $ks[] as $kk | ($row[$kk] | scal) ] | join(","))) )
       end
+    elif (($v | type) == "object" and (all($v[]; ((type == "array" or type == "object") | not)))) then
+      ($v | keys_unsorted) as $ks
+      | ( "\($k){\($ks | map(q) | join(","))}:",
+          "  " + ([ $ks[] as $kk | ($v[$kk] | scal) ] | join(",")) )
     else "\($k): " + ($v | scal)
     end;
   [ to_entries[] | emit(.key; .value) ] | join("\n")
