@@ -18,13 +18,13 @@
 # (crew_absorb_class and its working/paused wrappers) reuses bin/fm-crew-state.sh,
 # which may make a bounded no-mistakes call, to decide whether a crew that just
 # stopped its turn or went stale is working, deliberately paused, or neither.
-# The launch watchdog reads state/<id>.meta and the recorded Git worktree to
-# detect an ordinary ship/scout task whose spawn_ts is older than
-# FM_FIRST_PROGRESS_SECS (default 480s), has no nonblank status line, and has no
-# dirty files or commits ahead of the default base. If any metadata or Git check
-# is missing or ambiguous, it fails safe as non-actionable. Callers run these
-# checks only on no-verb signal handling, stale triage, and heartbeat/catch-all
-# scans, never on every status read.
+# The launch watchdog reads state/<id>.meta, the recorded Git worktree, and
+# scout report files to detect an ordinary ship/scout task whose spawn_ts is
+# older than FM_FIRST_PROGRESS_SECS (default 480s), has no nonblank status line,
+# and has no first-progress evidence. If any metadata or Git check is missing or
+# ambiguous, it fails safe as non-actionable. Callers run these checks only on
+# no-verb signal handling, stale triage, and heartbeat/catch-all scans, never on
+# every status read.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -65,7 +65,7 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
 # First-progress launch watchdog grace. A spawned ordinary crewmate that has not
-# written any nonblank status line and has no Git progress after this window is
+# written any nonblank status line and has no progress after this window is
 # actionable as stuck-at-launch. Tests override FM_FIRST_PROGRESS_SECS directly.
 FM_FIRST_PROGRESS_SECS_DEFAULT=480
 
@@ -319,6 +319,48 @@ _fm_launch_worktree_has_progress() {  # <meta-file>; 0 progress, 1 no progress, 
   return 1
 }
 
+_fm_classify_file_mtime() {  # <file>
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
+
+_fm_launch_data_dir() {  # <state-dir>
+  local state=$1
+  if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+    printf '%s' "$FM_DATA_OVERRIDE"
+  elif [ -n "${FM_HOME:-}" ]; then
+    printf '%s/data' "$FM_HOME"
+  else
+    case "$state" in
+      */state) printf '%s/data' "${state%/state}" ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+_fm_launch_scout_report_has_progress() {  # <task-id> <state-dir> <spawn-ts>; 0 progress, 1 no progress, 2 unsafe
+  local id=$1 state=$2 spawn_ts=$3 data report mtime rc
+  case "$id" in
+    ''|*/*) return 2 ;;
+  esac
+  data=$(_fm_launch_data_dir "$state") || return 1
+  report="$data/$id/report.md"
+  [ -e "$report" ] || return 1
+  [ -f "$report" ] || return 2
+  mtime=$(_fm_classify_file_mtime "$report") || return 2
+  case "$mtime" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  if grep -q '[^[:space:]]' "$report" 2>/dev/null; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] && return 1
+    return 2
+  fi
+  [ "$mtime" -gt "$spawn_ts" ] && return 0
+  return 1
+}
+
 launch_watchdog_reason() {  # <task-id> <state-dir>
   local id=$1 state=$2 meta kind spawn_ts now age first_secs meta_state progress_rc
   [ -n "$id" ] && [ -n "$state" ] || return 1
@@ -346,6 +388,15 @@ launch_watchdog_reason() {  # <task-id> <state-dir>
   first_secs=$(_fm_first_progress_secs)
   [ "$age" -ge "$first_secs" ] || return 1
   _fm_status_has_nonblank_line "$state/$id.status" && return 1
+  if [ "$kind" = scout ]; then
+    _fm_launch_scout_report_has_progress "$id" "$state" "$spawn_ts"
+    progress_rc=$?
+    case "$progress_rc" in
+      0) return 1 ;;
+      1) ;;
+      *) return 1 ;;
+    esac
+  fi
   _fm_launch_worktree_has_progress "$meta"
   progress_rc=$?
   case "$progress_rc" in
@@ -353,7 +404,12 @@ launch_watchdog_reason() {  # <task-id> <state-dir>
     1) ;;
     *) return 1 ;;
   esac
-  printf 'stuck-at-launch: %s no first progress after %ss (status absent/empty; no dirty files or branch commits)' "$id" "$age"
+  case "$kind" in
+    scout)
+      printf 'stuck-at-launch: %s no first progress after %ss (status absent/empty; no dirty files, branch commits, or report progress)' "$id" "$age" ;;
+    *)
+      printf 'stuck-at-launch: %s no first progress after %ss (status absent/empty; no dirty files or branch commits)' "$id" "$age" ;;
+  esac
   return 0
 }
 
@@ -367,7 +423,7 @@ launch_watchdog_signature() {  # <task-id> <state-dir>
 }
 
 signal_launch_watchdog_reason() {  # <state-dir> <file> ...
-  local state=$1 f base task seen="" reason
+  local state=$1 f base task seen="" reason found="" sep=""
   shift
   for f in "$@"; do
     base=${f##*/}
@@ -380,10 +436,11 @@ signal_launch_watchdog_reason() {  # <state-dir> <file> ...
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
     reason=$(launch_watchdog_reason "$task" "$state") || continue
-    printf '%s' "$reason"
-    return 0
+    printf '%s%s' "$sep" "$reason"
+    found=1
+    sep=' | '
   done
-  return 1
+  [ -n "$found" ]
 }
 
 scan_launch_watchdog_tasks() {  # <state-dir> -> task<TAB>window<TAB>reason

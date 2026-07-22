@@ -340,6 +340,7 @@ classify_signal() {  # <reason-after-colon> <state>
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
+  distilled="${distilled% | }"
   # shellcheck disable=SC2086  # reason is the watcher's space-separated signal file list
   launch_reason=$(signal_launch_watchdog_reason "$state" $reason 2>/dev/null || true)
   launch_seen=1
@@ -361,8 +362,6 @@ classify_signal() {  # <reason-after-colon> <state>
       distilled=$launch_reason
     fi
   fi
-  # strip a trailing " | " separator so the distilled line is clean
-  distilled="${distilled% | }"
   if [ -z "$rel" ] && [ -z "$launch_reason" ]; then
     printf 'self|routine signal: %s' "$distilled"
   elif { [ -z "$rel" ] || [ "$all_seen" = "1" ]; } \

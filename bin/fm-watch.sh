@@ -7,7 +7,7 @@
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
 # working signal is never silently swallowed. A first-progress watchdog also
-# surfaces old spawns that have no status line and no Git progress. A declared
+# surfaces old spawns that have no status line and no progress evidence. A declared
 # external-wait pause is the separate idle absorb case and re-surfaces only on
 # its long bounded cadence, although its initial no-verb status signal still
 # surfaces in normal mode.
@@ -810,7 +810,7 @@ EOF
           fi
         elif launch_reason=$(launch_watchdog_reason "$task" "$STATE" 2>/dev/null); then
           # First-progress watchdog: a launch that is old enough, has no status
-          # line, and has no Git progress must surface even if the pane or run-step
+          # line, and has no progress evidence must surface even if the pane or run-step
           # would otherwise look absorbable. When this hash was already absorbed as
           # working, .stale-since exists; surface once and clear it so the next
           # cycle does not repeat the same watchdog wake.

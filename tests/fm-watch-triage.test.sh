@@ -82,6 +82,7 @@ make_launch_watchdog_case() {  # <name> <id> <kind> <spawn-delta-secs>
   state="$dir/state"
   proj="$dir/project"
   wt="$dir/wt"
+  mkdir -p "$dir/data"
   fm_git_worktree "$proj" "$wt" "branch-$name"
   now=$(date +%s)
   fm_write_meta "$state/$id.meta" \
@@ -331,6 +332,41 @@ test_launch_watchdog_branch_commits_suppress() {
   ! FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR" >/dev/null \
     || fail "spawn with branch commits classified as stuck-at-launch"
   pass "launch watchdog suppresses branch commits/progress"
+}
+
+test_launch_watchdog_scout_report_progress_suppresses() {
+  local rec report_dir
+  rec=$(make_launch_watchdog_case launch-scout-report launch-scout-report scout 900)
+  read_launch_case_record "$rec"
+  report_dir="$CASE_DIR/data/$TASK_ID"
+  mkdir -p "$report_dir"
+  printf '# Findings\n\nInitial evidence collected.\n' > "$report_dir/report.md"
+  ! FM_DATA_OVERRIDE="$CASE_DIR/data" FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR" >/dev/null \
+    || fail "old scout with report progress classified as stuck-at-launch"
+  pass "launch watchdog suppresses an old scout with useful report progress"
+}
+
+test_launch_watchdog_scout_without_report_progress_surfaces() {
+  local rec reason
+  rec=$(make_launch_watchdog_case launch-scout-no-report launch-scout-no-report scout 900)
+  read_launch_case_record "$rec"
+  reason=$(FM_DATA_OVERRIDE="$CASE_DIR/data" FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR") \
+    || fail "old scout with no report progress did not classify"
+  assert_contains "$reason" "stuck-at-launch: $TASK_ID" "launch watchdog reason did not name the scout"
+  pass "launch watchdog surfaces an old scout without report progress"
+}
+
+test_launch_watchdog_ship_report_progress_ignored() {
+  local rec report_dir reason
+  rec=$(make_launch_watchdog_case launch-ship-report launch-ship-report ship 900)
+  read_launch_case_record "$rec"
+  report_dir="$CASE_DIR/data/$TASK_ID"
+  mkdir -p "$report_dir"
+  printf '# Ship report\n' > "$report_dir/report.md"
+  reason=$(FM_DATA_OVERRIDE="$CASE_DIR/data" FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR") \
+    || fail "ship report progress suppressed the launch watchdog"
+  assert_contains "$reason" "stuck-at-launch: $TASK_ID" "launch watchdog reason did not name the ship"
+  pass "launch watchdog keeps ship progress limited to status and Git"
 }
 
 test_launch_watchdog_missing_or_malformed_metadata_fails_safe() {
@@ -1286,6 +1322,9 @@ test_launch_watchdog_old_spawn_classifies_actionable
 test_launch_watchdog_recent_spawn_suppressed
 test_launch_watchdog_any_status_line_suppresses
 test_launch_watchdog_branch_commits_suppress
+test_launch_watchdog_scout_report_progress_suppresses
+test_launch_watchdog_scout_without_report_progress_surfaces
+test_launch_watchdog_ship_report_progress_ignored
 test_launch_watchdog_missing_or_malformed_metadata_fails_safe
 test_launch_watchdog_secondmate_suppressed
 test_launch_watchdog_signal_surfaced_even_if_provably_working
