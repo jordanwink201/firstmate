@@ -132,22 +132,35 @@ assert_meta_rule() {
   assert_grep "rule=$rule" "$meta" "meta missing rule=$rule"
 }
 
+assert_meta_spawn_ts_between() {
+  local meta=$1 min=$2 max=$3 ts
+  ts=$(grep '^spawn_ts=' "$meta" | tail -1 | cut -d= -f2- || true)
+  case "$ts" in
+    ''|*[!0-9]*) fail "meta missing numeric spawn_ts= at $meta" ;;
+  esac
+  [ "$ts" -ge "$min" ] || fail "spawn_ts $ts is older than spawn start $min"
+  [ "$ts" -le "$max" ] || fail "spawn_ts $ts is newer than spawn end $max"
+}
+
 test_no_profile_keeps_claude_launch_unchanged() {
-  local rec id out status expected launch
+  local rec id out status expected launch before after
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
 
+  before=$(date +%s)
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
+  after=$(date +%s)
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  assert_meta_spawn_ts_between "$HOME_DIR/state/$id.meta" "$before" "$after"
 
   launch=$(cat "$LAUNCH_LOG")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
+  pass "no --model/--effort records defaults and spawn_ts, and keeps the claude launch byte-identical"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {

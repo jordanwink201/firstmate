@@ -155,9 +155,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_DAEMON_DIR/fm-backend.sh"
 
 # Shared wake classifier (last_status_line, status_is_captain_relevant,
-# window_to_task, scan_captain_relevant_statuses). The SAME library backs the
-# always-on watcher's triage, so the captain-relevant verb set and the
-# classification predicates have exactly one definition.
+# window_to_task, scan_captain_relevant_statuses, launch watchdog predicates).
+# The SAME library backs the always-on watcher's triage, so the captain-relevant
+# verb set and the classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
 
@@ -312,10 +312,11 @@ _collapse_newlines() {  # <text>
 # pass the captain pane in as FM_SUPERVISOR_TARGET.
 
 # --- classification helpers (PURE: no side effects, testable) ---------------
-# last_status_line, status_is_captain_relevant, window_to_task, and
-# scan_captain_relevant_statuses come from bin/fm-classify-lib.sh (sourced above),
-# the single classifier shared with bin/fm-watch.sh. The decision-string wrappers
-# and dedup state below layer the daemon's escalation-digest concerns on top.
+# last_status_line, status_is_captain_relevant, window_to_task,
+# scan_captain_relevant_statuses, and the launch watchdog come from
+# bin/fm-classify-lib.sh (sourced above), the single classifier shared with
+# bin/fm-watch.sh. The decision-string wrappers and dedup state below layer the
+# daemon's escalation-digest concerns on top.
 #
 # Decision protocol: every classifier prints exactly one line on stdout of the
 # form "<action>|<distilled>" where action is "self" or "escalate". The distilled
@@ -323,7 +324,7 @@ _collapse_newlines() {  # <text>
 # summary firstmate would otherwise have to re-read.
 
 classify_signal() {  # <reason-after-colon> <state>
-  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen
+  local reason=$1 state=$2 f last distilled="" rel="" all_seen=1 task seen launch_reason launch_seen
   for f in $reason; do
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
@@ -339,13 +340,35 @@ classify_signal() {  # <reason-after-colon> <state>
     seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
     [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] || all_seen=0
   done
+  # shellcheck disable=SC2086  # reason is the watcher's space-separated signal file list
+  launch_reason=$(signal_launch_watchdog_reason "$state" $reason 2>/dev/null || true)
+  launch_seen=1
+  if [ -n "$launch_reason" ]; then
+    for f in $reason; do
+      task=
+      case "${f##*/}" in
+        *.status) task=${f##*/}; task=${task%.status} ;;
+        *.turn-ended) task=${f##*/}; task=${task%.turn-ended} ;;
+      esac
+      [ -n "$task" ] || continue
+      launch_watchdog_reason "$task" "$state" >/dev/null 2>&1 || continue
+      seen="$state/.subsuper-seen-launch-$(_stale_key "$task")"
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$(launch_watchdog_signature "$task" "$state" 2>/dev/null || true)" ] || launch_seen=0
+    done
+    if [ -n "$distilled" ]; then
+      distilled="${distilled} | ${launch_reason}"
+    else
+      distilled=$launch_reason
+    fi
+  fi
   # strip a trailing " | " separator so the distilled line is clean
   distilled="${distilled% | }"
-  if [ -z "$rel" ]; then
+  if [ -z "$rel" ] && [ -z "$launch_reason" ]; then
     printf 'self|routine signal: %s' "$distilled"
-  elif [ "$all_seen" = "1" ]; then
-    # Every relevant status was already escalated by the catch-all scan;
-    # self-handle to avoid a duplicate entry in the digest.
+  elif { [ -z "$rel" ] || [ "$all_seen" = "1" ]; } \
+    && { [ -z "$launch_reason" ] || [ "$launch_seen" = "1" ]; }; then
+    # Every relevant status/launch stall was already escalated by the catch-all
+    # scan; self-handle to avoid a duplicate entry in the digest.
     printf 'self|signal already escalated (catch-all scan): %s' "$distilled"
   else
     printf 'escalate|%s' "$distilled"
@@ -356,7 +379,7 @@ classify_signal() {  # <reason-after-colon> <state>
 # first sight of a non-terminal stale it returns "self" and the caller records a
 # timestamp marker; persistence is escalated by housekeeping's recheck, not here.
 classify_stale() {  # <window> <state>
-  local win=$1 state=$2 task last seen
+  local win=$1 state=$2 task last seen launch_reason launch_sig
   task=$(window_to_task "$win" "$state")
   last=$(last_status_line "$state/$task.status")
   if [ -n "$last" ] && status_is_paused "$last"; then
@@ -366,6 +389,17 @@ classify_stale() {  # <window> <state>
     # status line already read, no fm-crew-state.sh call, mirroring the daemon's
     # existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
+  launch_reason=$(launch_watchdog_reason "$task" "$state" 2>/dev/null || true)
+  if [ -n "$launch_reason" ]; then
+    launch_sig=$(launch_watchdog_signature "$task" "$state" 2>/dev/null || true)
+    seen="$state/.subsuper-seen-launch-$(_stale_key "$task")"
+    if [ -n "$launch_sig" ] && [ "$(cat "$seen" 2>/dev/null || true)" = "$launch_sig" ]; then
+      printf 'self|launch watchdog already escalated: %s' "$launch_reason"
+      return
+    fi
+    printf 'escalate|%s' "$launch_reason"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -404,6 +438,8 @@ classify_unknown() {  # <reason>
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last status line the scan
 #           escalated, so the catch-all does not re-fire the same terminal.
+#           state/.subsuper-seen-launch-<task>  stable task+spawn_ts signature
+#           for a launch-watchdog escalation.
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
@@ -502,9 +538,17 @@ mark_status_seen() {  # <state> <task> <last-line>
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
 }
 
+mark_launch_seen() {  # <state> <task>
+  local state=$1 task=$2 sig
+  sig=$(launch_watchdog_signature "$task" "$state" 2>/dev/null || true)
+  [ -n "$sig" ] || return 0
+  printf '%s' "$sig" > "$state/.subsuper-seen-launch-$(_stale_key "$task")"
+}
+
 # Mark every captain-relevant status line a per-wake classification escalated as
-# seen, so the catch-all scan does not re-escalate the same line within
-# HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
+# seen, and every launch-watchdog task by stable spawn signature, so the
+# catch-all scan does not re-escalate the same event within HEARTBEAT_SCAN_SECS.
+# Mirrors classify_signal/classify_stale's relevance test.
 mark_escalated_seen() {  # <kind> <arg> <state>
   local kind=$1 arg=$2 state=$3 f last task
   case "$kind" in
@@ -516,12 +560,24 @@ mark_escalated_seen() {  # <kind> <arg> <state>
         status_is_captain_relevant "$last" || continue
         task=$(basename "$f"); task="${task%.status}"
         mark_status_seen "$state" "$task" "$last"
+      done
+      for f in $arg; do
+        task=
+        case "${f##*/}" in
+          *.status) task=${f##*/}; task=${task%.status} ;;
+          *.turn-ended) task=${f##*/}; task=${task%.turn-ended} ;;
+        esac
+        [ -n "$task" ] || continue
+        launch_watchdog_reason "$task" "$state" >/dev/null 2>&1 || continue
+        mark_launch_seen "$state" "$task"
       done ;;
     stale)
       task=$(window_to_task "$arg" "$state")
       last=$(last_status_line "$state/$task.status")
       [ -n "$last" ] && status_is_captain_relevant "$last" \
-        && mark_status_seen "$state" "$task" "$last" ;;
+        && mark_status_seen "$state" "$task" "$last"
+      launch_watchdog_reason "$task" "$state" >/dev/null 2>&1 \
+        && mark_launch_seen "$state" "$task" ;;
   esac
 }
 
@@ -1019,13 +1075,14 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
-  #     classifier may have missed). Cheap: status files only, no tmux. The
-  #     captain-relevant filtering is the shared classifier's
-  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
+  # (3) heartbeat scan (catch-all for a captain-relevant status or launch stall
+  #     the per-wake classifier may have missed). Cheap: status files and Git
+  #     metadata only, no tmux. The filtering is the shared classifier's
+  #     scan_captain_relevant_statuses and scan_launch_watchdog_tasks; the daemon
+  #     layers its digest dedup on top.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen
+    local seen window reason sig
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
       seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
@@ -1033,6 +1090,15 @@ housekeeping() {  # <state>
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
+    while IFS="$(printf '\t')" read -r task window reason; do
+      [ -n "$task" ] || continue
+      sig=$(launch_watchdog_signature "$task" "$state" 2>/dev/null || true)
+      [ -n "$sig" ] || continue
+      seen="$state/.subsuper-seen-launch-$(_stale_key "$task")"
+      [ "$(cat "$seen" 2>/dev/null || true)" = "$sig" ] && continue
+      escalate_add "$state" "$reason (catch-all scan)"
+      mark_launch_seen "$state" "$task"
+    done < <(scan_launch_watchdog_tasks "$state")
   fi
 }
 
