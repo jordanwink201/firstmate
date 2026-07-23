@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# fm-bearings-snapshot.sh - compact, bounded, TOON-by-default bearings projection.
+# fm-bearings-snapshot.sh - compact, bounded, TOON-by-default fleet projections.
 #
 # A thin wrapper OVER the canonical bin/fm-fleet-snapshot.sh. It does not parse
 # fleet state itself: it shells out to `fm-fleet-snapshot.sh --json`, projects that
-# complete structured contract down to the small set of fields a "pick up where I
-# left off" read needs, and renders TOON at the output boundary. The internal data
-# model stays JSON (`--json` prints it verbatim); TOON is the default agent-facing
-# format per the AXI standard, and TOON/JSON are parity representations of the same
-# projected model. The projection is view-specific: it DROPS fields from the bearings
-# output, it never removes them from - or otherwise weakens - the canonical snapshot,
-# which stays complete.
+# complete structured contract down to a selected compact view. The default view is
+# the captain-facing bearings model for a "pick up where I left off" read;
+# --supervision-advice selects the firstmate-internal recovery/cleanup advice model.
+# The internal data model stays JSON (`--json` prints it verbatim for either view);
+# TOON is the default agent-facing format per the AXI standard, and TOON/JSON are
+# parity representations of the selected projected model. Each projection is
+# view-specific: it DROPS fields from its output, it never removes them from - or
+# otherwise weakens - the canonical snapshot, which stays complete.
 #
 # LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
 # It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
@@ -17,12 +18,12 @@
 # --include-prs, which is the sole path that touches the network; all gh coupling
 # lives in that branch and never in the canonical snapshot. The default output states
 # explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
-# absence is never ambiguous.
+# absence is never ambiguous. Supervision advice is always local-only.
 #
 # This wrapper consumes the canonical snapshot's hints.open_decisions field.
 # fm-classify-lib.sh owns the durable keyed-decision contract.
 #
-# The landed section merges this home's Done with the canonical snapshot's
+# Landed surfaces merge this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
@@ -30,12 +31,12 @@
 #
 # Flags:
 #   (default)        compact projection, TOON, local-only
-#   --json           the same projected model as JSON (machine/debug; parity form)
+#   --json           the selected projected model as JSON (machine/debug; parity form)
 #   --supervision-advice
 #                    firstmate-internal recovery/cleanup advice projection,
 #                    TOON by default, local-only, schema fm-supervision-advice.v1
-#   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
-#   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
+#   --include-prs    ALSO do live open-PR discovery + checks for default bearings
+#   --fields <list>  opt in to dropped surfaces where supported
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
 #   --all-secondmates include every aggregated secondmate record
@@ -92,27 +93,33 @@ usage: fm-bearings-snapshot.sh [--json] [--supervision-advice] [--include-prs] [
                                [--all-recorded-prs] [--all-unhealthy]
                                [--all-pr-repos]
 
-Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+Compact projections over fm-fleet-snapshot.sh. TOON by default.
+The default view is the captain-facing bearings projection.
+On that view, --include-prs is the only path that fetches.
 --supervision-advice emits firstmate-internal advisory recovery/cleanup rows
   from the same canonical local snapshot, schema fm-supervision-advice.v1.
-  It is local-only and never performs live PR discovery.
+  It is local-only and ignores --include-prs.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+Default bearings fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+Supervision advice fields: schema, home, generated, counts{...},
+  recommendations{id,bucket,state,reason,next_action,detail_ref}, omitted{surface,reveal}.
+  Recommendation buckets are captain_action, firstmate_action, monitor, and landed_report.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure; --all-landed reveals the full set.
 For every registered secondmate, validated structured state from its own home is
   authoritative. Parent events and bounded terminal reads are labeled fallback or
   contradiction evidence and never become current work.
-Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
+Opt-in surfaces for bearings: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
-Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
+Supervision advice never emits body text or command actions; --fields paths and
+  --fields endpoints reveal those references after a recommendation is selected.
+Under --include-prs, raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
 }
 
