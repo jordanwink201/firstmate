@@ -294,7 +294,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def scrub_reason_paths($full):
     if $full then .
-    else gsub("(?<prefix>^|[[:space:]\"`(=])(?<path>/[A-Za-z0-9._~@+-][^[:space:]\"`),;]*/[^[:space:]\"`),;]*)"; "\(.prefix)[path]") end;
+    else gsub("(?<prefix>^|[[:space:]\"`\u0027(=])(?<path>/[A-Za-z0-9._~@+-][^[:space:]\"`\u0027),;]*/[^[:space:]\"`\u0027),;]*)"; "\(.prefix)[path]") end;
   def reason_text($s; $full; $n):
     (($s // "") | tostring | gsub("\\s+"; " ") | scrub_reason_paths($full)
      | if (length > $n) then (.[:$n] + "…") else . end);
@@ -315,6 +315,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   def child_endpoint_ref($e; $show):
     if $show then (($e.endpoint.target // "missing endpoint") | trunc(180))
     else "--fields endpoints" end;
+  def secondmate_omission_reveal($surface):
+    if $surface == "active_children" or $surface == "endpoints" then "raise FM_SNAPSHOT_SECONDMATE_CHILDREN"
+    elif $surface == "decisions_open" then "raise FM_SNAPSHOT_SECONDMATE_DECISIONS"
+    elif $surface == "holds" or $surface == "queued" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
+    elif $surface == "landed" then "--all-landed or raise FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME"
+    else "raise the matching FM_SNAPSHOT_SECONDMATE_* bound" end;
   def current_detail($t):
     ((($t.current_state.detail // "") as $d
       | if $d != "" then $d else ($t.hints.last_event_text // "") end));
@@ -467,6 +473,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        (if $f_paths then empty else {surface:"full paths", reveal:"--fields paths"} end),
        {surface:"watch/steer command actions", reveal:"not emitted by advisory mode; use targeted tools after choosing a recommendation"},
        (if $f_endpoints then empty else {surface:"endpoint detail", reveal:"--fields endpoints"} end),
+       (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
+       (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),
+       (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
+       (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
+       (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
+       (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),
+       (($snap.secondmate_current.records // [])[] as $m
+        | ($m.omitted // [])[]
+        | {surface:("secondmate \($m.id) \(.surface) omitted by snapshot bound: \(.count // 0)"), reveal:secondmate_omission_reveal(.surface)}),
        (if $all_in_flight == 1 then empty else {surface:"healthy monitor-only task detail", reveal:"--all-in-flight"} end),
        (if $all_reports == 1 then empty else {surface:"full reports", reveal:"--all-reports for report inventory; open a referenced report only when needed"} end),
        (if $all_decisions == 0 and ($captain_all | length) > ($captain | length) then {surface:("captain_action showing \($captain | length) of \($captain_all | length)"), reveal:"--all-decisions"} else empty end),

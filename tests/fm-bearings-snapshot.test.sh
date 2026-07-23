@@ -168,7 +168,7 @@ write_supervision_advice_fixture() {  # <home>
     "harness=codex" \
     "kind=ship" \
     "mode=no-mistakes"
-  printf 'failed: %s/projects/failed-task/log.txt validation gate stopped on unit failure\n' "$home" > "$home/state/failed-task.status"
+  printf "failed: '%s/projects/failed-task/log.txt' validation gate stopped on unit failure\n" "$home" > "$home/state/failed-task.status"
   fm_write_meta "$home/state/blocked-task.meta" \
     "window=firstmate:fm-blocked-task" \
     "worktree=$home/projects/blocked-task" \
@@ -951,6 +951,64 @@ test_supervision_advice_path_scrub_and_unsupported_field_hints() {
   pass "supervision advice scrubs reason paths and keeps unsupported omission hints visible"
 }
 
+test_supervision_advice_carries_canonical_omission_hints() {
+  local home fakebin id mate child json registry_json unavailable_home unavailable_mate unavailable_json i
+  home=$(make_home advice-canonical-omissions)
+  : > "$home/data/secondmates.md"
+  for id in a b c; do
+    mate="$TMP_ROOT/advice-canonical-$id"
+    make_valid_secondmate_home "$id" "$mate"
+    append_secondmate_registry "$home" "$id" "$mate"
+  done
+  mate="$TMP_ROOT/advice-canonical-a"
+  {
+    printf '## In flight\n'
+    i=1
+    while [ "$i" -le 3 ]; do
+      child="child-$i"
+      mkdir -p "$mate/projects/$child"
+      printf -- '- [ ] %s - Active %s (repo: sample) (kind: ship) (since 2026-07-13)\n' "$child" "$child"
+      fm_write_meta "$mate/state/$child.meta" \
+        "window=firstmate:fm-$child" "worktree=$mate/projects/$child" "project=sample" \
+        "harness=codex" "kind=ship" "mode=no-mistakes"
+      printf 'working [key=%s]: active child %s\n' "$child" "$i" > "$mate/state/$child.status"
+      i=$((i + 1))
+    done
+    printf '\n## Queued\n\n## Done\n'
+    printf -- '- [x] landed-a - A landed item (repo: sample) (kind: ship) (done 2026-07-11)\n'
+    printf -- '- [x] landed-b - B landed item (repo: sample) (kind: ship) (done 2026-07-10)\n'
+  } > "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_SNAPSHOT_SECONDMATES=2 FM_SNAPSHOT_SECONDMATE_CHILDREN=2 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=1 \
+    run "$home" "$fakebin" --supervision-advice --json)
+  printf '%s' "$json" | jq -e '
+    (.omitted | any(.surface == "registered secondmates omitted by snapshot bound: 1"))
+      and (.omitted | any(.surface == "secondmate a active_children omitted by snapshot bound: 1"
+        and .reveal == "raise FM_SNAPSHOT_SECONDMATE_CHILDREN"))
+      and (.omitted | any(.surface == "secondmate home Done capped at the snapshot layer for 1 home(s)"))
+      and (.counts.omitted_details == (.omitted | length))
+  ' >/dev/null || fail "advisory omitted canonical secondmate caps: $json"
+  registry_json=$(FM_SNAPSHOT_REGISTRY_RECORDS=2 run "$home" "$fakebin" --supervision-advice --json)
+  printf '%s' "$registry_json" | jq -e '
+    .omitted | any(.surface == "secondmate registry records omitted by bounded read")
+  ' >/dev/null || fail "advisory omitted registry record truncation: $registry_json"
+
+  unavailable_home=$(make_home advice-registry-unavailable)
+  unavailable_mate="$TMP_ROOT/advice-registry-hidden"
+  make_valid_secondmate_home hidden "$unavailable_mate"
+  printf -- '- hidden - fixture (home: %s; scope: fixture; projects: sample; added 2026-07-11)\n' "$unavailable_mate" > "$unavailable_home/data/secondmates.md"
+  fm_write_secondmate_meta "$unavailable_home/state/hidden.meta" "$unavailable_mate" "firstmate:fm-hidden" sample
+  chmod 000 "$unavailable_home/data/secondmates.md"
+  unavailable_json=$(run "$unavailable_home" "$fakebin" --supervision-advice --json)
+  chmod 600 "$unavailable_home/data/secondmates.md"
+  printf '%s' "$unavailable_json" | jq -e '
+    (.omitted | any(.surface | contains("secondmate registry unavailable")))
+      and (.omitted | any(.surface == "secondmate home(s) with unreadable backlog: 1"))
+      and (.counts.omitted_details == (.omitted | length))
+  ' >/dev/null || fail "advisory omitted registry unavailability or unreadable landed source: $unavailable_json"
+  pass "supervision advice carries canonical omission hints"
+}
+
 test_supervision_advice_toon_json_parity() {
   local home fakebin toon json keys k typ
   home=$(make_home advice-parity); write_supervision_advice_fixture "$home"
@@ -1364,6 +1422,7 @@ test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_supervision_advice_default_is_bounded_local_only_and_classified
 test_supervision_advice_path_scrub_and_unsupported_field_hints
+test_supervision_advice_carries_canonical_omission_hints
 test_supervision_advice_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_bounded_and_disclosed
