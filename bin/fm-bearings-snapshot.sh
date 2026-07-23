@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# fm-bearings-snapshot.sh - compact, bounded, TOON-by-default bearings projection.
+# fm-bearings-snapshot.sh - compact, bounded, TOON-by-default fleet projections.
 #
 # A thin wrapper OVER the canonical bin/fm-fleet-snapshot.sh. It does not parse
 # fleet state itself: it shells out to `fm-fleet-snapshot.sh --json`, projects that
-# complete structured contract down to the small set of fields a "pick up where I
-# left off" read needs, and renders TOON at the output boundary. The internal data
-# model stays JSON (`--json` prints it verbatim); TOON is the default agent-facing
-# format per the AXI standard, and TOON/JSON are parity representations of the same
-# projected model. The projection is view-specific: it DROPS fields from the bearings
-# output, it never removes them from - or otherwise weakens - the canonical snapshot,
-# which stays complete.
+# complete structured contract down to a selected compact view. The default view is
+# the captain-facing bearings model for a "pick up where I left off" read;
+# --supervision-advice selects the firstmate-internal recovery/cleanup advice model.
+# The internal data model stays JSON (`--json` prints it verbatim for either view);
+# TOON is the default agent-facing format per the AXI standard, and TOON/JSON are
+# parity representations of the selected projected model. Each projection is
+# view-specific: it DROPS fields from its output, it never removes them from - or
+# otherwise weakens - the canonical snapshot, which stays complete.
 #
 # LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
 # It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
@@ -17,12 +18,12 @@
 # --include-prs, which is the sole path that touches the network; all gh coupling
 # lives in that branch and never in the canonical snapshot. The default output states
 # explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
-# absence is never ambiguous.
+# absence is never ambiguous. Supervision advice is always local-only.
 #
 # This wrapper consumes the canonical snapshot's hints.open_decisions field.
 # fm-classify-lib.sh owns the durable keyed-decision contract.
 #
-# The landed section merges this home's Done with the canonical snapshot's
+# Landed surfaces merge this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
@@ -30,9 +31,12 @@
 #
 # Flags:
 #   (default)        compact projection, TOON, local-only
-#   --json           the same projected model as JSON (machine/debug; parity form)
-#   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
-#   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
+#   --json           the selected projected model as JSON (machine/debug; parity form)
+#   --supervision-advice
+#                    firstmate-internal recovery/cleanup advice projection,
+#                    TOON by default, local-only, schema fm-supervision-advice.v1
+#   --include-prs    ALSO do live open-PR discovery + checks for default bearings
+#   --fields <list>  opt in to dropped surfaces where supported
 #   --all-in-flight  include every in-flight task
 #   --all-decisions  include every open decision
 #   --all-secondmates include every aggregated secondmate record
@@ -44,7 +48,8 @@
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Output contracts: `fm-bearings.v1` by default, or `fm-supervision-advice.v1`
+# under --supervision-advice. Read-only; no locks, no mutation, no reports.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,35 +86,45 @@ validate_bound FM_BEARINGS_PR_LIMIT "$FM_BEARINGS_PR_LIMIT"
 
 usage() {
   cat <<'EOF'
-usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
+usage: fm-bearings-snapshot.sh [--json] [--supervision-advice] [--include-prs] [--fields <list>]
                                [--all-in-flight] [--all-decisions]
                                [--all-secondmates] [--all-landed]
                                [--all-reports] [--all-queued]
                                [--all-recorded-prs] [--all-unhealthy]
                                [--all-pr-repos]
 
-Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+Compact projections over fm-fleet-snapshot.sh. TOON by default.
+The default view is the captain-facing bearings projection.
+On that view, --include-prs is the only path that fetches.
+--supervision-advice emits firstmate-internal advisory recovery/cleanup rows
+  from the same canonical local snapshot, schema fm-supervision-advice.v1.
+  It is local-only and ignores --include-prs.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+Default bearings fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+Supervision advice fields: schema, home, generated, counts{...},
+  recommendations{id,bucket,state,reason,next_action,detail_ref}, omitted{surface,reveal}.
+  Recommendation buckets are captain_action, firstmate_action, monitor, and landed_report.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure; --all-landed reveals the full set.
 For every registered secondmate, validated structured state from its own home is
   authoritative. Parent events and bounded terminal reads are labeled fallback or
   contradiction evidence and never become current work.
-Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
+Opt-in surfaces for bearings: --fields bodies|paths|actions|endpoints, --all-in-flight,
   --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
-Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
+Supervision advice never emits body text or command actions; --fields paths and
+  --fields endpoints reveal those references after a recommendation is selected.
+Under --include-prs, raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
 }
 
 FORMAT=toon
+SUPERVISION_ADVICE=0
 INCLUDE_PRS=0
 ALL_REPORTS=0
 ALL_QUEUED=0
@@ -124,6 +139,7 @@ FIELDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
+    --supervision-advice) SUPERVISION_ADVICE=1 ;;
     --include-prs) INCLUDE_PRS=1 ;;
     --all-reports) ALL_REPORTS=1 ;;
     --all-queued) ALL_QUEUED=1 ;;
@@ -169,6 +185,10 @@ PR_REPOS_TOTAL=0
 PR_REPOS_SHOWN=0
 PR_ROWS_CAPPED=0
 PR_ROWS_MIN_TOTAL=0
+if [ "$SUPERVISION_ADVICE" = 1 ]; then
+  INCLUDE_PRS=0
+  PR_STATUS='not_applicable (supervision advice is local-only)'
+fi
 
 # Parse owner/repo from an https or ssh GitHub remote/PR URL; empty if not GitHub.
 repo_slug() {  # <url>
@@ -259,6 +279,242 @@ EOF
   fi
 fi
 
+# --- projection: canonical snapshot -> fm-supervision-advice.v1 model (JSON) -
+if [ "$SUPERVISION_ADVICE" = 1 ]; then
+MODEL=$(printf '%s' "$SNAP" | jq \
+  --arg home "$HOME_LABEL" \
+  --arg now "$NOW" \
+  --arg fields "$FIELDS" \
+  --argjson landed_n "$FM_BEARINGS_LANDED" \
+  --argjson in_flight_n "$FM_BEARINGS_IN_FLIGHT" \
+  --argjson decisions_n "$FM_BEARINGS_DECISIONS" \
+  --argjson gates_n "$FM_BEARINGS_GATES" \
+  --argjson reports_n "$FM_BEARINGS_REPORTS" \
+  --argjson unhealthy_n "$FM_BEARINGS_UNHEALTHY" \
+  --argjson all_in_flight "$ALL_IN_FLIGHT" \
+  --argjson all_decisions "$ALL_DECISIONS" \
+  --argjson all_landed "$ALL_LANDED" \
+  --argjson all_reports "$ALL_REPORTS" \
+  --argjson all_queued "$ALL_QUEUED" \
+  --argjson all_unhealthy "$ALL_UNHEALTHY" '
+  def trunc($n): if . == null then null else
+    (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def scrub_reason_paths($full):
+    if $full then .
+    else gsub("(?<prefix>^|[[:space:]\"`\u0027(=])(?<path>/[A-Za-z0-9._~@+-][^[:space:]\"`\u0027),;]*/[^[:space:]\"`\u0027),;]*)"; "\(.prefix)[path]") end;
+  def reason_text($s; $full; $n):
+    (($s // "") | tostring | gsub("\\s+"; " ") | scrub_reason_paths($full)
+     | if (length > $n) then (.[:$n] + "…") else . end);
+  def relpath($p; $root; $full):
+    if ($p == null or $p == "") then "-"
+    elif $full then $p
+    elif ($p | startswith($root + "/")) then ($p | ltrimstr($root + "/"))
+    else ($p | split("/") | if length > 3 then .[-3:] else . end | join("/")) end;
+  def status_ref($t; $root; $full):
+    if $full then ($t.paths.status_log.path // ("status:" + $t.id))
+    else ("status:" + $t.id) end;
+  def report_ref($p; $root; $full): "report:" + relpath($p; $root; $full);
+  def backlog_ref($root; $full):
+    if $full then ($root + "/data/backlog.md") else "backlog:data/backlog.md" end;
+  def endpoint_ref($t; $show):
+    if $show then (($t.endpoint.target // "missing endpoint") | trunc(180))
+    else "--fields endpoints" end;
+  def child_endpoint_ref($e; $show):
+    if $show then (($e.endpoint.target // "missing endpoint") | trunc(180))
+    else "--fields endpoints" end;
+  def secondmate_omission_reveal($surface):
+    if $surface == "active_children" or $surface == "endpoints" then "raise FM_SNAPSHOT_SECONDMATE_CHILDREN"
+    elif $surface == "decisions_open" then "raise FM_SNAPSHOT_SECONDMATE_DECISIONS"
+    elif $surface == "holds" or $surface == "queued" then "raise FM_SNAPSHOT_SECONDMATE_QUEUED"
+    elif $surface == "landed" then "--all-landed or raise FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME"
+    else "raise the matching FM_SNAPSHOT_SECONDMATE_* bound" end;
+  def current_detail($t):
+    ((($t.current_state.detail // "") as $d
+      | if $d != "" then $d else ($t.hints.last_event_text // "") end));
+  def captain_blocker($d):
+    (((($d.summary // "") + " " + ($d.verb // "")) | test("credential|login|log in|auth|oauth|token|password|2fa|permission|access"; "i")));
+  def endpoint_bad($t):
+    (($t.endpoint.target // null) == null or $t.endpoint.exists == false or $t.endpoint.agent_alive == "dead");
+  def superseded:
+    (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")));
+  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  | (($fl | index("bodies")) != null) as $f_bodies
+  | (($fl | index("paths")) != null) as $f_paths
+  | (($fl | index("actions")) != null) as $f_actions
+  | (($fl | index("endpoints")) != null) as $f_endpoints
+  | . as $snap
+  | ([ $snap.tasks[] as $t
+       | select($t.kind != "secondmate")
+       | ($t.hints.open_decisions // [])[]
+       | select(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))
+       | {id:$t.id,bucket:"captain_action",state:.verb,
+          reason:reason_text((.summary // "captain input needed"); $f_paths; 140),
+          next_action:(if .verb == "needs-decision" then "get the captain decision"
+                       else "get the captain credential or login unblock" end),
+          detail_ref:status_ref($t; $snap.fm_home; $f_paths)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | $m.decisions_open[]?
+         | select(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))
+         | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),
+            bucket:"captain_action",state:.verb,
+            reason:reason_text((.summary // "captain input needed"); $f_paths; 140),
+            next_action:(if .verb == "needs-decision" then "get the captain decision"
+                         else "get the captain credential or login unblock" end),
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]
+     + [ $snap.tasks[] as $t
+         | select($t.kind != "secondmate" and ($t.pr.url // null) != null)
+         | select(($t.current_state.state // "") == "done"
+                  or (($t.hints.last_event_text // "") | test("approved|ready to merge|ready for merge|mergeable"; "i")))
+         | {id:$t.id,bucket:"captain_action",state:"recorded_pr",
+            reason:reason_text(("local PR signal: " + ($t.pr.url // "")); $f_paths; 140),
+            next_action:"captain approve or merge the recorded PR if still current",
+            detail_ref:(($t.pr.url // "-") | trunc(180))} ]) as $captain_all
+  | ([ $snap.tasks[] as $t
+       | select($t.kind != "secondmate")
+       | ($t.current_state.state // "unknown") as $s
+       | select($s == "failed" or $s == "blocked" or $s == "unknown")
+       | select((($t.hints.open_decisions // []) | any(.verb == "blocked" and captain_blocker(.))) | not)
+       | {id:$t.id,bucket:"firstmate_action",state:$s,
+          reason:reason_text((current_detail($t) // "current state requires firstmate inspection"); $f_paths; 140),
+          next_action:(if $s == "unknown" then "read targeted current state and reconcile task metadata"
+                       elif $s == "failed" then "inspect failure evidence before deciding recovery"
+                       else "inspect blocker and steer or escalate if captain-owned" end),
+          detail_ref:status_ref($t; $snap.fm_home; $f_paths)} ]
+     + [ $snap.tasks[] as $t
+         | select(endpoint_bad($t))
+         | {id:$t.id,bucket:"firstmate_action",state:"endpoint_unhealthy",
+            reason:reason_text((if ($t.endpoint.target // null) == null then "recorded direct-report endpoint is missing"
+                                elif $t.endpoint.exists == false then "recorded direct-report endpoint is absent"
+                                else "recorded direct-report agent is dead" end); $f_paths; 140),
+            next_action:"recover or teardown the recorded direct report before broad supervision resumes",
+            detail_ref:endpoint_ref($t; $f_endpoints)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | select($m.current.state == "unknown")
+         | {id:$m.id,bucket:"firstmate_action",state:"unknown",
+            reason:reason_text(($m.current.reason // "secondmate state unavailable"); $f_paths; 140),
+            next_action:"recover the registered secondmate state before routing more work there",
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | $m.endpoints[]? as $e
+         | select(($e.endpoint.target // null) == null or $e.endpoint.exists == false or $e.endpoint.agent_alive == "dead")
+         | {id:($m.id + "/" + $e.id),bucket:"firstmate_action",state:"endpoint_unhealthy",
+            reason:reason_text((if ($e.endpoint.target // null) == null then "recorded child endpoint is missing"
+                                elif $e.endpoint.exists == false then "recorded child endpoint is absent"
+                                else "recorded child agent is dead" end); $f_paths; 140),
+            next_action:"recover or reconcile the child direct report through its secondmate home",
+            detail_ref:child_endpoint_ref($e; $f_endpoints)} ]) as $firstmate_all
+  | ([ $snap.tasks[] as $t
+       | select($t.kind != "secondmate")
+       | ($t.current_state.state // "unknown") as $s
+       | select($s == "working" or $s == "paused" or $s == "parked")
+       | select(endpoint_bad($t) | not)
+       | select((($t.hints.open_decisions // [])
+                 | any(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))) | not)
+       | {id:$t.id,bucket:"monitor",state:$s,
+          reason:reason_text((current_detail($t) // (if $s == "paused" then "declared external wait" else "healthy active work" end)); $f_paths; 140),
+          next_action:(if $s == "paused" then "monitor declared external wait"
+                       elif $s == "parked" then "monitor parked work until a wake changes it"
+                       else "monitor healthy active work" end),
+          detail_ref:status_ref($t; $snap.fm_home; $f_paths)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | select($m.current.state == "active_child_work" or $m.current.state == "externally_held")
+         | {id:$m.id,bucket:"monitor",state:$m.current.state,
+            reason:reason_text(((if $m.current.state == "active_child_work" then
+                                  ([ $m.active_children[]? | .id + ": " + (.doing // .state) ] | join("; "))
+                                else
+                                  ([ $m.holds[]? | .id + ": " + (.reason // "held") ] | join("; "))
+                                end) | if . == "" then ($m.current.reason // "secondmate monitor state") else . end); $f_paths; 140),
+            next_action:(if $m.current.state == "active_child_work" then "monitor secondmate child work"
+                         else "monitor declared external wait" end),
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]) as $monitor_active_all
+  | ([ $snap.backlog.records[]
+       | select(.state == "queued" and .structured)
+       | select(($all_queued == 1) or (superseded | not))
+       | {id,bucket:"monitor",state:"queued",
+          reason:reason_text((if (.blocked_by // null) != null then
+                                ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
+                              else (.title // "queued work") end); $f_paths; 140),
+          next_action:"monitor queued or gated work until its blocker clears",
+          detail_ref:backlog_ref($snap.fm_home; $f_paths)} ]
+     + [ ($snap.secondmate_current.records // [])[] as $m
+         | select($m.provenance.selected == "structured-home")
+         | $m.queued[]?
+         | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),
+            bucket:"monitor",state:"queued",
+            reason:reason_text((if (.blocked_by // null) != null then
+                                  ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
+                                else (.title // "queued work") end); $f_paths; 140),
+            next_action:"monitor queued secondmate work until its blocker clears",
+            detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]) as $monitor_gates_all
+  | ([ $snap.backlog.records[]
+       | select(.state == "done" and .structured)
+       | {id,bucket:"landed_report",state:"done",
+          reason:reason_text((.title // "landed baseline item"); $f_paths; 140),
+          next_action:"keep as landed baseline; no immediate action",
+          detail_ref:((.pr_url // (if (.report_path // null) != null then report_ref(.report_path; $snap.fm_home; $f_paths) else (.local_note // "landed") end)) | trunc(180))} ]
+     + [ ($snap.secondmate_landed.records // [])[]
+         | {id,bucket:"landed_report",state:"done",
+            reason:reason_text((.title // "secondmate landed baseline item"); $f_paths; 140),
+            next_action:"keep as landed baseline; no immediate action",
+            detail_ref:((.pr_url // (if (.report_path // null) != null then report_ref(.report_path; $snap.fm_home; $f_paths) else (.local_note // "landed") end)) | trunc(180))} ]) as $landed_done_all
+  | ([ $snap.scout_reports[] as $r
+       | ([ $snap.tasks[] | select(.id == $r.id) ][0] // null) as $t
+       | ([ $snap.backlog.records[] | select(.structured and .id == $r.id) ][0] // null) as $b
+       | select(($all_reports == 1)
+                or (($t != null and ($t.current_state.state // "") == "done")
+                    or ($b != null and ($b.state // "") == "done")))
+       | {id:$r.id,bucket:"landed_report",state:"report",
+          reason:reason_text("scout/report pointer ready"; $f_paths; 140),
+          next_action:"read the referenced report only if its detail is needed",
+          detail_ref:report_ref($r.path; $snap.fm_home; $f_paths)} ]) as $report_all
+  | (if $all_decisions == 1 then $captain_all else $captain_all[:$decisions_n] end) as $captain
+  | (if $all_unhealthy == 1 then $firstmate_all else $firstmate_all[:$unhealthy_n] end) as $firstmate
+  | (if $all_in_flight == 1 then $monitor_active_all else $monitor_active_all[:$in_flight_n] end) as $monitor_active
+  | (if $all_queued == 1 then $monitor_gates_all else $monitor_gates_all[:$gates_n] end) as $monitor_gates
+  | (($monitor_active + $monitor_gates) | unique_by(.bucket + ":" + .id + ":" + .state + ":" + .detail_ref)) as $monitor
+  | (if $all_landed == 1 then $landed_done_all else $landed_done_all[:$landed_n] end) as $landed_done
+  | (if $all_reports == 1 then $report_all else $report_all[:$reports_n] end) as $landed_reports
+  | (($landed_done + $landed_reports) | unique_by(.bucket + ":" + .id + ":" + .state + ":" + .detail_ref)) as $landed
+  | ($captain + $firstmate + $monitor + $landed) as $recommendations
+  | ([ {surface:"status, backlog, and report bodies", reveal:"not emitted by advisory mode; read targeted status/report files only after choosing a recommendation"},
+       (if $f_paths then empty else {surface:"full paths", reveal:"--fields paths"} end),
+       {surface:"watch/steer command actions", reveal:"not emitted by advisory mode; use targeted tools after choosing a recommendation"},
+       (if $f_endpoints then empty else {surface:"endpoint detail", reveal:"--fields endpoints"} end),
+       (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
+       (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),
+       (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
+       (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
+       (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
+       (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),
+       (($snap.secondmate_current.records // [])[] as $m
+        | ($m.omitted // [])[]
+        | {surface:("secondmate \($m.id) \(.surface) omitted by snapshot bound: \(.count // 0)"), reveal:secondmate_omission_reveal(.surface)}),
+       (if $all_in_flight == 1 then empty else {surface:"healthy monitor-only task detail", reveal:"--all-in-flight"} end),
+       (if $all_reports == 1 then empty else {surface:"full reports", reveal:"--all-reports for report inventory; open a referenced report only when needed"} end),
+       (if $all_decisions == 0 and ($captain_all | length) > ($captain | length) then {surface:("captain_action showing \($captain | length) of \($captain_all | length)"), reveal:"--all-decisions"} else empty end),
+       (if $all_unhealthy == 0 and ($firstmate_all | length) > ($firstmate | length) then {surface:("firstmate_action showing \($firstmate | length) of \($firstmate_all | length)"), reveal:"--all-unhealthy"} else empty end),
+       (if $all_in_flight == 0 and ($monitor_active_all | length) > ($monitor_active | length) then {surface:("monitor active work showing \($monitor_active | length) of \($monitor_active_all | length)"), reveal:"--all-in-flight"} else empty end),
+       (if $all_queued == 0 and ($monitor_gates_all | length) > ($monitor_gates | length) then {surface:("monitor queued/gated work showing \($monitor_gates | length) of \($monitor_gates_all | length)"), reveal:"--all-queued"} else empty end),
+       (if $all_landed == 0 and ($landed_done_all | length) > ($landed_done | length) then {surface:("landed baseline showing \($landed_done | length) of \($landed_done_all | length)"), reveal:"--all-landed"} else empty end),
+       (if $all_reports == 0 and ($report_all | length) > ($landed_reports | length) then {surface:("report pointers showing \($landed_reports | length) of \($report_all | length)"), reveal:"--all-reports"} else empty end) ]) as $omitted
+  | {
+      schema:"fm-supervision-advice.v1",
+      home:$home,
+      generated:$now,
+      counts:{
+        total_tasks:($snap.tasks | length),
+        recommendations:($recommendations | length),
+        captain_actions:($captain | length),
+        firstmate_actions:($firstmate | length),
+        monitor_only_items:($monitor | length),
+        landed_reports:($landed | length),
+        omitted_details:($omitted | length)
+      },
+      recommendations:$recommendations,
+      omitted:$omitted
+    }
+') || { echo "fm-bearings-snapshot: supervision advice projection failed" >&2; exit 1; }
+else
 # --- projection: canonical snapshot -> fm-bearings.v1 model (JSON) ----------
 MODEL=$(printf '%s' "$SNAP" | jq \
   --arg home "$HOME_LABEL" \
@@ -414,6 +670,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $include_prs == 1 and $pr_rows_capped > 0 then {surface:("candidate_prs showing \($candidate_prs | length) of at least \($pr_rows_min_total); capped in \($pr_rows_capped) repo(s)"), reveal:"raise FM_BEARINGS_PR_LIMIT"} else empty end),
         (if $include_prs == 1 then empty else {surface:"live PR discovery + checks", reveal:"--include-prs"} end) ]) }
 ') || { echo "fm-bearings-snapshot: projection failed" >&2; exit 1; }
+fi
 
 if [ "$FORMAT" = json ]; then
   printf '%s\n' "$MODEL"
@@ -421,10 +678,11 @@ if [ "$FORMAT" = json ]; then
 fi
 
 # --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
-# (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
-# per the TOON spec. Quoting follows the spec exactly.
+# The models are flat objects of scalar fields, scalar sub-objects such as
+# counts, and arrays of uniform scalar objects, so the encoder only needs object
+# scalars, the one-row object form (key{fields}: + comma row at +2 indent), the
+# tabular array form (key[N]{fields}: + comma rows at +2 indent), and the
+# empty-array form (key: []), per the TOON spec. Quoting follows the spec exactly.
 TOON=$(printf '%s\n' "$MODEL" | jq -r '
   def q:
     tostring
@@ -450,6 +708,10 @@ TOON=$(printf '%s\n' "$MODEL" | jq -r '
         | ( "\($k)[\($v | length)]{\($ks | map(q) | join(","))}:",
             ($v[] as $row | "  " + ([ $ks[] as $kk | ($row[$kk] | scal) ] | join(","))) )
       end
+    elif (($v | type) == "object" and (all($v[]; ((type == "array" or type == "object") | not)))) then
+      ($v | keys_unsorted) as $ks
+      | ( "\($k){\($ks | map(q) | join(","))}:",
+          "  " + ([ $ks[] as $kk | ($v[$kk] | scal) ] | join(",")) )
     else "\($k): " + ($v | scal)
     end;
   [ to_entries[] | emit(.key; .value) ] | join("\n")

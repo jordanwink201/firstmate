@@ -265,6 +265,8 @@ Reconcile reality with your records before doing anything else, working from the
    If there is nothing that needs them, say nothing and resume.
 10. Having already handled the drained wakes from the digest, follow the emitted supervision operating block through the digest's own closing reminder; if the lock was refused or `state/.afk` exists, follow the digest's no-direct-supervision guidance.
 
+For broad recovery, cleanup, wake floods, or multi-task "pick up where we left off" triage, run `bin/fm-bearings-snapshot.sh --supervision-advice` before ad hoc `fm-crew-state`, `fm-peek`, or status/report read loops; the script header owns the advisory contract.
+
 A firstmate restart must be a non-event.
 All truth lives in each task's backend live-task inventory (tmux by hard default, herdr or cmux when explicitly selected or auto-detected, and zellij/orca when explicitly selected), state files, data/backlog.md, data/captain.md, data/learnings.md, data/secondmates.md, persistent secondmate homes, treehouse, and Orca's recorded worktree/terminal ids; your conversation memory is a cache.
 
