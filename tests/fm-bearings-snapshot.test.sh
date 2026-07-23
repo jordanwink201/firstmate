@@ -168,7 +168,7 @@ write_supervision_advice_fixture() {  # <home>
     "harness=codex" \
     "kind=ship" \
     "mode=no-mistakes"
-  printf 'failed: validation gate stopped on unit failure\n' > "$home/state/failed-task.status"
+  printf 'failed: %s/projects/failed-task/log.txt validation gate stopped on unit failure\n' "$home" > "$home/state/failed-task.status"
   fm_write_meta "$home/state/blocked-task.meta" \
     "window=firstmate:fm-blocked-task" \
     "worktree=$home/projects/blocked-task" \
@@ -911,7 +911,7 @@ test_supervision_advice_default_is_bounded_local_only_and_classified() {
       and (.counts.landed_reports == ([.recommendations[] | select(.bucket == "landed_report")] | length))
       and (.counts.omitted_details == (.omitted | length))
       and (.recommendations | any(.[]; .id == "mate" and .bucket == "captain_action" and .state == "needs-decision"))
-      and (.recommendations | any(.[]; .id == "failed-task" and .bucket == "firstmate_action" and .state == "failed"))
+      and (.recommendations | any(.[]; .id == "failed-task" and .bucket == "firstmate_action" and .state == "failed" and (.reason | contains("[path]"))))
       and (.recommendations | any(.[]; .id == "blocked-task" and .bucket == "firstmate_action" and .state == "blocked"))
       and (.recommendations | any(.[]; .id == "unknown-task" and .bucket == "firstmate_action"))
       and (.recommendations | any(.[]; .id == "dead-endpoint" and .bucket == "firstmate_action" and .state == "endpoint_unhealthy"))
@@ -928,6 +928,27 @@ test_supervision_advice_default_is_bounded_local_only_and_classified() {
       and (.omitted | any(.surface == "full reports" and (.reveal | contains("--all-reports"))))
   ' >/dev/null || fail "supervision advice did not classify or bound fixture correctly: $json"
   pass "supervision advice is bounded, local-only, and classifies captain/firstmate/monitor/landed buckets"
+}
+
+test_supervision_advice_path_scrub_and_unsupported_field_hints() {
+  local home fakebin default_json paths_json fields_json
+  home=$(make_home advice-redaction); write_supervision_advice_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  default_json=$(run "$home" "$fakebin" --supervision-advice --json)
+  paths_json=$(run "$home" "$fakebin" --supervision-advice --json --fields paths)
+  fields_json=$(run "$home" "$fakebin" --supervision-advice --json --fields bodies,actions)
+  printf '%s' "$default_json" | jq -e --arg home "$home" '
+    ([.recommendations[].reason] | all(contains($home) | not))
+      and (.recommendations | any(.[]; .id == "failed-task" and (.reason | contains("[path]"))))
+  ' >/dev/null || fail "default advisory reasons leaked an absolute path: $default_json"
+  printf '%s' "$paths_json" | jq -e --arg home "$home" '
+    .recommendations | any(.[]; .id == "failed-task" and (.reason | contains($home)))
+  ' >/dev/null || fail "--fields paths did not reveal advisory reason paths: $paths_json"
+  printf '%s' "$fields_json" | jq -e '
+    (.omitted | any(.surface == "status, backlog, and report bodies" and (.reveal | contains("not emitted by advisory mode"))))
+      and (.omitted | any(.surface == "watch/steer command actions" and (.reveal | contains("not emitted by advisory mode"))))
+  ' >/dev/null || fail "advisory bodies/actions field opt-ins hid unsupported omissions: $fields_json"
+  pass "supervision advice scrubs reason paths and keeps unsupported omission hints visible"
 }
 
 test_supervision_advice_toon_json_parity() {
@@ -1342,6 +1363,7 @@ test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
 test_toon_json_parity
 test_supervision_advice_default_is_bounded_local_only_and_classified
+test_supervision_advice_path_scrub_and_unsupported_field_hints
 test_supervision_advice_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_bounded_and_disclosed

@@ -292,6 +292,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson all_unhealthy "$ALL_UNHEALTHY" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def scrub_reason_paths($full):
+    if $full then .
+    else gsub("(?<prefix>^|[[:space:]\"`(=])(?<path>/[A-Za-z0-9._~@+-][^[:space:]\"`),;]*/[^[:space:]\"`),;]*)"; "\(.prefix)[path]") end;
+  def reason_text($s; $full; $n):
+    (($s // "") | tostring | gsub("\\s+"; " ") | scrub_reason_paths($full)
+     | if (length > $n) then (.[:$n] + "…") else . end);
   def relpath($p; $root; $full):
     if ($p == null or $p == "") then "-"
     elif $full then $p
@@ -311,7 +317,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
     else "--fields endpoints" end;
   def current_detail($t):
     ((($t.current_state.detail // "") as $d
-      | if $d != "" then $d else ($t.hints.last_event_text // "") end) | trunc(140));
+      | if $d != "" then $d else ($t.hints.last_event_text // "") end));
   def captain_blocker($d):
     (((($d.summary // "") + " " + ($d.verb // "")) | test("credential|login|log in|auth|oauth|token|password|2fa|permission|access"; "i")));
   def endpoint_bad($t):
@@ -329,7 +335,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | ($t.hints.open_decisions // [])[]
        | select(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))
        | {id:$t.id,bucket:"captain_action",state:.verb,
-          reason:((.summary // "captain input needed") | trunc(140)),
+          reason:reason_text((.summary // "captain input needed"); $f_paths; 140),
           next_action:(if .verb == "needs-decision" then "get the captain decision"
                        else "get the captain credential or login unblock" end),
           detail_ref:status_ref($t; $snap.fm_home; $f_paths)} ]
@@ -338,7 +344,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))
          | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),
             bucket:"captain_action",state:.verb,
-            reason:((.summary // "captain input needed") | trunc(140)),
+            reason:reason_text((.summary // "captain input needed"); $f_paths; 140),
             next_action:(if .verb == "needs-decision" then "get the captain decision"
                          else "get the captain credential or login unblock" end),
             detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]
@@ -347,7 +353,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(($t.current_state.state // "") == "done"
                   or (($t.hints.last_event_text // "") | test("approved|ready to merge|ready for merge|mergeable"; "i")))
          | {id:$t.id,bucket:"captain_action",state:"recorded_pr",
-            reason:(("local PR signal: " + ($t.pr.url // "")) | trunc(140)),
+            reason:reason_text(("local PR signal: " + ($t.pr.url // "")); $f_paths; 140),
             next_action:"captain approve or merge the recorded PR if still current",
             detail_ref:(($t.pr.url // "-") | trunc(180))} ]) as $captain_all
   | ([ $snap.tasks[] as $t
@@ -356,7 +362,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select($s == "failed" or $s == "blocked" or $s == "unknown")
        | select((($t.hints.open_decisions // []) | any(.verb == "blocked" and captain_blocker(.))) | not)
        | {id:$t.id,bucket:"firstmate_action",state:$s,
-          reason:((current_detail($t) // "current state requires firstmate inspection") | trunc(140)),
+          reason:reason_text((current_detail($t) // "current state requires firstmate inspection"); $f_paths; 140),
           next_action:(if $s == "unknown" then "read targeted current state and reconcile task metadata"
                        elif $s == "failed" then "inspect failure evidence before deciding recovery"
                        else "inspect blocker and steer or escalate if captain-owned" end),
@@ -364,24 +370,24 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ $snap.tasks[] as $t
          | select(endpoint_bad($t))
          | {id:$t.id,bucket:"firstmate_action",state:"endpoint_unhealthy",
-            reason:(if ($t.endpoint.target // null) == null then "recorded direct-report endpoint is missing"
-                    elif $t.endpoint.exists == false then "recorded direct-report endpoint is absent"
-                    else "recorded direct-report agent is dead" end),
+            reason:reason_text((if ($t.endpoint.target // null) == null then "recorded direct-report endpoint is missing"
+                                elif $t.endpoint.exists == false then "recorded direct-report endpoint is absent"
+                                else "recorded direct-report agent is dead" end); $f_paths; 140),
             next_action:"recover or teardown the recorded direct report before broad supervision resumes",
             detail_ref:endpoint_ref($t; $f_endpoints)} ]
      + [ ($snap.secondmate_current.records // [])[] as $m
          | select($m.current.state == "unknown")
          | {id:$m.id,bucket:"firstmate_action",state:"unknown",
-            reason:(($m.current.reason // "secondmate state unavailable") | trunc(140)),
+            reason:reason_text(($m.current.reason // "secondmate state unavailable"); $f_paths; 140),
             next_action:"recover the registered secondmate state before routing more work there",
             detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]
      + [ ($snap.secondmate_current.records // [])[] as $m
          | $m.endpoints[]? as $e
          | select(($e.endpoint.target // null) == null or $e.endpoint.exists == false or $e.endpoint.agent_alive == "dead")
          | {id:($m.id + "/" + $e.id),bucket:"firstmate_action",state:"endpoint_unhealthy",
-            reason:(if ($e.endpoint.target // null) == null then "recorded child endpoint is missing"
-                    elif $e.endpoint.exists == false then "recorded child endpoint is absent"
-                    else "recorded child agent is dead" end),
+            reason:reason_text((if ($e.endpoint.target // null) == null then "recorded child endpoint is missing"
+                                elif $e.endpoint.exists == false then "recorded child endpoint is absent"
+                                else "recorded child agent is dead" end); $f_paths; 140),
             next_action:"recover or reconcile the child direct report through its secondmate home",
             detail_ref:child_endpoint_ref($e; $f_endpoints)} ]) as $firstmate_all
   | ([ $snap.tasks[] as $t
@@ -392,7 +398,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select((($t.hints.open_decisions // [])
                  | any(.verb == "needs-decision" or (.verb == "blocked" and captain_blocker(.)))) | not)
        | {id:$t.id,bucket:"monitor",state:$s,
-          reason:((current_detail($t) // (if $s == "paused" then "declared external wait" else "healthy active work" end)) | trunc(140)),
+          reason:reason_text((current_detail($t) // (if $s == "paused" then "declared external wait" else "healthy active work" end)); $f_paths; 140),
           next_action:(if $s == "paused" then "monitor declared external wait"
                        elif $s == "parked" then "monitor parked work until a wake changes it"
                        else "monitor healthy active work" end),
@@ -400,11 +406,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
      + [ ($snap.secondmate_current.records // [])[] as $m
          | select($m.current.state == "active_child_work" or $m.current.state == "externally_held")
          | {id:$m.id,bucket:"monitor",state:$m.current.state,
-            reason:((if $m.current.state == "active_child_work" then
-                       ([ $m.active_children[]? | .id + ": " + (.doing // .state) ] | join("; "))
-                     else
-                       ([ $m.holds[]? | .id + ": " + (.reason // "held") ] | join("; "))
-                     end) | if . == "" then ($m.current.reason // "secondmate monitor state") else . end | trunc(140)),
+            reason:reason_text(((if $m.current.state == "active_child_work" then
+                                  ([ $m.active_children[]? | .id + ": " + (.doing // .state) ] | join("; "))
+                                else
+                                  ([ $m.holds[]? | .id + ": " + (.reason // "held") ] | join("; "))
+                                end) | if . == "" then ($m.current.reason // "secondmate monitor state") else . end); $f_paths; 140),
             next_action:(if $m.current.state == "active_child_work" then "monitor secondmate child work"
                          else "monitor declared external wait" end),
             detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]) as $monitor_active_all
@@ -412,9 +418,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.state == "queued" and .structured)
        | select(($all_queued == 1) or (superseded | not))
        | {id,bucket:"monitor",state:"queued",
-          reason:((if (.blocked_by // null) != null then
-                     ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
-                   else (.title // "queued work") end) | trunc(140)),
+          reason:reason_text((if (.blocked_by // null) != null then
+                                ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
+                              else (.title // "queued work") end); $f_paths; 140),
           next_action:"monitor queued or gated work until its blocker clears",
           detail_ref:backlog_ref($snap.fm_home; $f_paths)} ]
      + [ ($snap.secondmate_current.records // [])[] as $m
@@ -422,20 +428,20 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | $m.queued[]?
          | {id:(if (.id // $m.id) == $m.id then $m.id else ($m.id + "/" + .id) end),
             bucket:"monitor",state:"queued",
-            reason:((if (.blocked_by // null) != null then
-                       ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
-                     else (.title // "queued work") end) | trunc(140)),
+            reason:reason_text((if (.blocked_by // null) != null then
+                                  ("blocked by " + .blocked_by + (if (.blocked_reason // "") != "" then ": " + .blocked_reason else "" end))
+                                else (.title // "queued work") end); $f_paths; 140),
             next_action:"monitor queued secondmate work until its blocker clears",
             detail_ref:(if $f_paths then ($m.home // ("secondmate:" + $m.id)) else ("secondmate:" + $m.id) end)} ]) as $monitor_gates_all
   | ([ $snap.backlog.records[]
        | select(.state == "done" and .structured)
        | {id,bucket:"landed_report",state:"done",
-          reason:((.title // "landed baseline item") | trunc(140)),
+          reason:reason_text((.title // "landed baseline item"); $f_paths; 140),
           next_action:"keep as landed baseline; no immediate action",
           detail_ref:((.pr_url // (if (.report_path // null) != null then report_ref(.report_path; $snap.fm_home; $f_paths) else (.local_note // "landed") end)) | trunc(180))} ]
      + [ ($snap.secondmate_landed.records // [])[]
          | {id,bucket:"landed_report",state:"done",
-            reason:((.title // "secondmate landed baseline item") | trunc(140)),
+            reason:reason_text((.title // "secondmate landed baseline item"); $f_paths; 140),
             next_action:"keep as landed baseline; no immediate action",
             detail_ref:((.pr_url // (if (.report_path // null) != null then report_ref(.report_path; $snap.fm_home; $f_paths) else (.local_note // "landed") end)) | trunc(180))} ]) as $landed_done_all
   | ([ $snap.scout_reports[] as $r
@@ -445,7 +451,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                 or (($t != null and ($t.current_state.state // "") == "done")
                     or ($b != null and ($b.state // "") == "done")))
        | {id:$r.id,bucket:"landed_report",state:"report",
-          reason:("scout/report pointer ready" | trunc(140)),
+          reason:reason_text("scout/report pointer ready"; $f_paths; 140),
           next_action:"read the referenced report only if its detail is needed",
           detail_ref:report_ref($r.path; $snap.fm_home; $f_paths)} ]) as $report_all
   | (if $all_decisions == 1 then $captain_all else $captain_all[:$decisions_n] end) as $captain
@@ -457,9 +463,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (if $all_reports == 1 then $report_all else $report_all[:$reports_n] end) as $landed_reports
   | (($landed_done + $landed_reports) | unique_by(.bucket + ":" + .id + ":" + .state + ":" + .detail_ref)) as $landed
   | ($captain + $firstmate + $monitor + $landed) as $recommendations
-  | ([ (if $f_bodies then empty else {surface:"status, backlog, and report bodies", reveal:"read targeted status/report files only after choosing a recommendation"} end),
+  | ([ {surface:"status, backlog, and report bodies", reveal:"not emitted by advisory mode; read targeted status/report files only after choosing a recommendation"},
        (if $f_paths then empty else {surface:"full paths", reveal:"--fields paths"} end),
-       (if $f_actions then empty else {surface:"watch/steer command actions", reveal:"--fields actions"} end),
+       {surface:"watch/steer command actions", reveal:"not emitted by advisory mode; use targeted tools after choosing a recommendation"},
        (if $f_endpoints then empty else {surface:"endpoint detail", reveal:"--fields endpoints"} end),
        (if $all_in_flight == 1 then empty else {surface:"healthy monitor-only task detail", reveal:"--all-in-flight"} end),
        (if $all_reports == 1 then empty else {surface:"full reports", reveal:"--all-reports for report inventory; open a referenced report only when needed"} end),
