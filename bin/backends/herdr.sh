@@ -737,9 +737,11 @@ FM_BACKEND_HERDR_COMPOSER_LINES=${FM_BACKEND_HERDR_COMPOSER_LINES:-20}
 # herdr-verified harness needs its own idle placeholder recognized.
 FM_BACKEND_HERDR_IDLE_RE=${FM_BACKEND_HERDR_IDLE_RE:-'^Type a message\.\.\.$'}
 # Known bare (unbordered) prompt glyphs a composer row may start with: ❯
-# (claude) and › (codex) only. Generic shell-style glyphs > $ % # are still
-# recognized after a bordered composer row has already been structurally found.
-FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
+# (claude) and › (codex) only. Use alternation instead of a regex character
+# class: under LC_ALL=C, UTF-8 bytes inside `[❯›]` match unrelated box glyphs.
+# Generic shell-style glyphs > $ % # are still recognized after a bordered
+# composer row has already been structurally found.
+FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^(❯|›)'}
 # Pi allows a multi-line composer between its horizontal separators. Bound the
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.

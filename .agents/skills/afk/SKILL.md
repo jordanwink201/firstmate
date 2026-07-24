@@ -1,6 +1,6 @@
 ---
 name: afk
-description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
+description: Enter away-mode supervision. Use when the user invokes /afk (e.g. "/afk", "/afk back in an hour", "going afk"). Sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events, first-progress launch stalls, and bounded declared-external-wait rechecks as batched digests, cutting supervision token cost during walk-away stretches. Exit is automatic; any real (unmarked) message returns to full per-wake responsiveness.
 user-invocable: true
 metadata:
   internal: true
@@ -51,7 +51,7 @@ batched digest rather than per-wake injections.
    its child; the singleton lock no-ops a stray arm harmlessly.
 
 4. **Acknowledge** to the captain that away-mode is active.
-   The daemon will self-handle routine wakes, escalate captain-relevant events and bounded declared-external-wait rechecks, and let the captain exit by sending any real message.
+   The daemon will self-handle routine wakes, escalate captain-relevant events, first-progress launch stalls, and bounded declared-external-wait rechecks, and let the captain exit by sending any real message.
 
 ## How to exit afk
 
@@ -130,13 +130,14 @@ did not land instead of leaving it unsubmitted.
 The daemon wraps `fm-watch.sh`, runs the watcher as a child, classifies each
 wake reason in bash, and self-handles the routine majority without consuming a
 firstmate turn.
-Captain-relevant events, plus a bounded recheck of a declared external wait that remains idle, escalate to firstmate's context as one pre-read, single-line, batched digest.
-The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
+Captain-relevant events, first-progress launch stalls, and bounded rechecks of declared external waits that remain idle escalate to firstmate's context as one pre-read, single-line, batched digest.
+The classification predicates (the captain-relevant verb set, declared-pause vocabulary, signal/stale tests, launch-watchdog checks, and fleet-scan) live in the shared `bin/fm-classify-lib.sh`, the same library the always-on watcher uses for its own triage when afk is off, so the two modes apply one identical policy.
 While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
 
 Classify each wake this way:
 
-- `signal` whose status content has no captain-relevant verb
+- `signal` or `stale` for a first-progress launch stall -> escalate immediately.
+- Otherwise, `signal` whose status content has no captain-relevant verb
   (`done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged`)
   -> self-handle. Captain-relevant verb -> escalate.
 - `signal` or `stale` for a declared `paused:` external wait -> self-handle and track the pause rather than a wedge.
@@ -150,7 +151,7 @@ Classify each wake this way:
   on firstmate mid-task.
 - `heartbeat` -> self-handle. The daemon runs its own cheap bash fleet scan
   every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for a
-  captain-relevant status line the per-wake classifier might miss.
+  captain-relevant status line or launch stall the per-wake classifier might miss.
 - Unknown reason, or any uncertainty -> escalate fail-safe.
 
 Escalations are buffered up to `FM_ESCALATE_BATCH_SECS` (default 90s; 0 =
@@ -193,8 +194,8 @@ the marker lets firstmate distinguish it from a real captain message.
 - **Portable singleton lock** - the daemon uses the repo's portable lock helper
   (`fm-wake-lib.sh`) instead of `flock`, which is absent on macOS.
 - **Dedupe across signal/stale/scan** - `classify_signal` and `classify_stale`
-  both check the seen-status marker before escalating, so a status escalated by
-  one path is not re-escalated by another in the same digest.
+  check seen-status and seen-launch markers before escalating, so one path is
+  not re-escalated by another in the same digest.
 - **Auto-discovered supervisor pane** - the daemon resolves its own BACKEND
   (tmux vs herdr) and TARGET independently, mirroring
   `bin/fm-backend.sh`'s own runtime auto-detection. Backend: `FM_SUPERVISOR_BACKEND`
@@ -225,7 +226,7 @@ These properties must hold:
   or crashed injection.
 - Wedge detection is bounded-latency, not lossy.
 - Declared external waits are rechecked on a separate, bounded cadence rather than being mislabeled as wedges.
-- The catch-all scan backs up the keyword classifier.
+- The catch-all scan backs up the keyword classifier and launch watchdog.
 - The daemon preserves a single-instance portable lock, crash-loop backoff,
   a pane-gone guard, and a signal-trapped shutdown that flushes buffered
   escalations before exit.
