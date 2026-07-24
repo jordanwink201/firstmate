@@ -76,6 +76,31 @@ seen_sig() {
   if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
 }
 
+make_launch_watchdog_case() {  # <name> <id> <kind> <spawn-delta-secs>
+  local name=$1 id=$2 kind=$3 delta=$4 dir state proj wt now
+  dir=$(make_case "$name")
+  state="$dir/state"
+  proj="$dir/project"
+  wt="$dir/wt"
+  mkdir -p "$dir/data"
+  fm_git_worktree "$proj" "$wt" "branch-$name"
+  now=$(date +%s)
+  fm_write_meta "$state/$id.meta" \
+    "window=test:fm-$id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "spawn_ts=$((now - delta))" \
+    "kind=$kind" \
+    "mode=no-mistakes"
+  printf '%s|%s|%s|%s|%s\n' "$dir" "$state" "$proj" "$wt" "$id"
+}
+
+read_launch_case_record() {
+  IFS='|' read -r CASE_DIR STATE_DIR _proj_dir WT_DIR TASK_ID <<EOF
+$1
+EOF
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -266,6 +291,173 @@ test_signal_crew_provably_working_classifier() {
     || fail "an empty signal file list was treated as benign"
   unset FM_FAKE_CREW_STATE_a FM_FAKE_CREW_STATE_b
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
+}
+
+test_launch_watchdog_old_spawn_classifies_actionable() {
+  local rec reason
+  rec=$(make_launch_watchdog_case launch-old launch-old ship 900)
+  read_launch_case_record "$rec"
+  reason=$(FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR") \
+    || fail "old spawn with no status and no Git progress did not classify"
+  assert_contains "$reason" "stuck-at-launch: launch-old" "launch watchdog reason did not name stuck-at-launch"
+  pass "launch watchdog classifies an old ship spawn with no status and no Git progress"
+}
+
+test_launch_watchdog_recent_spawn_suppressed() {
+  local rec
+  rec=$(make_launch_watchdog_case launch-recent launch-recent ship 60)
+  read_launch_case_record "$rec"
+  ! FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR" >/dev/null \
+    || fail "recent spawn classified as stuck-at-launch"
+  pass "launch watchdog suppresses a recent spawn"
+}
+
+test_launch_watchdog_any_status_line_suppresses() {
+  local rec
+  rec=$(make_launch_watchdog_case launch-status launch-status ship 900)
+  read_launch_case_record "$rec"
+  printf 'working: setup started\n' > "$STATE_DIR/$TASK_ID.status"
+  ! FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR" >/dev/null \
+    || fail "spawn with a status line classified as stuck-at-launch"
+  pass "launch watchdog suppresses any nonblank status line"
+}
+
+test_launch_watchdog_branch_commits_suppress() {
+  local rec
+  rec=$(make_launch_watchdog_case launch-commit launch-commit ship 900)
+  read_launch_case_record "$rec"
+  printf 'progress\n' > "$WT_DIR/progress.txt"
+  git -C "$WT_DIR" add progress.txt
+  git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm progress
+  ! FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR" >/dev/null \
+    || fail "spawn with branch commits classified as stuck-at-launch"
+  pass "launch watchdog suppresses branch commits/progress"
+}
+
+test_launch_watchdog_scout_report_progress_suppresses() {
+  local rec report_dir
+  rec=$(make_launch_watchdog_case launch-scout-report launch-scout-report scout 900)
+  read_launch_case_record "$rec"
+  report_dir="$CASE_DIR/data/$TASK_ID"
+  mkdir -p "$report_dir"
+  printf '# Findings\n\nInitial evidence collected.\n' > "$report_dir/report.md"
+  ! FM_DATA_OVERRIDE="$CASE_DIR/data" FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR" >/dev/null \
+    || fail "old scout with report progress classified as stuck-at-launch"
+  pass "launch watchdog suppresses an old scout with useful report progress"
+}
+
+test_launch_watchdog_scout_without_report_progress_surfaces() {
+  local rec reason
+  rec=$(make_launch_watchdog_case launch-scout-no-report launch-scout-no-report scout 900)
+  read_launch_case_record "$rec"
+  reason=$(FM_DATA_OVERRIDE="$CASE_DIR/data" FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR") \
+    || fail "old scout with no report progress did not classify"
+  assert_contains "$reason" "stuck-at-launch: $TASK_ID" "launch watchdog reason did not name the scout"
+  pass "launch watchdog surfaces an old scout without report progress"
+}
+
+test_launch_watchdog_ship_report_progress_ignored() {
+  local rec report_dir reason
+  rec=$(make_launch_watchdog_case launch-ship-report launch-ship-report ship 900)
+  read_launch_case_record "$rec"
+  report_dir="$CASE_DIR/data/$TASK_ID"
+  mkdir -p "$report_dir"
+  printf '# Ship report\n' > "$report_dir/report.md"
+  reason=$(FM_DATA_OVERRIDE="$CASE_DIR/data" FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR") \
+    || fail "ship report progress suppressed the launch watchdog"
+  assert_contains "$reason" "stuck-at-launch: $TASK_ID" "launch watchdog reason did not name the ship"
+  pass "launch watchdog keeps ship progress limited to status and Git"
+}
+
+test_launch_watchdog_missing_or_malformed_metadata_fails_safe() {
+  local rec state
+  rec=$(make_launch_watchdog_case launch-bad-meta launch-bad-meta ship 900)
+  read_launch_case_record "$rec"
+  state=$STATE_DIR
+  ! FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason missing "$state" >/dev/null \
+    || fail "missing meta classified as stuck-at-launch"
+  sed 's/^spawn_ts=.*/spawn_ts=not-an-epoch/' "$state/launch-bad-meta.meta" > "$state/launch-bad-copy.meta"
+  ! FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason launch-bad-copy "$state" >/dev/null \
+    || fail "malformed spawn_ts classified as stuck-at-launch"
+  pass "launch watchdog fails safe on missing or malformed metadata"
+}
+
+test_launch_watchdog_secondmate_suppressed() {
+  local rec
+  rec=$(make_launch_watchdog_case launch-secondmate launch-secondmate secondmate 900)
+  read_launch_case_record "$rec"
+  ! FM_FIRST_PROGRESS_SECS=480 launch_watchdog_reason "$TASK_ID" "$STATE_DIR" >/dev/null \
+    || fail "idle secondmate classified as stuck-at-launch"
+  pass "launch watchdog excludes idle secondmates"
+}
+
+test_launch_watchdog_signal_surfaced_even_if_provably_working() {
+  local rec state fakebin out drain_out pid
+  rec=$(make_launch_watchdog_case launch-signal launch-signal ship 900)
+  read_launch_case_record "$rec"
+  state=$STATE_DIR
+  fakebin="$CASE_DIR/fakebin"
+  out="$CASE_DIR/watch.out"
+  drain_out="$CASE_DIR/drain.out"
+  : > "$state/$TASK_ID.turn-ended"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FIRST_PROGRESS_SECS=480 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a launch-stuck no-verb signal"
+  grep -F "stuck-at-launch: $TASK_ID" "$out" >/dev/null || fail "launch-stuck signal omitted the stuck-at-launch reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after launch-stuck signal failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$state/$TASK_ID.turn-ended" >/dev/null \
+    || fail "launch-stuck signal was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "watcher surfaces a stuck-at-launch no-verb signal even with provably-working run-step evidence"
+}
+
+test_launch_watchdog_stale_surfaced_even_if_provably_working() {
+  local rec state fakebin out drain_out capture_file window key pane_hash pid
+  rec=$(make_launch_watchdog_case launch-stale launch-stale ship 900)
+  read_launch_case_record "$rec"
+  state=$STATE_DIR
+  fakebin="$CASE_DIR/fakebin"
+  out="$CASE_DIR/watch.out"
+  drain_out="$CASE_DIR/drain.out"
+  capture_file="$CASE_DIR/pane.txt"
+  window="test:fm-$TASK_ID"
+  printf 'trust prompt waiting\n' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "trust prompt waiting")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FIRST_PROGRESS_SECS=480 \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher absorbed a stuck-at-launch stale pane"
+  grep -F "stuck-at-launch: $TASK_ID" "$out" >/dev/null || fail "launch-stuck stale omitted the stuck-at-launch reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after launch-stuck stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "launch-stuck stale was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "watcher surfaces a stuck-at-launch stale pane instead of absorbing it as provably working"
+}
+
+test_launch_watchdog_heartbeat_surfaces_missed_launch_stall() {
+  local rec state fakebin out drain_out pid
+  rec=$(make_launch_watchdog_case launch-heartbeat launch-heartbeat ship 900)
+  read_launch_case_record "$rec"
+  state=$STATE_DIR
+  fakebin="$CASE_DIR/fakebin"
+  out="$CASE_DIR/watch.out"
+  drain_out="$CASE_DIR/drain.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_FIRST_PROGRESS_SECS=480 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 50 || fail "heartbeat did not surface the stuck-at-launch scan result"
+  grep -Fx "heartbeat" "$out" >/dev/null || fail "launch-stuck heartbeat did not exit with heartbeat"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after launch-stuck heartbeat failed"
+  grep "$(printf '\theartbeat\t')" "$drain_out" >/dev/null || fail "launch-stuck heartbeat was not queued"
+  pass "heartbeat backstop surfaces a missed stuck-at-launch task"
 }
 
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
@@ -1126,6 +1318,18 @@ test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_signal_crew_provably_working_classifier
+test_launch_watchdog_old_spawn_classifies_actionable
+test_launch_watchdog_recent_spawn_suppressed
+test_launch_watchdog_any_status_line_suppresses
+test_launch_watchdog_branch_commits_suppress
+test_launch_watchdog_scout_report_progress_suppresses
+test_launch_watchdog_scout_without_report_progress_surfaces
+test_launch_watchdog_ship_report_progress_ignored
+test_launch_watchdog_missing_or_malformed_metadata_fails_safe
+test_launch_watchdog_secondmate_suppressed
+test_launch_watchdog_signal_surfaced_even_if_provably_working
+test_launch_watchdog_stale_surfaced_even_if_provably_working
+test_launch_watchdog_heartbeat_surfaces_missed_launch_stall
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced

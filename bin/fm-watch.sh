@@ -6,22 +6,27 @@
 # is absorbed only when the crew shows POSITIVE evidence it is still working (an
 # actively-running no-mistakes step, or a backend busy signal), and surfaced
 # otherwise, so a crew that finishes (or stops and waits) without a current
-# working signal is never silently swallowed. A declared external-wait pause is
-# the separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# working signal is never silently swallowed. A first-progress watchdog also
+# surfaces old ship/scout spawns that have no status line and no progress
+# evidence. A declared external-wait pause is the separate idle absorb case and
+# re-surfaces only on its long bounded cadence, although its initial no-verb
+# status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
-#                          has a captain-relevant verb OR a no-verb signal's crew
-#                          is not provably working, unless afk is active
-#   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
-#                          timer) regardless of what the status log says - an active
-#                          run-step or busy pane outranks even a captain-relevant log
-#                          line, since the crew's own log gets no new entry once
-#                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause is absorbed instead with its own long
-#                          re-surface cadence, never as a wedge. Only when neither
-#                          absorb class applies does the log's last line decide:
+#                          has a captain-relevant verb, a launch watchdog reason,
+#                          OR a no-verb signal's crew is not provably working,
+#                          unless afk is active
+#   stale: <window>        a launch-watchdog stale surfaces before absorb checks.
+#                          Otherwise, a provably-working stale is absorbed (with a
+#                          wedge timer) regardless of what the status log says -
+#                          an active run-step or busy pane outranks even a
+#                          captain-relevant log line, since the crew's own log
+#                          gets no new entry once firstmate hands it to a
+#                          no-mistakes validation. A declared external-wait pause
+#                          is absorbed instead with its own long re-surface
+#                          cadence, never as a wedge. Only when neither absorb
+#                          class applies does the log's last line decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -33,7 +38,7 @@
 #                          resume. Unless afk is active.
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status or stuck-at-launch task, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -48,8 +53,8 @@ mkdir -p "$STATE"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Shared wake classifier (captain-relevant verbs + signal/stale/heartbeat
-# predicates), the SAME library the away-mode daemon uses, so the triage policy
-# has one definition.
+# predicates + launch watchdog), the SAME library the away-mode daemon uses, so
+# the triage policy has one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # The DEFAULT EVENT SOURCE: this watcher's poll loop over the pull primitives
@@ -119,13 +124,14 @@ BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
 # fm-crew-state.sh); a crew that stopped its turn with no running pipeline and no
 # busy pane is SURFACED, so a finish reported only through interactive pane menus
 # (no done: status) is never swallowed. An ACTIONABLE wake (a captain-relevant
-# signal, a no-verb signal whose crew is not provably working, any check, a stale
-# pane whose crew is not provably working, a provably-working stale past the
-# threshold, or anything unknown) is written to the durable queue and exits, which
-# is what wakes the LLM through the background-task completion. The same classifier
-# (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
-# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# signal, a no-verb signal whose crew is not provably working, a stuck-at-launch
+# task, any check, a stale pane whose crew is not provably working, a
+# provably-working stale past the threshold, or anything unknown) is written to
+# the durable queue and exits, which is what wakes the LLM through the
+# background-task completion. The same classifier (fm-classify-lib.sh) backs the
+# away-mode daemon; while state/.afk exists the daemon owns triage, so this
+# watcher reverts to one-shot (enqueue + exit on every wake) and never
+# double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A crew that DECLARED a pause (paused: <reason>, fm-classify-lib.sh) is idling on
 # a known external wait, so its stale pane is absorbed rather than wedge-escalated;
@@ -376,6 +382,17 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+surface_launch_stuck_stale() {  # <window> <hash> <task> <reason>
+  local win=$1 h=$2 task=$3 reason=$4 key wake_reason
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  wake_reason="stale: $win ($reason)"
+  fm_wake_append stale "$win" "$wake_reason" || exit 1
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" "$STATE/.wedge-escalations-$key"
+  mark_launch_watchdog_surfaced "$task"
+  wake "$wake_reason"
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -439,6 +456,14 @@ mark_surfaced() {  # <status-file>
   printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
 }
 
+mark_launch_watchdog_surfaced() {  # <task>
+  local task=$1 sig
+  [ -n "$task" ] || return 0
+  sig=$(launch_watchdog_signature "$task" "$STATE" 2>/dev/null || true)
+  [ -n "$sig" ] || return 0
+  printf '%s' "$sig" > "$(_hb_surfaced_path "$task")"
+}
+
 # Mark every current captain-relevant status as surfaced. Called after the
 # heartbeat backstop enqueues its wake, so the same statuses are not re-surfaced
 # by the next heartbeat.
@@ -450,22 +475,38 @@ mark_all_captain_relevant_surfaced() {
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
+mark_all_launch_watchdog_surfaced() {
+  local task window reason
+  while IFS=$(printf '\t') read -r task window reason; do
+    [ -n "$task" ] || continue
+    mark_launch_watchdog_surfaced "$task"
+  done < <(scan_launch_watchdog_tasks "$STATE")
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
-# any captain-relevant status has NOT already been surfaced to firstmate (its
-# content differs from the .hb-surfaced-<task> marker). Pure detect, no side
-# effects: the caller enqueues first, then marks surfaced. Because every
-# captain-relevant signal/stale already marks itself surfaced when it wakes
-# firstmate, this normally finds nothing and the heartbeat is absorbed; it
-# surfaces only a captain-relevant status the per-wake path absorbed by mistake -
-# the fail-safe backstop.
+# any captain-relevant status or launch-watchdog reason has NOT already been
+# surfaced to firstmate (its content differs from the .hb-surfaced-<task>
+# marker). Pure detect, no side effects: the caller enqueues first, then marks
+# surfaced. Because every captain-relevant signal/stale and stuck-at-launch stale
+# already marks itself surfaced when it wakes firstmate, this normally finds
+# nothing and the heartbeat is absorbed; it surfaces only an actionable status or
+# launch stall the per-wake path missed - the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task last surfaced
+  local f task last surfaced window reason sig
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
   done < <(scan_captain_relevant_statuses "$STATE")
+  while IFS=$(printf '\t') read -r task window reason; do
+    [ -n "$task" ] || continue
+    sig=$(launch_watchdog_signature "$task" "$STATE" 2>/dev/null || true)
+    [ -n "$sig" ] || continue
+    surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
+    [ "$surfaced" = "$sig" ] && continue
+    return 0
+  done < <(scan_launch_watchdog_tasks "$STATE")
   return 1
 }
 
@@ -664,6 +705,9 @@ while :; do
 $pending
 EOF
     reason="signal:$files"
+    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+    launch_reason=$(signal_launch_watchdog_reason "$STATE" $files 2>/dev/null || true)
+    [ -z "$launch_reason" ] || reason="$reason $launch_reason"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file carries a captain-relevant verb;
@@ -678,7 +722,7 @@ EOF
     # check is the only costly one (it may run a bounded no-mistakes call), so the ||
     # ordering evaluates it ONLY for a non-afk, no-captain-verb signal.
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    if afk_present || signal_reason_is_actionable $files || ! signal_crew_provably_working $files; then
+    if afk_present || signal_reason_is_actionable $files || [ -n "$launch_reason" ] || ! signal_crew_provably_working $files; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
@@ -692,6 +736,20 @@ EOF
       done <<EOF
 $pending
 EOF
+      if [ -n "$launch_reason" ]; then
+        for f in $files; do
+          base=${f##*/}
+          case "$base" in
+            *.status) task=${base%.status} ;;
+            *.turn-ended) task=${base%.turn-ended} ;;
+            *) task= ;;
+          esac
+          [ -n "$task" ] || continue
+          lr=$(launch_watchdog_reason "$task" "$STATE" 2>/dev/null || true)
+          [ -n "$lr" ] || continue
+          mark_launch_watchdog_surfaced "$task"
+        done
+      fi
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
@@ -752,6 +810,15 @@ EOF
             fm_wake_append stale "$w" "stale: $w" || exit 1
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
+          fi
+        elif launch_reason=$(launch_watchdog_reason "$task" "$STATE" 2>/dev/null); then
+          # First-progress watchdog: a launch that is old enough, has no status
+          # line, and has no progress evidence must surface even if the pane or run-step
+          # would otherwise look absorbable. When this hash was already absorbed as
+          # working, .stale-since exists; surface once and clear it so the next
+          # cycle does not repeat the same watchdog wake.
+          if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ] || [ -e "$ssf" ]; then
+            surface_launch_stuck_stale "$w" "$h" "$task" "$launch_reason"
           fi
         elif stale_is_terminal "$w" "$STATE"; then
           # The log's last line is captain-relevant - but that alone is not
@@ -880,11 +947,13 @@ EOF
       wake "heartbeat"
     elif heartbeat_scan_finds_actionable; then
       # Backstop: a captain-relevant status the per-wake path absorbed by mistake.
-      # Enqueue first, then mark every captain-relevant status surfaced so the next
-      # heartbeat does not re-fire them (enqueue-before-suppress preserved).
+      # Enqueue first, then mark every captain-relevant status and launch-watchdog
+      # task surfaced so the next heartbeat does not re-fire them
+      # (enqueue-before-suppress preserved).
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
+      mark_all_launch_watchdog_surfaced
       wake "heartbeat"
     else
       touch "$STATE/.last-heartbeat"

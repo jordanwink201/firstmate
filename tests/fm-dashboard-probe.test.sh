@@ -695,7 +695,7 @@ EOF
     "kind=scout" \
     "mode=report"
 
-  FM_DASHBOARD_REPORT_LIMIT=12 run_probe_json "$dir" "$out"
+  FM_DASHBOARD_TODAY=2026-07-18 FM_DASHBOARD_REPORT_LIMIT=12 run_probe_json "$dir" "$out"
 
   assert_jq_true '.fleet | map(select(.task_id == "scout-active")) | length == 1' \
     "$out" "active scout with a report file should not duplicate"

@@ -79,6 +79,8 @@
 # Per-harness turn-end hooks are installed automatically; some live outside the worktree.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Successful spawns record spawn_ts=<epoch-seconds> in state/<id>.meta for the
+# shared first-progress launch watchdog in bin/fm-classify-lib.sh.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
@@ -1118,11 +1120,13 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 TASK_TITLE=$(spawn_task_title "$ID" "$BRIEF")
+SPAWN_TS=$(date +%s)
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "title=$TASK_TITLE"
+  echo "spawn_ts=$SPAWN_TS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   echo "mode=$MODE"

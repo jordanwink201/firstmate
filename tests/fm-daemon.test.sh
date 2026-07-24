@@ -23,6 +23,30 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 
+make_launch_daemon_case() {  # <name> <id> <kind> <spawn-delta-secs>
+  local name=$1 id=$2 kind=$3 delta=$4 dir state proj wt now
+  dir=$(make_supercase "$name")
+  state="$dir/state"
+  proj="$dir/project"
+  wt="$dir/wt"
+  fm_git_worktree "$proj" "$wt" "branch-$name"
+  now=$(date +%s)
+  fm_write_meta "$state/$id.meta" \
+    "window=sess:fm-$id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "spawn_ts=$((now - delta))" \
+    "kind=$kind" \
+    "mode=no-mistakes"
+  printf '%s|%s|%s|%s|%s\n' "$dir" "$state" "$proj" "$wt" "$id"
+}
+
+read_launch_daemon_record() {
+  IFS='|' read -r _case_dir STATE_DIR _proj_dir _wt_dir TASK_ID <<EOF
+$1
+EOF
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -165,6 +189,78 @@ test_stale_paused_classifies_pause() {
   out=$(FM_STATE_OVERRIDE="$state" classify_stale "sess:fm-held-w9" "$state")
   case "$out" in pause\|*) ;; *) fail "declared pause did not classify as pause: $out" ;; esac
   pass "paused reasons with captain phrases remain pause-classified"
+}
+
+test_stale_launch_watchdog_escalates() {
+  local rec out
+  rec=$(make_launch_daemon_case daemon-launch-stale daemon-launch-stale ship 900)
+  read_launch_daemon_record "$rec"
+  out=$(FM_STATE_OVERRIDE="$STATE_DIR" FM_FIRST_PROGRESS_SECS=480 classify_stale "sess:fm-$TASK_ID" "$STATE_DIR")
+  case "$out" in escalate\|*"stuck-at-launch: $TASK_ID"*) ;; *) fail "launch watchdog stale did not escalate in daemon classifier: $out" ;; esac
+  pass "daemon classify_stale escalates stuck-at-launch through the shared classifier"
+}
+
+test_housekeeping_launch_watchdog_scan_escalates() {
+  local rec key
+  rec=$(make_launch_daemon_case daemon-launch-scan daemon-launch-scan ship 900)
+  read_launch_daemon_record "$rec"
+  rm -f "$STATE_DIR/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$STATE_DIR" FM_FIRST_PROGRESS_SECS=480 housekeeping "$STATE_DIR"
+  grep -F "stuck-at-launch: $TASK_ID" "$STATE_DIR/.subsuper-escalations" >/dev/null \
+    || fail "daemon heartbeat scan did not escalate stuck-at-launch"
+  key=$(printf '%s' "$TASK_ID" | tr ':/.' '___')
+  [ -s "$STATE_DIR/.subsuper-seen-launch-$key" ] || fail "daemon launch scan did not record seen marker"
+  pass "daemon catch-all scan escalates stuck-at-launch and records a stable seen marker"
+}
+
+test_handle_wake_coalesced_launch_signal_reports_later_new_task() {
+  local rec case_dir state task_a task_b proj_b wt_b now key_b
+  rec=$(make_launch_daemon_case daemon-launch-coalesced-a daemon-launch-coalesced-a ship 900)
+  IFS='|' read -r case_dir state _proj_a _wt_a task_a <<EOF
+$rec
+EOF
+  task_b=daemon-launch-coalesced-b
+  proj_b="$case_dir/project-b"
+  wt_b="$case_dir/wt-b"
+  fm_git_worktree "$proj_b" "$wt_b" "branch-$task_b"
+  now=$(date +%s)
+  fm_write_meta "$state/$task_b.meta" \
+    "window=sess:fm-$task_b" \
+    "worktree=$wt_b" \
+    "project=$proj_b" \
+    "spawn_ts=$((now - 900))" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  : > "$state/$task_a.turn-ended"
+  : > "$state/$task_b.turn-ended"
+  FM_FIRST_PROGRESS_SECS=480 mark_launch_seen "$state" "$task_a"
+
+  FM_STATE_OVERRIDE="$state" FM_FIRST_PROGRESS_SECS=480 handle_wake "signal: $state/$task_a.turn-ended $state/$task_b.turn-ended" "$state"
+
+  grep -F "stuck-at-launch: $task_b" "$state/.subsuper-escalations" >/dev/null \
+    || fail "coalesced launch signal omitted the later new launch-stuck task"
+  key_b=$(printf '%s' "$task_b" | tr ':/.' '___')
+  [ -s "$state/.subsuper-seen-launch-$key_b" ] \
+    || fail "coalesced launch signal did not mark the reported later task seen"
+  pass "coalesced launch signals report later new launch-stuck tasks"
+}
+
+test_handle_wake_seen_launch_watchdog_does_not_start_stale_marker() {
+  local rec key win
+  rec=$(make_launch_daemon_case daemon-launch-seen-stale daemon-launch-seen-stale ship 900)
+  read_launch_daemon_record "$rec"
+  key=$(printf '%s' "$TASK_ID" | tr ':/.' '___')
+  win="sess:fm-$TASK_ID"
+  FM_FIRST_PROGRESS_SECS=480 mark_launch_seen "$STATE_DIR" "$TASK_ID"
+
+  FM_STATE_OVERRIDE="$STATE_DIR" FM_FIRST_PROGRESS_SECS=480 handle_wake "stale: $win" "$STATE_DIR"
+  [ ! -e "$STATE_DIR/.subsuper-stale-$key" ] || fail "already-seen launch watchdog stale created a generic stale marker"
+  [ ! -s "$STATE_DIR/.subsuper-escalations" ] || fail "already-seen launch watchdog stale escalated again"
+
+  date +%s > "$STATE_DIR/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$STATE_DIR" FM_FIRST_PROGRESS_SECS=480 handle_wake "stale: $win" "$STATE_DIR"
+  [ ! -e "$STATE_DIR/.subsuper-stale-$key" ] || fail "already-seen launch watchdog stale retained a generic stale marker"
+  pass "already-seen launch watchdog stale does not start generic stale tracking"
 }
 
 # handle_wake on a paused stale records a pause marker, drops any pre-existing wedge
@@ -1663,6 +1759,10 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
+test_stale_launch_watchdog_escalates
+test_housekeeping_launch_watchdog_scan_escalates
+test_handle_wake_coalesced_launch_signal_reports_later_new_task
+test_handle_wake_seen_launch_watchdog_does_not_start_stale_marker
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking

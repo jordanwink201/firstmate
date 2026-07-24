@@ -19,6 +19,7 @@ It never tears down a task, merges a PR, dispatches new work, or mutates any tas
 1. **Gather live fleet state with one deterministic command.**
    Run `bin/fm-bearings-snapshot.sh` and read its compact output.
    It is the single bounded, deterministic source for this report and renders TOON by default.
+   `bin/fm-bearings-snapshot.sh --supervision-advice` is a firstmate-internal advisory mode for broad recovery or cleanup triage, not the captain-facing `/bearings` report.
    Do not hand-probe the snapshot schema and do not make ad-hoc `gh-axi`/`gh` calls to assemble fleet facts; this command already assembles them.
    The command's header and `--help` output own its exact fields, bounds, opt-ins, and output contract.
    When the captain asks to include PRs, use the command's live-PR opt-in; otherwise keep the default local-only read.
