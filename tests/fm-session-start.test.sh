@@ -459,7 +459,7 @@ run_session_start_secondmate() {
 }
 
 prepare_session_start_herdr_secondmate() {
-  local name=$1 rec root home fakebin w mate log state id=$SESSION_START_HERDR_SECOND_MATE_ID
+  local name=$1 rec root home fakebin w mate log state id=$SESSION_START_HERDR_SECOND_MATE_ID jq_bin
   rec=$(new_world "$name")
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -491,6 +491,8 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   make_fake_herdr_secondmate_recovery "$fakebin"
+  jq_bin=$(command -v jq) || fail "jq is required by the Herdr recovery fixture"
+  ln -s "$jq_bin" "$fakebin/jq"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$state"
 }

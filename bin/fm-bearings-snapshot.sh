@@ -651,7 +651,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | {id,kind:"secondmate",state:.bearings_state,
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
-         | select(.structured and queued_captain_actionable)
+         | select(.structured and .state == "queued" and queued_captain_actionable)
          | {id,key:.id,verb:"captain-hold",
             summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
      + [ $secondmate_views[] as $m | $m.bearings_captain_holds[]?

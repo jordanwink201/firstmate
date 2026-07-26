@@ -297,6 +297,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+Before reporting a no-mistakes registration or run failure, have the worker capture the final branch and `git rev-parse --short HEAD`.
+Then confirm the no-mistakes `current_branch` and run `head` match the final branch and commit before treating the failure as actionable.
 
 An ask-user finding returns as `needs-decision`; firstmate decides only when the configured authority permits, otherwise escalates to the captain.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command.
