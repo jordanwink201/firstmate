@@ -91,7 +91,7 @@ run_guard_lib() {
       empty) export NO_MISTAKES_GATE= ;;
     esac
     set -eu
-    # shellcheck source=bin/fm-gate-refuse-lib.sh
+    # shellcheck source=/dev/null
     . "$GATE_LIB"
     fm_refuse_if_gate_agent
   ) 2>&1
@@ -224,14 +224,9 @@ case "${1:-}" in
     printf 'send-keys target=%s literal=%s arg=%s\n' "$target" "$literal" "${1:-}" >> "$FM_TMUX_LOG"
     exit 0 ;;
   display-message)
-    # cursor_y feeds the readiness composer probe: a numeric row keeps the
-    # bordered-empty capture below classifying as ready.
-    case "$*" in
-      *cursor_y*) printf '0\n' ;;
-      *) printf '%%1\n' ;;
-    esac
-    exit 0 ;;
-  capture-pane) printf '\xe2\x94\x82 \xe2\x94\x82\n'; exit 0 ;;
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf '%%1\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
 esac
 exit 0
 SH

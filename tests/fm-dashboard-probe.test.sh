@@ -657,8 +657,8 @@ test_completed_scout_reports_feed_answered_lane() {
   state="$dir/state"
   data="$dir/data"
   out="$dir/out.json"
-  today_touch=$(date '+%Y%m%d')
-  old_touch=$(old_touch_spec)
+  today_touch=20260718
+  old_touch=202607171200.00
 
   mkdir -p "$data/scout-active" "$data/scout-new" "$data/scout-old" "$dir/wt-scout-active"
   active_report_path="$data/scout-active/report.md"
@@ -673,7 +673,7 @@ EOF
 # CAD ShowMe scout
 Card: ShowMe is aggregate but this is teaching arithmetic
 Scout date: 2026-07-18
-Checkout: `/Users/jordanwinkelman/Documents/GitHub/computer-applications-demo`
+Checkout: `/opt/fm-dashboard-fixture/computer-applications-demo`
 
 ## Finding
 The lesson teaches scalar arithmetic. The source already appears fixed.

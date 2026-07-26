@@ -35,10 +35,8 @@ case "${1:-}" in
     exit 0
     ;;
   display-message)
-    # cursor_y feeds fm-send's readiness composer probe: a numeric row lets the
-    # (empty) capture classify as an empty composer, i.e. ready.
     case "$*" in
-      *cursor_y*) printf '0\n' ;;
+      *'#{cursor_y}'*) printf '0\n' ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0
