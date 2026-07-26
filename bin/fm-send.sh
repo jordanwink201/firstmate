@@ -224,6 +224,11 @@ if [ "${1:-}" = "--key" ]; then
   fi
 else
   MESSAGE=$*
+  readiness=$(fm_backend_send_readiness "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
+  if [ "$readiness" != ready ]; then
+    echo "error: target not ready for text send: $readiness (tried $RESOLUTION_TRIED)" >&2
+    exit 1
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -248,11 +253,6 @@ else
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
-  fi
-  readiness=$(fm_backend_send_readiness "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
-  if [ "$readiness" != ready ]; then
-    echo "error: target not ready for text send: $readiness (tried $RESOLUTION_TRIED)" >&2
-    exit 1
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before

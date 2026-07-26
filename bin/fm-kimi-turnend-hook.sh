@@ -51,61 +51,16 @@ import sys
 import tempfile
 
 try:
-    import tomllib
+    import tomllib as toml_parser
 except ImportError:
-    tomllib = None
-
-
-class FallbackTOMLDecodeError(ValueError):
-    pass
-
-
-def fallback_toml_loads(text: str):
-    parsed = {}
-    current_table = ""
-    for line_number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("[["):
-            if not line.endswith("]]"):
-                raise FallbackTOMLDecodeError(f"invalid array table on line {line_number}")
-            current_table = line[2:-2].strip()
-            if not current_table:
-                raise FallbackTOMLDecodeError(f"empty array table on line {line_number}")
-            if current_table == "hooks":
-                parsed["hooks"] = []
-            continue
-        if line.startswith("["):
-            if not line.endswith("]"):
-                raise FallbackTOMLDecodeError(f"invalid table on line {line_number}")
-            current_table = line[1:-1].strip()
-            if not current_table:
-                raise FallbackTOMLDecodeError(f"empty table on line {line_number}")
-            if current_table == "hooks":
-                parsed["hooks"] = {}
-            continue
-        if "=" not in line:
-            raise FallbackTOMLDecodeError(f"expected key/value on line {line_number}")
-        key, _value = line.split("=", 1)
-        key = key.strip()
-        if not key:
-            raise FallbackTOMLDecodeError(f"empty key on line {line_number}")
-        if not current_table and key == "hooks":
-            parsed["hooks"] = "scalar"
-    return parsed
+    try:
+        import tomli as toml_parser
+    except ImportError:
+        toml_parser = None
 
 
 def toml_loads(text: str):
-    if tomllib is not None:
-        return tomllib.loads(text)
-    return fallback_toml_loads(text)
-
-
-def toml_decode_error():
-    if tomllib is not None:
-        return tomllib.TOMLDecodeError
-    return FallbackTOMLDecodeError
+    return toml_parser.loads(text)
 
 ACTION = sys.argv[1]
 CONFIG_DIR = sys.argv[2]
@@ -164,9 +119,11 @@ def parse_toml(data: bytes, label: str):
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
         refuse(f"{label} is not UTF-8: {error}.")
+    if toml_parser is None:
+        refuse("python3 with tomllib or tomli is required to validate config.toml.")
     try:
         parsed = toml_loads(text)
-    except toml_decode_error() as error:
+    except toml_parser.TOMLDecodeError as error:
         refuse(f"{label} is malformed TOML: {error}.")
     hooks = parsed.get("hooks")
     if hooks is not None and not isinstance(hooks, list):

@@ -14,6 +14,18 @@ PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
+kimi_toml_parser_available() {
+  "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli
+    except ImportError:
+        raise SystemExit(1)
+PY
+}
+
 assert_source_line() {
   local line=$1
   grep -Fqx -- "$line" "$SPAWN" || fail "existing launch template changed: $line"
@@ -305,11 +317,12 @@ test_kimi_hook_remove_preserves_owned_newline_boundary() {
 }
 
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
-  local missing malformed partial out rc
+  local missing malformed malformed_value partial out rc
   missing="$TMP_ROOT/config-missing"
   malformed="$TMP_ROOT/config-malformed"
+  malformed_value="$TMP_ROOT/config-malformed-value"
   partial="$TMP_ROOT/config-partial"
-  mkdir -p "$missing/.kimi-code" "$malformed/.kimi-code" "$partial/.kimi-code"
+  mkdir -p "$missing/.kimi-code" "$malformed/.kimi-code" "$malformed_value/.kimi-code" "$partial/.kimi-code"
 
   rc=0
   out=$(HOME="$missing" "$KIMI_HOOK" install 2>&1) || rc=$?
@@ -327,6 +340,16 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
     || fail "malformed config refusal changed config bytes"
   assert_absent "$malformed/.kimi-code/fm-turn-end.sh" "malformed config refusal wrote the hook script"
 
+  printf 'model = [\n' > "$malformed_value/.kimi-code/config.toml"
+  cp "$malformed_value/.kimi-code/config.toml" "$malformed_value/before"
+  rc=0
+  out=$(HOME="$malformed_value" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "malformed Kimi config value was accepted"
+  assert_contains "$out" "malformed TOML" "malformed value refusal lacked its concrete reason"
+  cmp -s "$malformed_value/before" "$malformed_value/.kimi-code/config.toml" \
+    || fail "malformed value refusal changed config bytes"
+  assert_absent "$malformed_value/.kimi-code/fm-turn-end.sh" "malformed value refusal wrote the hook script"
+
   printf '# BEGIN FIRSTMATE KIMI TURN-END HOOK\n' > "$partial/.kimi-code/config.toml"
   cp "$partial/.kimi-code/config.toml" "$partial/before"
   rc=0
@@ -336,6 +359,38 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
   cmp -s "$partial/before" "$partial/.kimi-code/config.toml" \
     || fail "partial marker refusal changed config bytes"
   pass "Kimi hook install refuses missing, malformed, and surprising config without writing"
+}
+
+test_kimi_hook_refuses_without_real_toml_parser() {
+  local home config before site out rc
+  home="$TMP_ROOT/config-no-toml-parser"
+  config="$home/.kimi-code/config.toml"
+  before="$home/config-before.toml"
+  site="$home/site"
+  mkdir -p "$home/.kimi-code" "$site"
+  printf '# Captain config\nmodel = "test"\n' > "$config"
+  cp "$config" "$before"
+  cat > "$site/sitecustomize.py" <<'PY'
+import builtins
+
+original_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name in {"tomllib", "tomli"}:
+        raise ImportError(name)
+    return original_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+PY
+
+  rc=0
+  out=$(HOME="$home" PYTHONPATH="$site" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Kimi hook install succeeded without a real TOML parser"
+  assert_contains "$out" "tomllib or tomli is required" "missing-parser refusal did not name the TOML parser requirement"
+  cmp -s "$before" "$config" || fail "missing-parser refusal changed config bytes"
+  assert_absent "$home/.kimi-code/fm-turn-end.sh" "missing-parser refusal wrote the hook script"
+  assert_absent "$home/.kimi-code/fm-turn-end.d" "missing-parser refusal wrote the registry"
+  pass "Kimi hook install refuses without a real TOML parser"
 }
 
 test_kimi_hook_install_refuses_without_jq() {
@@ -672,9 +727,17 @@ test_kimi_bordered_prompt_needs_no_override() {
 
 test_tracked_files_have_no_user_absolute_paths
 test_existing_launch_templates_are_byte_pinned
+
+if ! kimi_toml_parser_available; then
+  test_kimi_hook_refuses_without_real_toml_parser
+  printf 'skip: python3 lacks tomllib/tomli for Kimi install-path tests\n'
+  exit 0
+fi
+
 test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
+test_kimi_hook_refuses_without_real_toml_parser
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token

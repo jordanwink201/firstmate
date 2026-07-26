@@ -41,7 +41,7 @@ case "${1:-}" in
     for a in "$@"; do
       case "$a" in
         *pane_id*) printf '%%1\n'; exit 0 ;;
-        *cursor_y*) printf '0\n'; exit 0 ;;
+        *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_path*) printf '/tmp\n'; exit 0 ;;
       esac
     done
@@ -55,11 +55,15 @@ case "${1:-}" in
       printf 'esc to interrupt\n'
       exit 0
     fi
-    if [ "$mode" = pending ] && has_arg -e "$@"; then
-      printf '\xe2\x94\x82 > typed already \xe2\x94\x82\n'
+    if [ "$mode" = pending ]; then
+      printf '\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n'
+      printf '\xe2\x94\x82 > typed input  \xe2\x94\x82\n'
+      printf '\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n'
       exit 0
     fi
-    printf '\xe2\x94\x82 > \xe2\x94\x82\n'
+    printf '\xe2\x95\xad\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xae\n'
+    printf '\xe2\x94\x82 >  \xe2\x94\x82\n'
+    printf '\xe2\x95\xb0\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x95\xaf\n'
     exit 0
     ;;
   send-keys)
@@ -177,7 +181,7 @@ test_key_path_bypasses_readiness() {
 }
 
 test_secondmate_marker_still_prepended_when_ready() {
-  local home send_log tmux_log out rc got
+  local home send_log tmux_log out rc got body corr
   home=$(setup_home secondmate-ready)
   fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
   send_log="$home/send.log"; tmux_log="$home/tmux.log"
@@ -186,10 +190,30 @@ test_secondmate_marker_still_prepended_when_ready() {
   expect_code 0 "$rc" "ready secondmate send should succeed"$'\n'"$out"
   got=$(cat "$send_log")
   case "$got" in
-    "$FM_FROMFIRST_MARK"audit\ readiness) : ;;
-    *) fail "secondmate ready send should type marker+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
+    "$FM_FROMFIRST_MARK"corr=*audit\ readiness) : ;;
+    *) fail "secondmate ready send should type marker+corr+text"$'\n'"--- bytes ---"$'\n'"$(printf '%s' "$got" | od -An -c)" ;;
   esac
+  body=${got#"$FM_FROMFIRST_MARK"}
+  corr=${body%% *}
+  corr=${corr#corr=}
+  [ "${#corr}" -eq 16 ] || fail "secondmate ready send should include a pending-reply corr"
   pass "fm-send readiness: successful secondmate sends still prepend the from-firstmate marker"
+}
+
+test_secondmate_not_ready_creates_no_pending_reply() {
+  local home send_log tmux_log out rc pending_count
+  home=$(setup_home secondmate-not-ready)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  send_log="$home/send.log"; tmux_log="$home/tmux.log"
+  rc=0
+  out=$(run_send_with_mode busy "$home" "$send_log" "$tmux_log" "fm-domain" "audit readiness" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "busy secondmate target should fail before creating pending state"
+  assert_contains "$out" "error: target not ready for text send: busy" \
+    "busy secondmate target did not report readiness refusal"
+  pending_count=$(find "$home/state/pending-replies" -type f 2>/dev/null | wc -l | tr -d ' ')
+  [ "$pending_count" = 0 ] || fail "readiness refusal created $pending_count pending-reply records"
+  [ ! -s "$send_log" ] || fail "busy secondmate target typed literal text before refusing"
+  pass "fm-send readiness: secondmate refusal creates no pending-reply state"
 }
 
 test_tmux_readiness_maps_states() {
@@ -389,6 +413,7 @@ test_unknown_blocks_before_typing
 test_missing_blocks_before_typing
 test_key_path_bypasses_readiness
 test_secondmate_marker_still_prepended_when_ready
+test_secondmate_not_ready_creates_no_pending_reply
 test_tmux_readiness_maps_states
 test_herdr_readiness_maps_native_and_composer_states
 test_cmux_readiness_maps_busy_footer_and_composer_states
