@@ -47,6 +47,7 @@ If the file is absent, `fm-spawn.sh` falls back to the operator's global `git co
 If neither source provides both values, spawn fails before launching an agent.
 The file is inherited by secondmate homes through the normal local-config propagation path.
 A present primary `config/git-author` is a required inherited identity source: a secondmate launch fails if that file cannot be written into the secondmate home.
+When the primary file is absent, any stale secondmate copy must be removed so the secondmate falls back to its global Git identity instead.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

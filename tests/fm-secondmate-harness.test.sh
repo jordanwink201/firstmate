@@ -254,6 +254,30 @@ test_propagate_lib() {
   assert_contains "$err_text" "fm-config-inherit: error: destination does not allow inherited item" \
     "git-author guard failure did not emit a stderr error"
   [ ! -e "$guard_repo/config/git-author" ] || fail "git-author guard failure still copied the unignored item"
+  rm -f "$src/git-author"
+  mkdir -p "$guard_repo/config"
+  printf 'name=Stale Test\nemail=stale@example.invalid\n' > "$guard_repo/config/git-author"
+  stdout="$d/guard-git-author-absent.out"
+  stderr="$d/guard-git-author-absent.err"
+  if FM_INHERITABLE_CONFIG=git-author propagate_inheritable_config "$src" "$guard_repo/config" >"$stdout" 2>"$stderr"; then
+    fail "stale git-author guard skip should make propagation fail"
+  fi
+  [ ! -s "$stdout" ] || fail "stale git-author guard failure wrote to stdout"
+  err_text=$(cat "$stderr")
+  assert_contains "$err_text" "fm-config-inherit: error: destination does not allow inherited item" \
+    "stale git-author guard failure did not emit a stderr error"
+  [ "$(cat "$guard_repo/config/git-author")" = $'name=Stale Test\nemail=stale@example.invalid' ] \
+    || fail "stale git-author guard failure mutated the wrong path"
+  rm -f "$dest/git-author"
+  mkdir -p "$dest/git-author"
+  stderr="$d/git-author-remove-error.err"
+  if FM_INHERITABLE_CONFIG=git-author propagate_inheritable_config "$src" "$dest" 2>"$stderr"; then
+    fail "stale git-author remove failure returned success"
+  fi
+  assert_contains "$(cat "$stderr")" "fm-config-inherit: error: failed to remove git-author" \
+    "stale git-author remove failure did not emit a stderr error"
+  [ -d "$dest/git-author" ] || fail "stale git-author remove failure removed the wrong path"
+  rm -rf "$dest/git-author"
 
   pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
 }

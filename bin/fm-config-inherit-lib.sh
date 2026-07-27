@@ -134,9 +134,10 @@ destination_allows_inherited_item() {
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
 # Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
-# do not affect the exit code, except a present primary git-author that cannot
-# converge is recorded as an error and returns 2. Other real propagation errors,
-# such as copy or remove failure, return non-zero.
+# do not affect the exit code, except git-author that cannot converge while the
+# primary source or downstream destination exists is recorded as an error and
+# returns 2. Other real propagation errors, such as copy or remove failure,
+# return non-zero.
 record_inheritable_config_result() {
   local item=$1 status=$2 reason=${3:-}
   [ -n "${FM_CONFIG_INHERIT_REPORT:-}" ] || return 0
@@ -144,8 +145,8 @@ record_inheritable_config_result() {
 }
 
 inheritable_config_error_rc() {
-  local item=$1 src=$2
-  if [ "$item" = git-author ] && [ -f "$src" ]; then
+  local item=$1 src=$2 dest=$3
+  if [ "$item" = git-author ] && { [ -f "$src" ] || [ -e "$dest" ] || [ -L "$dest" ]; }; then
     printf '%s\n' 2
   else
     printf '%s\n' 1
@@ -422,7 +423,7 @@ propagate_inheritable_config() {
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
-        if [ "$(inheritable_config_error_rc "$item" "$src")" -eq 2 ]; then
+        if [ "$(inheritable_config_error_rc "$item" "$src" "$dest")" -eq 2 ]; then
           warn_inheritable_config_error "$item" "$dest" "$reason"
           record_inheritable_config_result "$item" error "$reason"
           rc=2
@@ -439,7 +440,7 @@ propagate_inheritable_config() {
           reason="failed to copy"
           warn_inheritable_config_error "$item" "$dest" "$reason"
           record_inheritable_config_result "$item" error "$reason"
-          item_rc=$(inheritable_config_error_rc "$item" "$src")
+          item_rc=$(inheritable_config_error_rc "$item" "$src" "$dest")
           if [ "$item_rc" -eq 2 ]; then
             rc=2
           elif [ "$rc" -eq 0 ]; then
@@ -452,8 +453,14 @@ propagate_inheritable_config() {
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
-        warn_inheritable_config_skip "$item" "$dest_config" "$reason"
-        record_inheritable_config_result "$item" skipped "$reason"
+        if [ "$(inheritable_config_error_rc "$item" "$src" "$dest")" -eq 2 ]; then
+          warn_inheritable_config_error "$item" "$dest" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=2
+        else
+          warn_inheritable_config_skip "$item" "$dest_config" "$reason"
+          record_inheritable_config_result "$item" skipped "$reason"
+        fi
         continue
       fi
       # Primary has no value for this item: mirror the absence downstream.
@@ -463,7 +470,12 @@ propagate_inheritable_config() {
         reason="failed to remove"
         warn_inheritable_config_error "$item" "$dest" "$reason"
         record_inheritable_config_result "$item" error "$reason"
-        rc=1
+        item_rc=$(inheritable_config_error_rc "$item" "$src" "$dest")
+        if [ "$item_rc" -eq 2 ]; then
+          rc=2
+        elif [ "$rc" -eq 0 ]; then
+          rc=1
+        fi
       fi
     else
       record_inheritable_config_result "$item" unchanged ""
