@@ -172,7 +172,18 @@ routing_json_escape() {
 }
 
 routing_file_mtime() {
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || printf '0'
+  local path=$1 mtime
+  mtime=$(stat -f '%m' "$path" 2>/dev/null || true)
+  case "$mtime" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s' "$mtime"; return 0 ;;
+  esac
+  mtime=$(stat -c '%Y' "$path" 2>/dev/null || true)
+  case "$mtime" in
+    ''|*[!0-9]*) ;;
+    *) printf '%s' "$mtime"; return 0 ;;
+  esac
+  printf '0'
 }
 
 codex_tokens_for_worktree() {

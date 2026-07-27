@@ -464,6 +464,25 @@ SH
   chmod +x "$case_dir/fakebin/stat"
 }
 
+add_gnu_stat_filesystem_format() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "-f %m")
+    printf '%s\n' /runner
+    exit 0
+    ;;
+  "-c %Y")
+    printf '%s\n' 123
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/stat"
+}
+
 add_git_status_lock_failure() {
   local case_dir=$1
   cat > "$case_dir/fakebin/git" <<'SH'
@@ -1284,6 +1303,7 @@ test_routing_ledger_harvests_codex_cumulative_tokens() {
   case_dir=$(make_case routing-codex)
   write_meta "$case_dir" no-mistakes ship
   append_meta_profile "$case_dir" codex gpt-5.5 high 5
+  add_gnu_stat_filesystem_format "$case_dir"
   session_dir="$case_dir/codex-sessions/2026/07/09"
   mkdir -p "$session_dir"
   cat > "$session_dir/session.jsonl" <<EOF
