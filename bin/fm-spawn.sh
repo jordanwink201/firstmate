@@ -109,6 +109,12 @@
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
+# Crewmate Git identity: when config/git-author exists under this FM_HOME,
+# fm-spawn sets that identity both as worktree-local Git config and as
+# GIT_AUTHOR_*/GIT_COMMITTER_* env inherited by the launched agent and child
+# processes, including no-mistakes-generated commits. If the file is absent,
+# fm-spawn falls back to the operator's global git user.name/user.email when both
+# are configured; otherwise it preserves legacy ambient Git behavior.
 # Successful spawns record spawn_ts=<epoch-seconds> in state/<id>.meta for the
 # shared first-progress launch watchdog in bin/fm-classify-lib.sh.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
@@ -550,6 +556,72 @@ shell_quote() {
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
 }
+
+GIT_ID_NAME=
+GIT_ID_EMAIL=
+
+spawn_git_identity_from_file() {  # <path>
+  local file=$1 line name email
+  name=
+  email=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) ;;
+      name=*) name=${line#name=} ;;
+      email=*) email=${line#email=} ;;
+      *)
+        echo "error: $file contains unsupported line '$line' (expected name=... or email=...)" >&2
+        return 1
+        ;;
+    esac
+  done < "$file"
+  if [ -z "$name" ] || [ -z "$email" ]; then
+    echo "error: $file must contain both name=... and email=..." >&2
+    return 1
+  fi
+  GIT_ID_NAME=$name
+  GIT_ID_EMAIL=$email
+}
+
+spawn_resolve_git_identity() {
+  local file name email
+  file="$CONFIG/git-author"
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || {
+      echo "error: config/git-author must be a regular file" >&2
+      exit 1
+    }
+    spawn_git_identity_from_file "$file" || exit 1
+    return 0
+  fi
+
+  name=$(git config --global --get user.name 2>/dev/null || true)
+  email=$(git config --global --get user.email 2>/dev/null || true)
+  if [ -n "$name" ] && [ -n "$email" ]; then
+    GIT_ID_NAME=$name
+    GIT_ID_EMAIL=$email
+  fi
+}
+
+spawn_configure_worktree_git_identity() {  # <worktree>
+  local wt=$1
+  [ -n "$GIT_ID_NAME" ] && [ -n "$GIT_ID_EMAIL" ] || return 0
+  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  git -C "$wt" config extensions.worktreeConfig true || return 1
+  git -C "$wt" config --worktree user.name "$GIT_ID_NAME" || return 1
+  git -C "$wt" config --worktree user.email "$GIT_ID_EMAIL" || return 1
+}
+
+spawn_git_identity_export_line() {
+  [ -n "$GIT_ID_NAME" ] && [ -n "$GIT_ID_EMAIL" ] || return 1
+  printf 'export GIT_AUTHOR_NAME=%s GIT_AUTHOR_EMAIL=%s GIT_COMMITTER_NAME=%s GIT_COMMITTER_EMAIL=%s' \
+    "$(shell_quote "$GIT_ID_NAME")" \
+    "$(shell_quote "$GIT_ID_EMAIL")" \
+    "$(shell_quote "$GIT_ID_NAME")" \
+    "$(shell_quote "$GIT_ID_EMAIL")"
+}
+
+spawn_resolve_git_identity
 
 spawn_clean_title() {
   local s
@@ -1420,6 +1492,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+spawn_configure_worktree_git_identity "$WT" || {
+  echo "error: could not configure git author identity for worktree $WT" >&2
+  exit 1
+}
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -1578,6 +1655,10 @@ SPAWN_TS=$(date +%s)
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  if [ -n "$GIT_ID_NAME" ] && [ -n "$GIT_ID_EMAIL" ]; then
+    echo "git_author_name=$GIT_ID_NAME"
+    echo "git_author_email=$GIT_ID_EMAIL"
+  fi
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${ROUTING_RULE_META:-}" ] || echo "rule=$ROUTING_RULE_META"
@@ -1634,6 +1715,10 @@ fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
+if [ -n "$GIT_ID_NAME" ] && [ -n "$GIT_ID_EMAIL" ]; then
+  spawn_send_text_line "$T" "$(spawn_git_identity_export_line)"
+  sleep 0.3
+fi
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"

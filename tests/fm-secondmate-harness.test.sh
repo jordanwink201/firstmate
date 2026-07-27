@@ -14,10 +14,11 @@
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
-#      config/backlog-backend, and config/herdr-presentation-spaces - down into
-#      each secondmate home's config/, so the secondmate's OWN crewmates,
-#      dispatch profiles, backlog backend, and Herdr presentation opt-in inherit
-#      the primary's settings. It is primary-authoritative (re-pushed at
+#      config/git-author, config/backlog-backend, and
+#      config/herdr-presentation-spaces - down into each secondmate home's
+#      config/, so the secondmate's OWN crewmates, dispatch profiles, Git commit
+#      identity, backlog backend, and Herdr presentation opt-in inherit the
+#      primary's settings. It is primary-authoritative (re-pushed at
 #      secondmate spawn, on the bootstrap secondmate sweep, and by config push).
 #      config/secondmate-harness is deliberately NOT inherited (secondmates do
 #      not spawn secondmates). After a successful push that changes allowlisted
@@ -133,6 +134,7 @@ test_propagate_lib() {
   # 1. present source is copied
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
+  printf 'name=Captain Test\nemail=captain@example.invalid\n' > "$src/git-author"
   printf 'manual\n' > "$src/backlog-backend"
   : > "$src/herdr-presentation-spaces"
   stdout="$d/clean-copy.out"
@@ -142,6 +144,7 @@ test_propagate_lib() {
   [ ! -s "$stderr" ] || fail "clean copy wrote to stderr"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated"
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
+  [ "$(cat "$dest/git-author")" = $'name=Captain Test\nemail=captain@example.invalid' ] || fail "git-author not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
 
@@ -159,10 +162,12 @@ test_propagate_lib() {
   # 3. a changed source value converges downstream
   printf '{"default":{"harness":"claude"}}\n' > "$src/crew-dispatch.json"
   printf 'claude\n' > "$src/crew-harness"
+  printf 'name=Jordan Test\nemail=jordan@example.invalid\n' > "$src/git-author"
   printf 'tasks-axi\n' > "$src/backlog-backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
+  [ "$(cat "$dest/git-author")" = $'name=Jordan Test\nemail=jordan@example.invalid' ] || fail "changed git-author did not converge"
   [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
 
   outside="$d/outside-target"
@@ -176,10 +181,11 @@ test_propagate_lib() {
   [ "$(cat "$outside")" = outside ] || fail "destination symlink target was overwritten"
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" "$src/herdr-presentation-spaces"
+  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/git-author" "$src/backlog-backend" "$src/herdr-presentation-spaces"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
+  [ -e "$dest/git-author" ] && fail "git-author absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
 
@@ -202,6 +208,7 @@ test_propagate_lib() {
   printf 'grok\n' > "$src/secondmate-harness"
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
   printf 'codex\n' > "$src/crew-harness"
+  printf 'name=Captain Test\nemail=captain@example.invalid\n' > "$src/git-author"
   printf 'manual\n' > "$src/backlog-backend"
   rm -rf "$d/dest2"
   mkdir -p "$d/dest2"
@@ -209,6 +216,7 @@ test_propagate_lib() {
   [ -e "$d/dest2/secondmate-harness" ] && fail "secondmate-harness was inherited (must not be)"
   [ "$(cat "$d/dest2/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated alongside"
   [ "$(cat "$d/dest2/crew-harness")" = codex ] || fail "crew-harness not propagated alongside"
+  [ "$(cat "$d/dest2/git-author")" = $'name=Captain Test\nemail=captain@example.invalid' ] || fail "git-author not propagated alongside"
   [ "$(cat "$d/dest2/backlog-backend")" = manual ] || fail "backlog-backend not propagated alongside"
 
   # 6. nothing to propagate -> destination dir is never created (a true no-op)
@@ -302,6 +310,7 @@ test_spawn_split_and_inherit() {
   mkdir -p "$w/home/config"
   printf '{"default":{"harness":"claude","model":"haiku","effort":"low"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
+  printf 'name=Captain Test\nemail=captain@example.invalid\n' > "$w/home/config/git-author"
   printf 'codex\n' > "$w/home/config/secondmate-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   make_seeded_home "$sm" sm
@@ -316,6 +325,8 @@ test_spawn_split_and_inherit() {
     || fail "split: home crew-harness not inherited as claude (got '$(cat "$sm/config/crew-harness" 2>/dev/null)')"
   [ "$(cat "$sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude","model":"haiku","effort":"low"}}' ] \
     || fail "split: home crew-dispatch.json not inherited"
+  [ "$(cat "$sm/config/git-author" 2>/dev/null)" = $'name=Captain Test\nemail=captain@example.invalid' ] \
+    || fail "split: home git-author not inherited"
   [ "$(cat "$sm/config/backlog-backend" 2>/dev/null)" = manual ] \
     || fail "split: home backlog-backend not inherited as manual"
   [ -e "$sm/config/secondmate-harness" ] \
@@ -702,7 +713,7 @@ new_world() {
   {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
-    printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
+    printf 'config/crew-harness\nconfig/git-author\nconfig/secondmate-harness\nconfig/backlog-backend\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -897,6 +908,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   # Initial push: primary crew-harness=codex, secondmate-harness=grok (must NOT flow).
   printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'name=Captain Test\nemail=captain@example.invalid\n' > "$w/home/config/git-author"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
   run_bootstrap "$w" >/dev/null
@@ -904,6 +916,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: crew-harness not pushed into the live home"
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"codex"}}' ] \
     || fail "sweep: crew-dispatch.json not pushed into the live home"
+  [ "$(cat "$w/sm/config/git-author" 2>/dev/null)" = $'name=Captain Test\nemail=captain@example.invalid' ] \
+    || fail "sweep: git-author not pushed into the live home"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = manual ] \
     || fail "sweep: backlog-backend not pushed into the live home"
   [ -e "$w/sm/config/secondmate-harness" ] \
@@ -912,22 +926,27 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   # Re-converge: primary changes inherited config values; the home follows on the next sweep.
   printf '{"default":{"harness":"claude"}}\n' > "$w/home/config/crew-dispatch.json"
   printf 'claude\n' > "$w/home/config/crew-harness"
+  printf 'name=Jordan Test\nemail=jordan@example.invalid\n' > "$w/home/config/git-author"
   printf 'tasks-axi\n' > "$w/home/config/backlog-backend"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = claude ] \
     || fail "sweep: home did not re-converge to the primary's new crew-harness"
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"claude"}}' ] \
     || fail "sweep: home did not re-converge to the primary's new crew-dispatch.json"
+  [ "$(cat "$w/sm/config/git-author" 2>/dev/null)" = $'name=Jordan Test\nemail=jordan@example.invalid' ] \
+    || fail "sweep: home did not re-converge to the primary's new git-author"
   [ "$(cat "$w/sm/config/backlog-backend" 2>/dev/null)" = tasks-axi ] \
     || fail "sweep: home did not re-converge to the primary's new backlog-backend"
 
   # Mirror absence: primary clears inherited config; the home's copies are removed.
-  rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" "$w/home/config/backlog-backend"
+  rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" "$w/home/config/git-author" "$w/home/config/backlog-backend"
   run_bootstrap "$w" >/dev/null
   [ -e "$w/sm/config/crew-dispatch.json" ] \
     && fail "sweep: home crew-dispatch.json not removed after the primary cleared it"
   [ -e "$w/sm/config/crew-harness" ] \
     && fail "sweep: home crew-harness not removed after the primary cleared it"
+  [ -e "$w/sm/config/git-author" ] \
+    && fail "sweep: home git-author not removed after the primary cleared it"
   [ -e "$w/sm/config/backlog-backend" ] \
     && fail "sweep: home backlog-backend not removed after the primary cleared it"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"

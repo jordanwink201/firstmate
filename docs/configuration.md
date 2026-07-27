@@ -31,6 +31,22 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Crewmate Git author identity (config/git-author)
+
+`config/git-author` is an optional local, gitignored file that pins the Git identity used by spawned crewmates.
+Its format is two lines:
+
+```text
+name=Jordan Winkelman
+email=jordanwink201@gmail.com
+```
+
+When present, `fm-spawn.sh` writes that identity into the spawned worktree's worktree-local Git config and exports `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` into the worker shell before launching the agent.
+Those environment variables are inherited by child processes, including no-mistakes, so generated commits use the same identity unless a tool deliberately overrides them.
+If the file is absent, `fm-spawn.sh` falls back to the operator's global `git config --global user.name` and `user.email` when both exist.
+If neither source exists, spawn leaves Git identity untouched for backward compatibility.
+The file is inherited by secondmate homes through the normal local-config propagation path.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
