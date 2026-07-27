@@ -876,7 +876,7 @@ arrival_local_day() {
 }
 
 print_arrival_fleet_rows() {
-  local today row id arrived_at arrived_day station reason display_title latest_status pr_url branch commit_short project worktree mode
+  local today id arrived_at arrived_day station reason display_title latest_status pr_url branch commit_short project worktree mode
   local status_verb status_note first_ref attention current_state current_detail source
   [ -f "$ARRIVALS" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
@@ -1054,7 +1054,7 @@ report_project_from_file() {
 }
 
 print_report_fleet_rows() {
-  local row report_mtime report_path id display_title display_subtitle summary project report_url emitted=0
+  local report_mtime report_path id display_title display_subtitle summary project report_url emitted=0
   [ -d "$DATA" ] || return 0
   while IFS=$'\t' read -r report_mtime report_path || [ -n "${report_path:-}" ]; do
     [ -n "${report_path:-}" ] || continue

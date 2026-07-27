@@ -140,7 +140,7 @@ test_hook_wiring() {
     || fail "codex PreToolUse must invoke fm-github-pretool-check.sh exactly once"
 
   settings="$ROOT/.claude/settings.json"
-  jq -e '[.hooks.PreToolUse[0].hooks[].command | select(contains("fm-github-pretool-check.sh") and contains("--claude"))] | length == 1' "$settings" >/dev/null \
+  jq -e '[.hooks.PreToolUse[]?.hooks[]?.command | select(contains("fm-github-pretool-check.sh") and contains("--claude"))] | length == 1' "$settings" >/dev/null \
     || fail "claude PreToolUse must invoke fm-github-pretool-check.sh with --claude"
 
   settings="$ROOT/.grok/hooks/fm-primary-github-check.json"

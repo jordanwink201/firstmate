@@ -338,7 +338,7 @@ test_start_if_needed_allows_existing_operator_profile() {
   local dir fakebin evidence profile
   dir="$TMP_ROOT/operator-profile"
   fakebin=$(make_fake_browser_tools "$dir")
-  profile="/Users/test/.local/share/operator-chrome-profile"
+  profile="/opt/fm-browser-qa/operator-chrome-profile"
   mkdir -p "$dir/browser"
   printf '23456\n' > "$dir/browser/lsof.out"
   printf '%s\n' "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=9222 --user-data-dir=$profile --new-window https://example.test/qa" > "$dir/browser/ps_23456.out"

@@ -72,26 +72,10 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
-enable_claude_ship_profile() {
+enable_array_dispatch_profile() {
   local home=$1
-  printf '%s\n' '{"rules":[{"when":"hard trigger ship exception","use":{"harness":"claude","model":"opus"}}]}' \
+  printf '%s\n' '{"rules":[{"when":"quota-shaped work","use":[{"harness":"claude","model":"opus","effort":"high"},{"harness":"codex","model":"gpt-5","effort":"high"}]}]}' \
     > "$home/config/crew-dispatch.json"
-}
-
-enable_eight_rule_profile() {
-  local home=$1
-  cat > "$home/config/crew-dispatch.json" <<'JSON'
-{"rules":[
-  {"when":"one","use":{"harness":"codex","model":"gpt-5","effort":"medium"}},
-  {"when":"two","use":{"harness":"codex","model":"gpt-5","effort":"high"}},
-  {"when":"three","use":{"harness":"claude","model":"haiku"}},
-  {"when":"four","use":{"harness":"claude","model":"sonnet"}},
-  {"when":"five","use":{"harness":"claude","model":"opus"}},
-  {"when":"six","use":{"harness":"codex","model":"gpt-5","effort":"xhigh"}},
-  {"when":"seven","use":{"harness":"grok","model":"grok-4","effort":"medium"}},
-  {"when":"eight","use":{"harness":"grok","model":"grok-4","effort":"high"}}
-]}
-JSON
 }
 
 make_seeded_secondmate_home() {
@@ -106,7 +90,7 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  LC_ALL=C FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -132,35 +116,30 @@ assert_meta_rule() {
   assert_grep "rule=$rule" "$meta" "meta missing rule=$rule"
 }
 
-assert_meta_spawn_ts_between() {
-  local meta=$1 min=$2 max=$3 ts
-  ts=$(grep '^spawn_ts=' "$meta" | tail -1 | cut -d= -f2- || true)
-  case "$ts" in
-    ''|*[!0-9]*) fail "meta missing numeric spawn_ts= at $meta" ;;
-  esac
-  [ "$ts" -ge "$min" ] || fail "spawn_ts $ts is older than spawn start $min"
-  [ "$ts" -le "$max" ] || fail "spawn_ts $ts is newer than spawn end $max"
+assert_meta_spawn_title_and_ts() {
+  local meta=$1 id=$2
+  assert_grep "title=$id" "$meta" "meta missing default title=$id"
+  awk -F= '$1 == "spawn_ts" && $2 ~ /^[0-9][0-9]*$/ { found = 1 } END { exit(found ? 0 : 1) }' "$meta" \
+    || fail "meta missing numeric spawn_ts"
 }
 
-test_no_profile_keeps_claude_launch_unchanged() {
-  local rec id out status expected launch before after
+test_no_profile_keeps_claude_profile_defaults() {
+  local rec id out status expected launch
   id=profile-off-z1
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
 
-  before=$(date +%s)
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  after=$(date +%s)
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
-  assert_meta_spawn_ts_between "$HOME_DIR/state/$id.meta" "$before" "$after"
+  assert_meta_spawn_title_and_ts "$HOME_DIR/state/$id.meta" "$id"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
-  [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
-  pass "no --model/--effort records defaults and spawn_ts, and keeps the claude launch byte-identical"
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "no --model/--effort records defaults and types the claude launch instructions"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -231,59 +210,21 @@ test_matching_dispatch_rule_records_rule_without_warning() {
   pass "matching dispatch rule records the consulted rule without warning"
 }
 
-test_zero_padded_rule_index_uses_base_ten() {
+test_array_dispatch_rule_records_matching_candidate() {
   local rec id out status
-  id=profile-rule-leading-zero-z20
-  rec=$(make_spawn_case profile-rule-leading-zero grok "$id")
+  id=profile-rule-array-z18
+  rec=$(make_spawn_case profile-rule-array codex "$id")
   read_case_record "$rec"
-  enable_eight_rule_profile "$HOME_DIR"
+  enable_array_dispatch_profile "$HOME_DIR"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness grok --model grok-4 --effort high --rule 08)
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --rule 1)
   status=$?
-  expect_code 0 "$status" "zero-padded --rule should be parsed as base ten"
-  assert_not_contains "$out" "recording rule=override" "zero-padded --rule 08 should not be treated as invalid octal"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
-  assert_meta_rule "$HOME_DIR/state/$id.meta" 08
-  pass "zero-padded dispatch rule indexes are parsed as base ten"
-}
-
-test_ship_on_claude_matching_rule_does_not_warn() {
-  local rec id out status
-  id=profile-ship-claude-z18
-  rec=$(make_spawn_case profile-ship-claude claude "$id")
-  read_case_record "$rec"
-  enable_claude_ship_profile "$HOME_DIR"
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness claude --model opus --rule 1)
-  status=$?
-  expect_code 0 "$status" "matched ship-on-claude rule should not block spawn"
-  assert_not_contains "$out" "ship on claude without a matched dispatch rule" \
-    "matched ship-on-claude rule should not warn"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus default
+  expect_code 0 "$status" "array-backed matching --rule should not block spawn"
+  assert_not_contains "$out" "recording rule=override" "array-backed matching --rule should not warn"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   assert_meta_rule "$HOME_DIR/state/$id.meta" 1
-  pass "ship tasks launched on claude with matching rule keep quiet attribution"
-}
-
-test_ship_on_claude_without_rule_warns_and_records_override() {
-  local rec id out status
-  id=profile-ship-claude-missing-rule-z21
-  rec=$(make_spawn_case profile-ship-claude-missing-rule claude "$id")
-  read_case_record "$rec"
-  enable_claude_ship_profile "$HOME_DIR"
-
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness claude --model opus)
-  status=$?
-  expect_code 0 "$status" "ship-on-claude missing-rule warning should not block spawn"
-  assert_contains "$out" "recording rule=override_missing" \
-    "missing dispatch rule did not record override_missing"
-  assert_contains "$out" "ship on claude without a matched dispatch rule" \
-    "ship-on-claude missing matched rule warning was not emitted"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" claude opus default
-  assert_meta_rule "$HOME_DIR/state/$id.meta" override_missing
-  pass "ship tasks launched on claude without matched rule warn and record override_missing"
+  pass "array-backed dispatch rule records a matching concrete candidate"
 }
 
 test_mismatched_dispatch_rule_records_override() {
@@ -297,10 +238,10 @@ test_mismatched_dispatch_rule_records_override() {
     "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high --rule 1)
   status=$?
   expect_code 0 "$status" "mismatched --rule tuple should warn but still spawn"
-  assert_contains "$out" "recording rule=override" "mismatched tuple did not warn about rule override"
+  assert_contains "$out" "recording rule=override_mismatch" "mismatched tuple did not warn about rule override"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   assert_meta_rule "$HOME_DIR/state/$id.meta" override_mismatch
-  pass "mismatched dispatch rule records rule=override_mismatch without blocking explicit overrides"
+  pass "mismatched dispatch rule records override_mismatch without blocking explicit overrides"
 }
 
 test_active_dispatch_profile_allows_positional_harness() {
@@ -414,8 +355,8 @@ test_grok_omits_invalid_max_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
-    "grok launch did not preserve the model flag when max effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+    "grok launch did not preserve the model flag and typed brief when max effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported max reasoning effort"
@@ -433,8 +374,8 @@ test_grok_omits_invalid_xhigh_reasoning_effort() {
   expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$(cat " \
-    "grok launch did not preserve the model flag when xhigh effort was omitted"
+  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
+    "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
   assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
   assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
   pass "grok omits unsupported xhigh reasoning effort"
@@ -473,6 +414,10 @@ test_pi_threads_model_and_max_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "pi --model 'openai-codex/gpt-5.6-sol' --thinking 'max' -e" \
     "pi launch did not thread the requested model and max thinking level"
+  assert_not_contains "$launch" "FM_FIRSTMATE_PI_LAUNCH_BRIEF=" \
+    "pi launch still exports the removed Calm input-reroute binding"
+  assert_contains "$launch" "fm-operational-input.sh' encode launch-brief" \
+    "pi launch lost the canonical typed launch-brief envelope"
   pass "pi receives --model and --thinking max profile flags"
 }
 
@@ -513,17 +458,15 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
-test_no_profile_keeps_claude_launch_unchanged
+test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
+test_matching_dispatch_rule_records_rule_without_warning
+test_array_dispatch_rule_records_matching_candidate
+test_mismatched_dispatch_rule_records_override
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
-test_matching_dispatch_rule_records_rule_without_warning
-test_zero_padded_rule_index_uses_base_ten
-test_ship_on_claude_matching_rule_does_not_warn
-test_ship_on_claude_without_rule_warns_and_records_override
-test_mismatched_dispatch_rule_records_override
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort

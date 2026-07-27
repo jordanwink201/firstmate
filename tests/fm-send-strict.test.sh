@@ -46,12 +46,11 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
       exit 1
     fi
-    # cursor_y feeds the readiness composer probe: a numeric row keeps the
-    # bordered-empty capture below classifying as ready.
-    if [ "$cursor" = 1 ]; then printf '0\n'; else printf '%%1\n'; fi
+    [ "$cursor" = 1 ] && { printf '1\n'; exit 0; }
+    printf '%%1\n'
     exit 0 ;;
   capture-pane)
-    printf '\xe2\x94\x82 \xe2\x94\x82\n'
+    printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;
   list-windows)
     printf 'foreign:%s\n' "${FM_FAKE_TMUX_WINDOW:-fm-lost}"
