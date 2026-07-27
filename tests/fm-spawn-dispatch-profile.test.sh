@@ -57,6 +57,11 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
+  cat > "$home/gitconfig" <<'GITCONFIG'
+[user]
+	name = Captain Test
+	email = captain@example.invalid
+GITCONFIG
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
@@ -94,6 +99,7 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    GIT_CONFIG_GLOBAL="$home/gitconfig" \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -123,6 +129,58 @@ assert_meta_spawn_title_and_ts() {
     || fail "meta missing numeric spawn_ts"
 }
 
+assert_spawn_git_identity() {
+  local wt=$1 meta=$2
+  [ "$(git -C "$wt" config --worktree --get user.name)" = "Captain Test" ] \
+    || fail "spawn did not set worktree-local user.name"
+  [ "$(git -C "$wt" config --worktree --get user.email)" = "captain@example.invalid" ] \
+    || fail "spawn did not set worktree-local user.email"
+  assert_grep "git_author_name=Captain Test" "$meta" "meta missing git_author_name"
+  assert_grep "git_author_email=captain@example.invalid" "$meta" "meta missing git_author_email"
+}
+
+test_config_git_author_overrides_global_identity() {
+  local rec id out status
+  id=profile-git-author-z0
+  rec=$(make_spawn_case profile-git-author claude "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/config/git-author" <<'GITAUTHOR'
+name=Jordan Test
+email=jordan@example.invalid
+GITAUTHOR
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "config/git-author spawn should succeed"
+  assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
+  [ "$(git -C "$WT_DIR" config --worktree --get user.name)" = "Jordan Test" ] \
+    || fail "config/git-author did not override worktree-local user.name"
+  [ "$(git -C "$WT_DIR" config --worktree --get user.email)" = "jordan@example.invalid" ] \
+    || fail "config/git-author did not override worktree-local user.email"
+  assert_grep "git_author_name=Jordan Test" "$HOME_DIR/state/$id.meta" "meta missing overridden git_author_name"
+  assert_grep "git_author_email=jordan@example.invalid" "$HOME_DIR/state/$id.meta" "meta missing overridden git_author_email"
+  pass "config/git-author overrides global git identity for spawned worktrees"
+}
+
+test_spawn_fails_without_complete_git_identity() {
+  local rec id out status
+  id=profile-git-author-missing-z00
+  rec=$(make_spawn_case profile-git-author-missing claude "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/gitconfig" <<'GITCONFIG'
+[user]
+	name = Captain Test
+GITCONFIG
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn without a complete git identity should fail"
+  assert_contains "$out" "no complete Git author identity configured" \
+    "missing identity did not fail closed with a useful diagnostic"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing git identity still launched the agent"
+  pass "spawn fails closed without config/git-author or complete global identity"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -135,6 +193,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
   assert_meta_spawn_title_and_ts "$HOME_DIR/state/$id.meta" "$id"
+  assert_spawn_git_identity "$WT_DIR" "$HOME_DIR/state/$id.meta"
 
   launch=$(cat "$LAUNCH_LOG")
   expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
@@ -458,6 +517,8 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_config_git_author_overrides_global_identity
+test_spawn_fails_without_complete_git_identity
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout

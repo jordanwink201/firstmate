@@ -51,6 +51,13 @@ export FM_GATE_REFUSE_BYPASS=1
 # The dedicated regression is
 # tests/fm-backend.test.sh:test_spawn_symlinked_project_prefix_avoids_false_refusal.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-backend-autodetect-smoke.XXXXXX")
+GIT_CONFIG_GLOBAL="$TMP_ROOT/gitconfig"
+export GIT_CONFIG_GLOBAL
+{
+  printf '%s\n' '[user]'
+  printf '\tname = %s\n' 'Firstmate Tests'
+  printf '\temail = %s\n' 'tests@example.invalid'
+} > "$GIT_CONFIG_GLOBAL"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-autodetect-smoke-concurrency-h3) || {
   rm -rf "$TMP_ROOT"
