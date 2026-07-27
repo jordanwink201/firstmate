@@ -143,11 +143,27 @@ fm_test_node_imports() {
 
 # --- deterministic git identity and fixtures --------------------------------
 
-# fm_git_identity [name] [email]: export a fixed author/committer identity so
-# fixture commits never depend on the host git config.
+# fm_git_identity [name] [email]: export a fixed author/committer identity and
+# isolated global Git config so fixture commits and spawn tests never depend on
+# the host git config.
 fm_git_identity() {
+  local git_config_dir
   export GIT_AUTHOR_NAME=${1:-fmtest} GIT_AUTHOR_EMAIL=${2:-fmtest@example.invalid}
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+  if [ -z "${FM_TEST_GIT_CONFIG_GLOBAL:-}" ]; then
+    git_config_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-gitconfig.XXXXXX") || return 1
+    if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
+      trap fm_test_cleanup EXIT
+    fi
+    FM_TEST_CLEANUP_DIRS+=("$git_config_dir")
+    export FM_TEST_GIT_CONFIG_GLOBAL="$git_config_dir/gitconfig"
+  fi
+  export GIT_CONFIG_GLOBAL="$FM_TEST_GIT_CONFIG_GLOBAL"
+  {
+    printf '%s\n' '[user]'
+    printf '\tname = %s\n' "$GIT_AUTHOR_NAME"
+    printf '\temail = %s\n' "$GIT_AUTHOR_EMAIL"
+  } > "$GIT_CONFIG_GLOBAL"
 }
 
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one

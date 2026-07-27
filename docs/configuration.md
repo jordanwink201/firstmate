@@ -44,8 +44,9 @@ email=jordanwink201@gmail.com
 When present, `fm-spawn.sh` writes that identity into the spawned worktree's worktree-local Git config and exports `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` into the worker shell before launching the agent.
 Those environment variables are inherited by child processes, including no-mistakes, so generated commits use the same identity unless a tool deliberately overrides them.
 If the file is absent, `fm-spawn.sh` falls back to the operator's global `git config --global user.name` and `user.email` when both exist.
-If neither source exists, spawn leaves Git identity untouched for backward compatibility.
+If neither source provides both values, spawn fails before launching an agent.
 The file is inherited by secondmate homes through the normal local-config propagation path.
+A present primary `config/git-author` is a required inherited identity source: a secondmate launch fails if that file cannot be written into the secondmate home.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 

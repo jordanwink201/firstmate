@@ -162,6 +162,25 @@ GITAUTHOR
   pass "config/git-author overrides global git identity for spawned worktrees"
 }
 
+test_spawn_fails_without_complete_git_identity() {
+  local rec id out status
+  id=profile-git-author-missing-z00
+  rec=$(make_spawn_case profile-git-author-missing claude "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/gitconfig" <<'GITCONFIG'
+[user]
+	name = Captain Test
+GITCONFIG
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "spawn without a complete git identity should fail"
+  assert_contains "$out" "no complete Git author identity configured" \
+    "missing identity did not fail closed with a useful diagnostic"
+  [ ! -s "$LAUNCH_LOG" ] || fail "missing git identity still launched the agent"
+  pass "spawn fails closed without config/git-author or complete global identity"
+}
+
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
   id=profile-off-z1
@@ -499,6 +518,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_config_git_author_overrides_global_identity
+test_spawn_fails_without_complete_git_identity
 test_no_profile_keeps_claude_profile_defaults
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout

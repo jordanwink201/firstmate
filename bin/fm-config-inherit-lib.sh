@@ -4,9 +4,10 @@
 # config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
-# spawn on codex too, primary config/backlog-backend=manual makes that home
-# hand-edit backlog files too, and primary config/herdr-presentation-spaces
-# enables the same default-off Herdr presentation projection). It also pushes
+# spawn on codex too, primary config/git-author pins their commit identity,
+# primary config/backlog-backend=manual makes that home hand-edit backlog files
+# too, and primary config/herdr-presentation-spaces enables the same default-off
+# Herdr presentation projection). It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
 #
@@ -133,12 +134,22 @@ destination_allows_inherited_item() {
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
 # Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
-# do not affect the exit code. Returns non-zero only when a real propagation
-# error, such as copy or remove failure, occurs.
+# do not affect the exit code, except a present primary git-author that cannot
+# converge is recorded as an error and returns 2. Other real propagation errors,
+# such as copy or remove failure, return non-zero.
 record_inheritable_config_result() {
   local item=$1 status=$2 reason=${3:-}
   [ -n "${FM_CONFIG_INHERIT_REPORT:-}" ] || return 0
   printf '%s\t%s\t%s\n' "$item" "$status" "$reason" >> "$FM_CONFIG_INHERIT_REPORT" 2>/dev/null || true
+}
+
+inheritable_config_error_rc() {
+  local item=$1 src=$2
+  if [ "$item" = git-author ] && [ -f "$src" ]; then
+    printf '%s\n' 2
+  else
+    printf '%s\n' 1
+  fi
 }
 
 inheritable_config_skip_reason() {
@@ -377,19 +388,28 @@ propagate_shared_captain_preferences() {
 }
 
 propagate_secondmate_inheritance() {
-  local src_home=$1 dest_home=$2 src_config=${3:-} src_data=${4:-} rc
+  local src_home=$1 dest_home=$2 src_config=${3:-} src_data=${4:-} rc config_rc
   [ -n "$src_home" ] || return 1
   [ -n "$dest_home" ] || return 1
   [ -n "$src_config" ] || src_config="$src_home/config"
   [ -n "$src_data" ] || src_data="$src_home/data"
   rc=0
-  propagate_inheritable_config "$src_config" "$dest_home/config" || rc=1
-  propagate_shared_captain_preferences "$src_data" "$dest_home/data" || rc=1
+  propagate_inheritable_config "$src_config" "$dest_home/config" || {
+    config_rc=$?
+    if [ "$config_rc" -eq 2 ]; then
+      rc=2
+    else
+      rc=1
+    fi
+  }
+  propagate_shared_captain_preferences "$src_data" "$dest_home/data" || {
+    [ "$rc" -eq 2 ] || rc=1
+  }
   return "$rc"
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest reason rc item_rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -402,8 +422,14 @@ propagate_inheritable_config() {
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
-        warn_inheritable_config_skip "$item" "$dest_config" "$reason"
-        record_inheritable_config_result "$item" skipped "$reason"
+        if [ "$(inheritable_config_error_rc "$item" "$src")" -eq 2 ]; then
+          warn_inheritable_config_error "$item" "$dest" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=2
+        else
+          warn_inheritable_config_skip "$item" "$dest_config" "$reason"
+          record_inheritable_config_result "$item" skipped "$reason"
+        fi
         continue
       fi
       if [ -L "$dest" ] || [ ! -f "$dest" ] || ! cmp -s "$src" "$dest"; then
@@ -413,7 +439,12 @@ propagate_inheritable_config() {
           reason="failed to copy"
           warn_inheritable_config_error "$item" "$dest" "$reason"
           record_inheritable_config_result "$item" error "$reason"
-          rc=1
+          item_rc=$(inheritable_config_error_rc "$item" "$src")
+          if [ "$item_rc" -eq 2 ]; then
+            rc=2
+          elif [ "$rc" -eq 0 ]; then
+            rc=1
+          fi
         fi
       else
         record_inheritable_config_result "$item" unchanged ""

@@ -243,6 +243,17 @@ test_propagate_lib() {
   assert_contains "$err_text" "fm-config-inherit: warning: skipped crew-dispatch.json" \
     "guard skip did not emit a stderr warning"
   [ ! -e "$guard_repo/config/crew-dispatch.json" ] || fail "guard skip still copied the unignored item"
+  printf 'name=Captain Test\nemail=captain@example.invalid\n' > "$src/git-author"
+  stdout="$d/guard-git-author.out"
+  stderr="$d/guard-git-author.err"
+  if FM_INHERITABLE_CONFIG=git-author propagate_inheritable_config "$src" "$guard_repo/config" >"$stdout" 2>"$stderr"; then
+    fail "git-author guard skip should make propagation fail"
+  fi
+  [ ! -s "$stdout" ] || fail "git-author guard failure wrote to stdout"
+  err_text=$(cat "$stderr")
+  assert_contains "$err_text" "fm-config-inherit: error: destination does not allow inherited item" \
+    "git-author guard failure did not emit a stderr error"
+  [ ! -e "$guard_repo/config/git-author" ] || fail "git-author guard failure still copied the unignored item"
 
   pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
 }
@@ -332,6 +343,35 @@ test_spawn_split_and_inherit() {
   [ -e "$sm/config/secondmate-harness" ] \
     && fail "split: secondmate-harness leaked into the secondmate home"
   pass "B2 spawn: secondmate runs the secondmate harness; its home inherits declared config"
+}
+
+test_spawn_blocks_unconverged_git_author_inheritance() {
+  local w head sm out status fakebin tmp
+  w=$(new_world spawn-git-author-required)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  sm="$w/sm"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'name=Captain Test\nemail=captain@example.invalid\n' > "$w/home/config/git-author"
+  tmp="$w/sm/.gitignore.tmp"
+  grep -v '^config/git-author$' "$w/sm/.gitignore" > "$tmp"
+  mv "$tmp" "$w/sm/.gitignore"
+  fakebin=$(make_noop_tmux "$w/tmux-git-author-required")
+
+  out=$(PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1); status=$?
+
+  expect_code 1 "$status" "secondmate spawn should fail when git-author cannot converge"
+  assert_contains "$out" "git-author inheritance failed" \
+    "secondmate spawn did not surface the required git-author inheritance failure"
+  [ ! -e "$w/sm/config/git-author" ] || fail "blocked spawn still copied git-author"
+  assert_not_contains "$(cat "$w/home/state/sm.meta")" "harness=" \
+    "blocked spawn still published fresh secondmate launch metadata"
+  pass "B2a spawn blocks when required git-author inheritance cannot converge"
 }
 
 # Backward-compat: secondmate-harness absent -> the secondmate launches on the
@@ -2071,6 +2111,7 @@ test_harness_resolution
 test_secondmate_model_effort_tokens
 test_propagate_lib
 test_spawn_split_and_inherit
+test_spawn_blocks_unconverged_git_author_inheritance
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins

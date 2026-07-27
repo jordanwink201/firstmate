@@ -113,8 +113,8 @@
 # fm-spawn sets that identity both as worktree-local Git config and as
 # GIT_AUTHOR_*/GIT_COMMITTER_* env inherited by the launched agent and child
 # processes, including no-mistakes-generated commits. If the file is absent,
-# fm-spawn falls back to the operator's global git user.name/user.email when both
-# are configured; otherwise it preserves legacy ambient Git behavior.
+# fm-spawn falls back to the operator's global git user.name/user.email. A spawn
+# fails when neither source provides a complete identity.
 # Successful spawns record spawn_ts=<epoch-seconds> in state/<id>.meta for the
 # shared first-progress launch watchdog in bin/fm-classify-lib.sh.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
@@ -600,12 +600,15 @@ spawn_resolve_git_identity() {
   if [ -n "$name" ] && [ -n "$email" ]; then
     GIT_ID_NAME=$name
     GIT_ID_EMAIL=$email
+    return 0
   fi
+  echo "error: no complete Git author identity configured; create config/git-author or set global git user.name and user.email" >&2
+  exit 1
 }
 
 spawn_configure_worktree_git_identity() {  # <worktree>
   local wt=$1
-  [ -n "$GIT_ID_NAME" ] && [ -n "$GIT_ID_EMAIL" ] || return 0
+  [ -n "$GIT_ID_NAME" ] && [ -n "$GIT_ID_EMAIL" ] || return 1
   git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   git -C "$wt" config extensions.worktreeConfig true || return 1
   git -C "$wt" config --worktree user.name "$GIT_ID_NAME" || return 1
@@ -1004,8 +1007,14 @@ if [ "$KIND" = secondmate ]; then
   CONFIG_INHERIT_LOCK_HELD=1
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into this secondmate home (fm-config-inherit-lib.sh).
-  propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
-    || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+  inherit_rc=0
+  propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" || inherit_rc=$?
+  if [ "$inherit_rc" -eq 2 ]; then
+    echo "error: secondmate $ID git-author inheritance failed for $PROJ_ABS" >&2
+    exit 1
+  elif [ "$inherit_rc" -ne 0 ]; then
+    echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+  fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
