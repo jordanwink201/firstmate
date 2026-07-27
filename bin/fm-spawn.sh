@@ -115,8 +115,13 @@
 # processes, including no-mistakes-generated commits. If the file is absent,
 # fm-spawn falls back to the operator's global git user.name/user.email. A spawn
 # fails when neither source provides a complete identity.
-# Successful spawns record spawn_ts=<epoch-seconds> in state/<id>.meta for the
-# shared first-progress launch watchdog in bin/fm-classify-lib.sh.
+# Successful spawns write these base state/<id>.meta fields: window=, worktree=,
+# project=, title=, spawn_ts=, harness=, kind=, mode=, yolo=, tasktmp=,
+# git_author_name=, git_author_email=, model=, effort=, optional rule=, and
+# home=/projects= for secondmate spawns. Backend-specific, PR, and X-mode
+# appenders own their own fields.
+# spawn_ts=<epoch-seconds> supports the shared first-progress launch watchdog
+# in bin/fm-classify-lib.sh.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.

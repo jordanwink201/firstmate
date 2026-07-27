@@ -42,7 +42,7 @@ name=Jordan Winkelman
 email=jordanwink201@gmail.com
 ```
 
-When present, `fm-spawn.sh` writes that identity into the spawned worktree's worktree-local Git config and exports `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` into the worker shell before launching the agent.
+After resolving an identity from `config/git-author` or global Git config, `fm-spawn.sh` writes it into the spawned worktree's worktree-local Git config and exports `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` into the worker shell before launching the agent.
 Those environment variables are inherited by child processes, including no-mistakes, so generated commits use the same identity unless a tool deliberately overrides them.
 If the file is absent, `fm-spawn.sh` falls back to the operator's global `git config --global user.name` and `user.email` when both exist.
 If neither source provides both values, spawn fails before launching an agent.
@@ -299,11 +299,11 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap, prints each live home's `crew-dispatch.json`, `crew-harness`, `backlog-backend`, `herdr-presentation-spaces`, and `data/captain-shared.md` result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors or config-reread send failures.
+It uses the same live secondmate discovery and propagation helper as bootstrap, prints each declared inherited local-material result as `pushed`, `unchanged`, `skipped`, or `error`, and exits non-zero for real propagation errors, required `config/git-author` convergence failures, or config-reread send failures.
 When an allowlisted config item changes for an already-running home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 The locked bootstrap inheritance pass uses the same per-home changed-set and reread path for already-running homes; see `secondmate-provisioning` for the single contract owner.
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
-Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
+Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings unless the item is a required `config/git-author` convergence.
 
 ## Browser QA
 
