@@ -8,6 +8,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grok-harness)
+fm_git_identity fmtest fmtest@example.invalid
 
 make_spawn_fakebin() {
   local dir=$1 fakebin

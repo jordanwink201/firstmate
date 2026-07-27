@@ -7,6 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
+fm_git_identity fmtest fmtest@example.invalid
 
 make_orca_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"

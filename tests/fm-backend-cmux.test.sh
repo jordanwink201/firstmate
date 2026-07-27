@@ -16,6 +16,7 @@ set -u
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the cmux adapter)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-cmux-tests)
+fm_git_identity fmtest fmtest@example.invalid
 
 # make_cmux_fakebin: a `cmux` stub that logs every invocation (one line,
 # unit-separated args, to $FM_CMUX_LOG) and returns the canned response for

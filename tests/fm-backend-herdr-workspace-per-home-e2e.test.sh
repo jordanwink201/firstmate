@@ -61,6 +61,13 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # canonicalized project and backend cwd comparisons in the worktree-discovery
 # poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
+GIT_CONFIG_GLOBAL="$TMP_ROOT/gitconfig"
+export GIT_CONFIG_GLOBAL
+{
+  printf '%s\n' '[user]'
+  printf '\tname = %s\n' 'Firstmate Tests'
+  printf '\temail = %s\n' 'tests@example.invalid'
+} > "$GIT_CONFIG_GLOBAL"
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"
 WT1=; WT2=

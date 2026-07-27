@@ -21,6 +21,13 @@ REAL_HERDR=$(command -v herdr)
 REAL_TREEHOUSE=$(command -v treehouse)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
+GIT_CONFIG_GLOBAL="$TMP_ROOT/gitconfig"
+export GIT_CONFIG_GLOBAL
+{
+  printf '%s\n' '[user]'
+  printf '\tname = %s\n' 'Firstmate Tests'
+  printf '\temail = %s\n' 'tests@example.invalid'
+} > "$GIT_CONFIG_GLOBAL"
 FAKEBIN="$TMP_ROOT/fakebin"
 HERDR_CALL_LOG="$TMP_ROOT/herdr-calls.log"
 TREEHOUSE_CALL_LOG="$TMP_ROOT/treehouse-calls.log"

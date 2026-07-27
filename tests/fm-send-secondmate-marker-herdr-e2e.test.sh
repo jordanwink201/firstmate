@@ -34,6 +34,13 @@ done
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION=$("$LAB_HELPER" name fm-send-secondmate-marker-v7)
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-send-marker-herdr-e2e.XXXXXX")
+GIT_CONFIG_GLOBAL="$TMP_ROOT/gitconfig"
+export GIT_CONFIG_GLOBAL
+{
+  printf '%s\n' '[user]'
+  printf '\tname = %s\n' 'Firstmate Tests'
+  printf '\temail = %s\n' 'tests@example.invalid'
+} > "$GIT_CONFIG_GLOBAL"
 SENDER_HOME="$TMP_ROOT/sender-home"
 SECOND_HOME="$TMP_ROOT/secondmate-home"
 CAPTURE="$TMP_ROOT/pi-before-agent.jsonl"

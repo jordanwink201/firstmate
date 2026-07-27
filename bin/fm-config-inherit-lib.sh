@@ -420,6 +420,15 @@ propagate_inheritable_config() {
     esac
     src="$src_config/$item"
     dest="$dest_config/$item"
+    if [ "$item" = git-author ] \
+      && { [ -e "$src" ] || [ -L "$src" ]; } \
+      && { [ ! -f "$src" ] || [ -L "$src" ]; }; then
+      reason="source must be a regular file"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=2
+      continue
+    fi
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)

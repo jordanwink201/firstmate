@@ -34,6 +34,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ## Crewmate Git author identity (config/git-author)
 
 `config/git-author` is an optional local, gitignored file that pins the Git identity used by spawned crewmates.
+It must be a regular file; symlinks and non-file paths are rejected.
 Its format is two lines:
 
 ```text

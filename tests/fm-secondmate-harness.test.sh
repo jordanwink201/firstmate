@@ -254,7 +254,29 @@ test_propagate_lib() {
   assert_contains "$err_text" "fm-config-inherit: error: destination does not allow inherited item" \
     "git-author guard failure did not emit a stderr error"
   [ ! -e "$guard_repo/config/git-author" ] || fail "git-author guard failure still copied the unignored item"
+  rm -f "$src/git-author" "$dest/git-author"
+  printf 'name=Linked Test\nemail=linked@example.invalid\n' > "$d/linked-git-author"
+  ln -s "$d/linked-git-author" "$src/git-author"
+  stdout="$d/git-author-symlink-source.out"
+  stderr="$d/git-author-symlink-source.err"
+  if FM_INHERITABLE_CONFIG=git-author propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr"; then
+    fail "symlink git-author source should make propagation fail"
+  fi
+  [ ! -s "$stdout" ] || fail "symlink git-author source failure wrote to stdout"
+  assert_contains "$(cat "$stderr")" "fm-config-inherit: error: source must be a regular file git-author" \
+    "symlink git-author source failure did not emit a stderr error"
+  [ ! -e "$dest/git-author" ] || fail "symlink git-author source still copied the target"
   rm -f "$src/git-author"
+  mkdir -p "$src/git-author"
+  stdout="$d/git-author-dir-source.out"
+  stderr="$d/git-author-dir-source.err"
+  if FM_INHERITABLE_CONFIG=git-author propagate_inheritable_config "$src" "$dest" >"$stdout" 2>"$stderr"; then
+    fail "directory git-author source should make propagation fail"
+  fi
+  [ ! -s "$stdout" ] || fail "directory git-author source failure wrote to stdout"
+  assert_contains "$(cat "$stderr")" "fm-config-inherit: error: source must be a regular file git-author" \
+    "directory git-author source failure did not emit a stderr error"
+  rm -rf "$src/git-author"
   mkdir -p "$guard_repo/config"
   printf 'name=Stale Test\nemail=stale@example.invalid\n' > "$guard_repo/config/git-author"
   stdout="$d/guard-git-author-absent.out"
