@@ -559,19 +559,40 @@ test_successful_evidence_cleans_up_axi_session() {
   pass "fm-browser-qa.sh: successful evidence cleans up its AXI bridge"
 }
 
-test_cleanup_error_does_not_mask_success() {
-  local dir fakebin evidence
-  dir="$TMP_ROOT/cleanup-stop-fail"
+test_cleanup_error_preserves_original_status() {
+  local dir fakebin evidence out status failure_dir failure_fakebin
+  dir="$TMP_ROOT/cleanup-stop-fail-success"
   fakebin=$(make_fake_browser_tools "$dir")
   write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
   : > "$dir/browser/stop_fail"
   evidence="$dir/evidence"
 
+  set +e
   run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" >/dev/null
+  status=$?
+  set -e
 
+  expect_code 0 "$status" "cleanup failure should preserve a successful evidence status"
   assert_present "$evidence/report.md" "cleanup failure should not mask successful evidence"
   assert_present "$dir/browser/axi_stopped" "cleanup should still attempt to stop the AXI bridge"
-  pass "fm-browser-qa.sh: cleanup errors do not mask a successful run"
+
+  failure_dir="$TMP_ROOT/cleanup-stop-fail-evidence"
+  failure_fakebin=$(make_fake_browser_tools "$failure_dir")
+  write_page "$failure_dir/browser" 1 "https://example.test/qa" "QA Page"
+  : > "$failure_dir/browser/snapshot_fail"
+  : > "$failure_dir/browser/stop_fail"
+
+  set +e
+  out=$(run_qa "$failure_fakebin" "$failure_dir/browser" --url "https://example.test/qa" --out "$failure_dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "cleanup failure should preserve a failed evidence status"
+  assert_contains "$out" "blocked: snapshot evidence failed" \
+    "cleanup failure should not replace the evidence failure"
+  assert_present "$failure_dir/browser/axi_stopped" \
+    "failed evidence cleanup should still attempt to stop the AXI bridge"
+  pass "fm-browser-qa.sh: cleanup errors preserve the original run status"
 }
 
 test_snapshot_failure_blocks() {
@@ -634,14 +655,17 @@ test_console_and_network_failures_warn_only() {
 }
 
 test_signal_cleans_up_axi_session() {
-  local dir fakebin pid status tries
+  local dir fakebin pid status tries tmp_root
   dir="$TMP_ROOT/cleanup-signal"
   fakebin=$(make_fake_browser_tools "$dir")
+  tmp_root="$dir/tmp"
+  mkdir -p "$tmp_root"
 
   env \
     "PATH=$fakebin:/usr/bin:/bin" \
     "FM_FAKE_BROWSER_DIR=$dir/browser" \
     "FM_BROWSER_QA_OPEN_SETTLE=1" \
+    "TMPDIR=$tmp_root" \
     bash "$ROOT/bin/fm-browser-qa.sh" --url "https://example.test/qa" --out "$dir/evidence" > "$dir/output.txt" 2>&1 &
   pid=$!
   tries=20
@@ -666,7 +690,35 @@ if (sessions.size !== 1 || stops.length !== 1) process.exit(1);
 if (![...sessions].every((session) => /^[A-Za-z0-9._-]{1,64}$/.test(session))) process.exit(1);
 if (rows.some(([, , browserUrl]) => browserUrl !== 'http://127.0.0.1:9222')) process.exit(1);
 NODE
+  assert_tmp_root_empty "$tmp_root" "TERM should remove its temporary files"
   pass "fm-browser-qa.sh: TERM cleans up its AXI bridge"
+}
+
+test_signal_during_temp_allocation_removes_temp_dir() {
+  local dir fakebin out status tmp_root
+  dir="$TMP_ROOT/cleanup-allocation-signal"
+  fakebin=$(make_fake_browser_tools "$dir")
+  tmp_root="$dir/tmp"
+  mkdir -p "$tmp_root"
+
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+tmp_dir=$(/usr/bin/mktemp "$@")
+printf '%s\n' "$tmp_dir"
+kill -TERM "$PPID"
+SH
+  chmod +x "$fakebin/mktemp"
+
+  set +e
+  out=$(TMPDIR="$tmp_root" run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 143 "$status" "TERM during temporary allocation should preserve its signal status"
+  assert_tmp_root_empty "$tmp_root" "TERM during temporary allocation should remove its temporary directory"
+  assert_absent "$dir/browser/axi.log" "TERM before AXI allocation should not stop an unowned session"
+  pass "fm-browser-qa.sh: TERM during temporary allocation cleans up"
 }
 
 test_concurrent_logical_session_labels_use_distinct_axi_sessions() {
@@ -725,9 +777,10 @@ test_unrelated_sign_in_tab_does_not_report_auth_expired
 test_sign_in_substring_title_is_not_auth
 test_trailing_slash_url_is_normalized
 test_successful_evidence_cleans_up_axi_session
-test_cleanup_error_does_not_mask_success
+test_cleanup_error_preserves_original_status
 test_snapshot_failure_blocks
 test_screenshot_failure_blocks
 test_console_and_network_failures_warn_only
 test_signal_cleans_up_axi_session
+test_signal_during_temp_allocation_removes_temp_dir
 test_concurrent_logical_session_labels_use_distinct_axi_sessions

@@ -88,8 +88,8 @@ else
   LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$OUT_DIR")")"
 fi
 
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
-AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
+TMP_DIR=
+AXI_SESSION_NAME=
 
 axi() (
   unset CHROME_DEVTOOLS_AXI_PORT
@@ -102,8 +102,12 @@ cleanup() {
   local status=$?
   trap - EXIT
   trap '' HUP INT TERM
-  axi stop >/dev/null 2>&1 || true
-  rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
+  if [ -n "$AXI_SESSION_NAME" ]; then
+    axi stop >/dev/null 2>&1 || true
+  fi
+  if [ -n "$TMP_DIR" ]; then
+    rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
+  fi
   exit "$status"
 }
 
@@ -117,6 +121,9 @@ trap cleanup EXIT
 trap 'handle_signal 129' HUP
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
+
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
+AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
 
