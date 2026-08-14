@@ -77,6 +77,7 @@ dir=${FM_FAKE_BROWSER_DIR:?}
 cmd=${1:-}
 shift || true
 mkdir -p "$dir"
+printf '%s\t%s\t%s\n' "$cmd" "${CHROME_DEVTOOLS_AXI_SESSION:-}" "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" >> "$dir/axi.log"
 
 next_id() {
   local max=0 id
@@ -153,6 +154,7 @@ NODE
     ;;
   newpage)
     url=${1:?}
+    : > "$dir/newpage_started"
     if [ -e "$dir/newpage_redirect" ]; then
       IFS='	' read -r href title < "$dir/newpage_redirect"
     else
@@ -165,6 +167,10 @@ NODE
     printf 'page:\n  title: %s\n' "$title"
     ;;
   snapshot)
+    if [ -n "${FM_FAKE_SNAPSHOT_DELAY:-}" ]; then
+      : > "$dir/snapshot_started"
+      sleep "$FM_FAKE_SNAPSHOT_DELAY"
+    fi
     if [ -e "$dir/snapshot_fail" ]; then
       echo "snapshot exploded" >&2
       exit 1
@@ -192,6 +198,14 @@ NODE
       exit 1
     fi
     printf 'network ok\n'
+    ;;
+  stop)
+    : > "$dir/axi_stopped"
+    if [ -e "$dir/stop_fail" ]; then
+      echo "stop exploded" >&2
+      exit 1
+    fi
+    printf 'stopped\n'
     ;;
   *)
     echo "unexpected chrome-devtools-axi command: $cmd" >&2
@@ -223,6 +237,27 @@ run_qa() {
     env_args+=("FM_BROWSER_QA_PROFILE_DIR=$FM_BROWSER_QA_PROFILE_DIR")
   fi
   env "${env_args[@]}" bash "$ROOT/bin/fm-browser-qa.sh" "$@" 2>&1
+}
+
+assert_axi_cleanup() {
+  local browser_dir=$1 identity=$2 label=$3
+  node - "$browser_dir/axi.log" "$identity" <<'NODE' || fail "$label"
+const fs = require('fs');
+const [logFile, identityFile] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+const rows = fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map((line) => line.split('\t'));
+const stops = rows.filter(([command]) => command === 'stop');
+if (stops.length !== 1) throw new Error(`expected one stop, got ${stops.length}`);
+if (!identity.axi_session || identity.axi_session === identity.session) throw new Error('identity did not distinguish AXI and logical sessions');
+if (!/^[A-Za-z0-9._-]{1,64}$/.test(identity.axi_session)) throw new Error('AXI session is invalid');
+if (rows.some(([, session, browserUrl]) => session !== identity.axi_session || browserUrl !== identity.browser_url)) throw new Error('AXI command used the wrong session or browser endpoint');
+if (rows.some(([command]) => command === 'close')) throw new Error('AXI attempted to close the browser');
+NODE
+}
+
+assert_tmp_root_empty() {
+  local dir=$1 label=$2
+  [ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit)" ] || fail "$label"
 }
 
 test_requires_url_and_out() {
@@ -365,7 +400,7 @@ test_exact_tab_selected_and_evidence_written() {
 
   identity="$evidence/identity.json"
   assert_present "$identity" "identity evidence missing"
-  node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1])); if (j.requested_url !== "https://example.test/qa" || j.title !== "QA Page" || j.session !== "fmqa-exact") process.exit(1)' "$identity" \
+  node -e 'const fs=require("fs"); const j=JSON.parse(fs.readFileSync(process.argv[1])); if (j.requested_url !== "https://example.test/qa" || j.title !== "QA Page" || j.session !== "fmqa-exact" || !j.axi_session) process.exit(1)' "$identity" \
     || fail "identity evidence has wrong URL/title/session"
   assert_present "$evidence/snapshot.txt" "snapshot evidence missing"
   assert_present "$evidence/screenshot.png" "screenshot evidence missing"
@@ -506,6 +541,39 @@ test_trailing_slash_url_is_normalized() {
   pass "fm-browser-qa.sh: browser-equivalent trailing-slash URL matches without a new tab"
 }
 
+test_successful_evidence_cleans_up_axi_session() {
+  local dir fakebin evidence tmp_root
+  dir="$TMP_ROOT/cleanup-success"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  evidence="$dir/evidence"
+  tmp_root="$dir/tmp"
+  mkdir -p "$tmp_root"
+
+  TMPDIR="$tmp_root" run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" --session cleanup >/dev/null
+
+  assert_axi_cleanup "$dir/browser" "$evidence/identity.json" \
+    "successful evidence should stop its own AXI session without closing QA Chrome"
+  assert_present "$dir/browser/axi_stopped" "successful evidence should stop the AXI bridge"
+  assert_tmp_root_empty "$tmp_root" "successful evidence should remove its temporary files"
+  pass "fm-browser-qa.sh: successful evidence cleans up its AXI bridge"
+}
+
+test_cleanup_error_does_not_mask_success() {
+  local dir fakebin evidence
+  dir="$TMP_ROOT/cleanup-stop-fail"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  : > "$dir/browser/stop_fail"
+  evidence="$dir/evidence"
+
+  run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" >/dev/null
+
+  assert_present "$evidence/report.md" "cleanup failure should not mask successful evidence"
+  assert_present "$dir/browser/axi_stopped" "cleanup should still attempt to stop the AXI bridge"
+  pass "fm-browser-qa.sh: cleanup errors do not mask a successful run"
+}
+
 test_snapshot_failure_blocks() {
   local dir fakebin out status
   dir="$TMP_ROOT/snapshot-fail"
@@ -520,7 +588,9 @@ test_snapshot_failure_blocks() {
   expect_code 1 "$status" "snapshot failure should exit 1"
   assert_contains "$out" "blocked: snapshot evidence failed" \
     "snapshot failure should be blocked"
-  pass "fm-browser-qa.sh: snapshot failure blocks"
+  assert_axi_cleanup "$dir/browser" "$dir/evidence/identity.json" \
+    "snapshot failure should clean up its own AXI session"
+  pass "fm-browser-qa.sh: snapshot failure blocks and cleans up"
 }
 
 test_screenshot_failure_blocks() {
@@ -563,6 +633,82 @@ test_console_and_network_failures_warn_only() {
   pass "fm-browser-qa.sh: console/network failures warn only"
 }
 
+test_signal_cleans_up_axi_session() {
+  local dir fakebin pid status tries
+  dir="$TMP_ROOT/cleanup-signal"
+  fakebin=$(make_fake_browser_tools "$dir")
+
+  env \
+    "PATH=$fakebin:/usr/bin:/bin" \
+    "FM_FAKE_BROWSER_DIR=$dir/browser" \
+    "FM_BROWSER_QA_OPEN_SETTLE=1" \
+    bash "$ROOT/bin/fm-browser-qa.sh" --url "https://example.test/qa" --out "$dir/evidence" > "$dir/output.txt" 2>&1 &
+  pid=$!
+  tries=20
+  while [ ! -e "$dir/browser/newpage_started" ] && [ "$tries" -gt 0 ]; do
+    sleep 0.05
+    tries=$((tries - 1))
+  done
+  [ -e "$dir/browser/newpage_started" ] || fail "signal cleanup test did not reach target-page settling"
+  kill -TERM "$pid"
+  set +e
+  wait "$pid"
+  status=$?
+  set -e
+
+  expect_code 143 "$status" "TERM should preserve its signal exit status"
+  node - "$dir/browser/axi.log" <<'NODE' || fail "TERM should clean up its own AXI session"
+const fs = require('fs');
+const rows = fs.readFileSync(process.argv[2], 'utf8').trim().split('\n').filter(Boolean).map((line) => line.split('\t'));
+const sessions = new Set(rows.map(([, session]) => session));
+const stops = rows.filter(([command]) => command === 'stop');
+if (sessions.size !== 1 || stops.length !== 1) process.exit(1);
+if (![...sessions].every((session) => /^[A-Za-z0-9._-]{1,64}$/.test(session))) process.exit(1);
+if (rows.some(([, , browserUrl]) => browserUrl !== 'http://127.0.0.1:9222')) process.exit(1);
+NODE
+  pass "fm-browser-qa.sh: TERM cleans up its AXI bridge"
+}
+
+test_concurrent_logical_session_labels_use_distinct_axi_sessions() {
+  local dir fakebin pid_one pid_two status_one status_two tmp_root
+  dir="$TMP_ROOT/concurrent-session"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  tmp_root="$dir/tmp"
+  mkdir -p "$tmp_root"
+
+  TMPDIR="$tmp_root" FM_FAKE_SNAPSHOT_DELAY=0.2 \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-one" --session collision > "$dir/one.out" &
+  pid_one=$!
+  TMPDIR="$tmp_root" FM_FAKE_SNAPSHOT_DELAY=0.2 \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-two" --session collision > "$dir/two.out" &
+  pid_two=$!
+  set +e
+  wait "$pid_one"
+  status_one=$?
+  wait "$pid_two"
+  status_two=$?
+  set -e
+
+  expect_code 0 "$status_one" "first concurrent evidence run should succeed"
+  expect_code 0 "$status_two" "second concurrent evidence run should succeed"
+  node - "$dir/browser/axi.log" "$dir/evidence-one/identity.json" "$dir/evidence-two/identity.json" <<'NODE' || fail "concurrent runs should use distinct valid AXI sessions and clean up both"
+const fs = require('fs');
+const [logFile, firstIdentityFile, secondIdentityFile] = process.argv.slice(2);
+const first = JSON.parse(fs.readFileSync(firstIdentityFile, 'utf8'));
+const second = JSON.parse(fs.readFileSync(secondIdentityFile, 'utf8'));
+const sessions = new Set([first.axi_session, second.axi_session]);
+const rows = fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map((line) => line.split('\t'));
+const stopSessions = new Set(rows.filter(([command]) => command === 'stop').map(([, session]) => session));
+if (first.session !== 'fmqa-collision' || second.session !== 'fmqa-collision') process.exit(1);
+if (sessions.size !== 2 || [...sessions].some((session) => !/^[A-Za-z0-9._-]{1,64}$/.test(session))) process.exit(1);
+if (stopSessions.size !== 2 || [...stopSessions].some((session) => !sessions.has(session))) process.exit(1);
+if (rows.some(([, session, browserUrl]) => !sessions.has(session) || browserUrl !== first.browser_url)) process.exit(1);
+NODE
+  assert_tmp_root_empty "$tmp_root" "concurrent runs should remove their temporary files"
+  pass "fm-browser-qa.sh: concurrent logical sessions use distinct AXI bridges"
+}
+
 test_requires_url_and_out
 test_missing_chrome_devtools_axi_blocks
 test_browser_unreachable_without_start_blocks
@@ -578,6 +724,10 @@ test_unprobeable_unrelated_tab_is_skipped
 test_unrelated_sign_in_tab_does_not_report_auth_expired
 test_sign_in_substring_title_is_not_auth
 test_trailing_slash_url_is_normalized
+test_successful_evidence_cleans_up_axi_session
+test_cleanup_error_does_not_mask_success
 test_snapshot_failure_blocks
 test_screenshot_failure_blocks
 test_console_and_network_failures_warn_only
+test_signal_cleans_up_axi_session
+test_concurrent_logical_session_labels_use_distinct_axi_sessions

@@ -83,13 +83,40 @@ BROWSER_URL=${BROWSER_URL%/}
 mkdir -p "$OUT_DIR" || blocked "could not create evidence directory: $OUT_DIR"
 
 if [ -n "$SESSION_INPUT" ]; then
-  SESSION_NAME="fmqa-$(sanitize_token "$SESSION_INPUT")"
+  LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$SESSION_INPUT")"
 else
-  SESSION_NAME="fmqa-$(sanitize_token "$(basename "$OUT_DIR")")"
+  LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$OUT_DIR")")"
 fi
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
-trap 'rm -rf "$TMP_DIR"' EXIT
+AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
+
+axi() (
+  unset CHROME_DEVTOOLS_AXI_PORT
+  export CHROME_DEVTOOLS_AXI_SESSION="$AXI_SESSION_NAME"
+  export CHROME_DEVTOOLS_AXI_BROWSER_URL="$BROWSER_URL"
+  chrome-devtools-axi "$@"
+)
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+  axi stop >/dev/null 2>&1 || true
+  rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
+  exit "$status"
+}
+
+handle_signal() {
+  local status=$1
+  trap - HUP INT TERM
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
 
@@ -223,13 +250,6 @@ else
   fi
 fi
 
-axi() (
-  unset CHROME_DEVTOOLS_AXI_PORT
-  export CHROME_DEVTOOLS_AXI_SESSION="$SESSION_NAME"
-  export CHROME_DEVTOOLS_AXI_BROWSER_URL="$BROWSER_URL"
-  chrome-devtools-axi "$@"
-)
-
 json_field() {
   node - "$1" "$2" <<'NODE'
 const fs = require('fs');
@@ -286,9 +306,9 @@ NODE
 }
 
 write_identity() {
-  node - "$1" "$2" "$BROWSER_URL" "$SESSION_NAME" "$TARGET_URL" "$OUT_DIR/identity.json" <<'NODE'
+  node - "$1" "$2" "$BROWSER_URL" "$LOGICAL_SESSION_NAME" "$AXI_SESSION_NAME" "$TARGET_URL" "$OUT_DIR/identity.json" <<'NODE'
 const fs = require('fs');
-const [identityFile, pageId, browserUrl, sessionName, requestedUrl, output] = process.argv.slice(2);
+const [identityFile, pageId, browserUrl, logicalSessionName, axiSessionName, requestedUrl, output] = process.argv.slice(2);
 const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
 fs.writeFileSync(output, JSON.stringify({
   page_id: pageId,
@@ -296,7 +316,8 @@ fs.writeFileSync(output, JSON.stringify({
   active_url: identity.href,
   title: identity.title,
   browser_url: browserUrl,
-  session: sessionName,
+  session: logicalSessionName,
+  axi_session: axiSessionName,
   captured_at: new Date().toISOString()
 }, null, 2) + '\n');
 NODE
@@ -473,7 +494,8 @@ fi
   echo "- Title: $FINAL_TITLE"
   echo "- Page ID: $PAGE_ID"
   echo "- Browser endpoint: $BROWSER_URL"
-  echo "- AXI session: $SESSION_NAME"
+  echo "- Logical evidence session: $LOGICAL_SESSION_NAME"
+  echo "- AXI bridge session: $AXI_SESSION_NAME"
   echo
   echo "## Evidence"
   echo
