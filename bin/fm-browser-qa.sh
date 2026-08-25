@@ -6,6 +6,13 @@
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 set -eu
 
+# Failure bookkeeping. STAGE names the step in progress so an abort can say where
+# it died; BLOCK_REASON is set by blocked() and read by the exit trap. Both are
+# initialised here because blocked() can fire during the dependency checks below.
+STAGE=init
+BLOCK_REASON=
+LEDGER_FILE="${FM_BROWSER_QA_LEDGER:-$HOME/.local/share/fm-browser-qa/runs.jsonl}"
+
 usage() {
   cat >&2 <<'EOF'
 usage: bin/fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
@@ -18,8 +25,42 @@ die_usage() {
   exit 2
 }
 
+# chrome-devtools-axi reports some failures on stdout rather than stderr, so a
+# message built from the .err file alone comes out empty. Join whatever either
+# stream produced, in the order given.
+stream_detail() {
+  local detail='' f chunk
+  for f in "$@"; do
+    [ -s "$f" ] || continue
+    chunk=$(tr '\n' ' ' < "$f" | cut -c1-400)
+    detail="$detail${detail:+ | }$chunk"
+  done
+  [ -n "$detail" ] || detail="no output on stdout or stderr"
+  printf '%s' "$detail"
+}
+
+# The evidence directory is the only thing that outlives the run, so record the
+# failure there. Without this a partial directory is the sole clue and the stage
+# has to be inferred from which artifacts are missing.
+write_failure_marker() {
+  [ -n "${OUT_DIR:-}" ] && [ -d "${OUT_DIR:-}" ] || return 0
+  {
+    echo "# Browser QA FAILED"
+    echo
+    echo "- Stage: $STAGE"
+    echo "- Reason: $BLOCK_REASON"
+    echo "- Exact URL: ${TARGET_URL:-<unset>}"
+    echo "- Browser endpoint: ${BROWSER_URL:-<unset>}"
+    echo "- Logical evidence session: ${LOGICAL_SESSION_NAME:-<unset>}"
+    echo "- AXI bridge session: ${AXI_SESSION_NAME:-<unset>}"
+    echo "- Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$OUT_DIR/FAILED.md" 2>/dev/null || true
+}
+
 blocked() {
+  BLOCK_REASON=$1
   echo "blocked: $1" >&2
+  write_failure_marker
   exit 1
 }
 
@@ -98,10 +139,36 @@ axi() (
   chrome-devtools-axi "$@"
 )
 
+# One JSON line per run, so failure rates and stage distribution are answerable
+# after the fact instead of only from whatever terminal saw the run.
+append_ledger() {
+  local status=$1 dir
+  [ -n "${LEDGER_FILE:-}" ] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  dir=$(dirname "$LEDGER_FILE")
+  mkdir -p "$dir" >/dev/null 2>&1 || return 0
+  node - "$status" "$STAGE" "$BLOCK_REASON" "${TARGET_URL:-}" "${OUT_DIR:-}" \
+    "${LOGICAL_SESSION_NAME:-}" "${AXI_SESSION_NAME:-}" "$LEDGER_FILE" <<'NODE' >/dev/null 2>&1 || true
+const fs = require('fs');
+const [status, stage, reason, url, outDir, session, axiSession, ledger] = process.argv.slice(2);
+fs.appendFileSync(ledger, JSON.stringify({
+  ts: new Date().toISOString(),
+  status: Number(status),
+  stage,
+  reason: reason || null,
+  url: url || null,
+  out_dir: outDir || null,
+  session: session || null,
+  axi_session: axiSession || null,
+}) + '\n');
+NODE
+}
+
 cleanup() {
   local status=$?
   trap - EXIT
   trap '' HUP INT TERM
+  append_ledger "$status"
   if [ -n "$AXI_SESSION_NAME" ]; then
     axi stop >/dev/null 2>&1 || true
   fi
@@ -126,6 +193,7 @@ TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
 AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
+STAGE=browser-check
 
 append_warning() {
   printf '%s\n' "- $1" >> "$WARNINGS_FILE"
@@ -365,13 +433,16 @@ probe_page() {
 }
 
 probe_error() {
-  cat "$TMP_DIR/probe-$(safe_page_id "$1").err"
+  local safe_id
+  safe_id=$(safe_page_id "$1")
+  stream_detail "$TMP_DIR/probe-$safe_id.err" "$TMP_DIR/select-$safe_id.out" \
+    "$TMP_DIR/eval-$safe_id.out"
 }
 
 list_page_ids() {
   local label=$1
   if ! axi pages > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
-    blocked "could not enumerate browser pages: $(cat "$TMP_DIR/pages-$label.err")"
+    blocked "could not enumerate browser pages: $(stream_detail "$TMP_DIR/pages-$label.err" "$TMP_DIR/pages-$label.txt")"
   fi
   awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$TMP_DIR/pages-$label.txt"
 }
@@ -399,13 +470,14 @@ scan_pages() {
 
 open_target_page() {
   if ! axi newpage "$TARGET_URL" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
-    blocked "could not open exact QA URL in authenticated browser: $(cat "$TMP_DIR/newpage.err")"
+    blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
 }
 
 NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
 
+STAGE=page-scan
 SCAN_DIR="$TMP_DIR/scan-initial"
 INITIAL_IDS=$(list_page_ids initial)
 scan_pages "$SCAN_DIR" "$INITIAL_IDS" tolerate
@@ -448,6 +520,7 @@ if [ "$MATCH_COUNT" -gt 1 ]; then
   blocked "multiple tabs match the exact QA URL; close duplicates and retry: $TARGET_URL"
 fi
 
+STAGE=identity
 MATCH_LINE=$(sed -n '1p' "$MATCHES")
 PAGE_ID=$(printf '%s\n' "$MATCH_LINE" | cut -f1)
 FINAL_IDENTITY="$TMP_DIR/final-identity.json"
@@ -467,16 +540,21 @@ fi
 
 write_identity "$FINAL_IDENTITY" "$PAGE_ID"
 
+STAGE=snapshot
 if ! axi snapshot > "$OUT_DIR/snapshot.txt" 2> "$TMP_DIR/snapshot.err"; then
-  blocked "snapshot evidence failed: $(cat "$TMP_DIR/snapshot.err")"
+  blocked "snapshot evidence failed: $(stream_detail "$TMP_DIR/snapshot.err" "$OUT_DIR/snapshot.txt")"
 fi
-[ -s "$OUT_DIR/snapshot.txt" ] || blocked "snapshot evidence was empty"
+[ -s "$OUT_DIR/snapshot.txt" ] || blocked "snapshot evidence was empty: $(stream_detail "$TMP_DIR/snapshot.err")"
 
+STAGE=screenshot
 if ! axi screenshot "$OUT_DIR/screenshot.png" > "$TMP_DIR/screenshot.out" 2> "$TMP_DIR/screenshot.err"; then
-  blocked "screenshot evidence failed: $(cat "$TMP_DIR/screenshot.err")"
+  blocked "screenshot evidence failed: $(stream_detail "$TMP_DIR/screenshot.err" "$TMP_DIR/screenshot.out")"
 fi
-[ -s "$OUT_DIR/screenshot.png" ] || blocked "screenshot evidence was empty"
+# axi can exit 0 without producing the file, and it echoes the path it resolved,
+# so surface both streams here rather than reporting a bare "was empty".
+[ -s "$OUT_DIR/screenshot.png" ] || blocked "screenshot evidence was empty: $(stream_detail "$TMP_DIR/screenshot.out" "$TMP_DIR/screenshot.err")"
 
+STAGE=console
 if ! axi console > "$OUT_DIR/console.txt" 2> "$TMP_DIR/console.err"; then
   {
     echo "warning: console capture failed"
@@ -485,6 +563,7 @@ if ! axi console > "$OUT_DIR/console.txt" 2> "$TMP_DIR/console.err"; then
   append_warning "console capture failed; see console.txt"
 fi
 
+STAGE=network
 if ! axi network > "$OUT_DIR/network.txt" 2> "$TMP_DIR/network.err"; then
   {
     echo "warning: network capture failed"
@@ -492,6 +571,11 @@ if ! axi network > "$OUT_DIR/network.txt" 2> "$TMP_DIR/network.err"; then
   } > "$OUT_DIR/network.txt"
   append_warning "network capture failed; see network.txt"
 fi
+
+STAGE=report
+# Evidence directories get reused across runs, so a marker left by an earlier
+# failed run would contradict the report about to be written.
+rm -f "$OUT_DIR/FAILED.md"
 
 {
   echo "# Browser QA Report"
@@ -519,4 +603,5 @@ fi
   fi
 } > "$OUT_DIR/report.md"
 
+STAGE="done"
 echo "ok: browser QA evidence written to $OUT_DIR"
