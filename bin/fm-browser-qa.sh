@@ -281,7 +281,22 @@ if (path.resolve(path.dirname(packageJsonPath), expectedBin) !== path.resolve(sc
 const stat = fs.statSync(scriptPath);
 if (!stat.isFile() || stat.size === 0) process.exit(1);
 NODE
-  node --check "$script" >/dev/null 2>&1
+  node --check "$script" >/dev/null 2>&1 || return 1
+  node - "$script" <<'NODE' >/dev/null 2>&1
+const { spawnSync } = require('child_process');
+const scriptPath = process.argv[2];
+const probe = spawnSync(process.execPath, [scriptPath, '--help'], {
+  env: {
+    ...process.env,
+    CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: '1',
+    CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: '1',
+  },
+  stdio: 'ignore',
+  timeout: 5000,
+  killSignal: 'SIGKILL',
+});
+if (probe.error || probe.signal || probe.status !== 0) process.exit(1);
+NODE
 }
 
 acquire_mcp_compat_lock() {

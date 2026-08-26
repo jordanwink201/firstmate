@@ -392,8 +392,9 @@ done
 [ -n "$prefix" ] || exit 2
 package_dir="$prefix/node_modules/chrome-devtools-mcp"
 mkdir -p "$package_dir/build/src/bin"
-printf '{"name":"chrome-devtools-mcp","version":"1.7.0","bin":{"chrome-devtools-mcp":"./build/src/bin/chrome-devtools-mcp.js"}}\n' > "$package_dir/package.json"
-printf '// fake chrome-devtools-mcp\n' > "$package_dir/build/src/bin/chrome-devtools-mcp.js"
+printf '{"name":"chrome-devtools-mcp","version":"1.7.0","type":"module","bin":{"chrome-devtools-mcp":"./build/src/bin/chrome-devtools-mcp.js"}}\n' > "$package_dir/package.json"
+printf "await import('./chrome-devtools-mcp-main.js');\n" > "$package_dir/build/src/bin/chrome-devtools-mcp.js"
+printf "if (process.argv.includes('--help')) process.exit(0);\n" > "$package_dir/build/src/bin/chrome-devtools-mcp-main.js"
 SH
   chmod +x "$fakebin/npm"
 
@@ -419,6 +420,62 @@ SH
   pass "fm-browser-qa.sh: pinned MCP compatibility cache is installed once and reused"
 }
 
+test_partial_mcp_compatibility_cache_is_repaired() {
+  local dir fakebin cache_dir package_dir expected_path npm_calls status
+  dir="$TMP_ROOT/mcp-partial-cache"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  cache_dir="$dir/home/.local/share/fm-browser-qa/chrome-devtools-mcp-1.7.0"
+  package_dir="$cache_dir/node_modules/chrome-devtools-mcp"
+  expected_path="$package_dir/build/src/bin/chrome-devtools-mcp.js"
+  mkdir -p "$package_dir/build/src/bin"
+  printf '{"name":"chrome-devtools-mcp","version":"1.7.0","type":"module","bin":{"chrome-devtools-mcp":"./build/src/bin/chrome-devtools-mcp.js"}}\n' > "$package_dir/package.json"
+  printf "await import('./chrome-devtools-mcp-main.js');\n" > "$expected_path"
+
+  cat > "$fakebin/npm" <<'SH'
+#!/usr/bin/env bash
+set -eu
+dir=${FM_FAKE_BROWSER_DIR:?}
+printf '%s\n' "$*" >> "$dir/npm.log"
+prefix=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--prefix" ]; then
+    prefix=$2
+    shift 2
+    continue
+  fi
+  shift
+done
+[ -n "$prefix" ] || exit 2
+package_dir="$prefix/node_modules/chrome-devtools-mcp"
+mkdir -p "$package_dir/build/src/bin"
+printf '{"name":"chrome-devtools-mcp","version":"1.7.0","type":"module","bin":{"chrome-devtools-mcp":"./build/src/bin/chrome-devtools-mcp.js"}}\n' > "$package_dir/package.json"
+printf "await import('./chrome-devtools-mcp-main.js');\n" > "$package_dir/build/src/bin/chrome-devtools-mcp.js"
+printf "if (process.argv.includes('--help')) process.exit(0);\n" > "$package_dir/build/src/bin/chrome-devtools-mcp-main.js"
+SH
+  chmod +x "$fakebin/npm"
+
+  set +e
+  env \
+    "PATH=$fakebin:/usr/bin:/bin" \
+    "HOME=$dir/home" \
+    "FM_BROWSER_QA_LEDGER=$dir/runs.jsonl" \
+    "FM_FAKE_BROWSER_DIR=$dir/browser" \
+    "FM_BROWSER_QA_OPEN_SETTLE=0" \
+    bash "$ROOT/bin/fm-browser-qa.sh" --url "https://example.test/qa" --out "$dir/evidence" >/dev/null
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "partial compatibility cache should be repaired"
+  npm_calls=$(wc -l < "$dir/browser/npm.log" | tr -d '[:space:]')
+  [ "$npm_calls" -eq 1 ] || fail "partial compatibility cache should be reinstalled once, got $npm_calls installs"
+  assert_present "$package_dir/build/src/bin/chrome-devtools-mcp-main.js" \
+    "partial compatibility cache was not replaced with a runtime-complete install"
+  awk -F '\t' -v expected="$expected_path" '$4 != expected { exit 1 }' "$dir/browser/axi.log" \
+    || fail "AXI commands did not use the repaired compatibility cache"
+  pass "fm-browser-qa.sh: partial MCP compatibility cache is repaired"
+}
+
 test_concurrent_mcp_cache_install_waits_for_atomic_publish() {
   local dir fakebin cache_dir expected_path lock_file pid_one pid_two pid_three status_one status_two status_three tries npm_calls
   dir="$TMP_ROOT/mcp-concurrent"
@@ -442,8 +499,9 @@ done
 [ -n "$prefix" ] || exit 2
 package_dir="$prefix/node_modules/chrome-devtools-mcp"
 mkdir -p "$package_dir/build/src/bin"
-printf '{"name":"chrome-devtools-mcp","version":"1.7.0","bin":{"chrome-devtools-mcp":"./build/src/bin/chrome-devtools-mcp.js"}}\n' > "$package_dir/package.json"
-printf '// fake chrome-devtools-mcp\n' > "$package_dir/build/src/bin/chrome-devtools-mcp.js"
+printf '{"name":"chrome-devtools-mcp","version":"1.7.0","type":"module","bin":{"chrome-devtools-mcp":"./build/src/bin/chrome-devtools-mcp.js"}}\n' > "$package_dir/package.json"
+printf "await import('./chrome-devtools-mcp-main.js');\n" > "$package_dir/build/src/bin/chrome-devtools-mcp.js"
+printf "if (process.argv.includes('--help')) process.exit(0);\n" > "$package_dir/build/src/bin/chrome-devtools-mcp-main.js"
 : > "$dir/install_started"
 while [ ! -e "$dir/install_release" ]; do
   sleep 0.05
@@ -1139,6 +1197,7 @@ test_requires_url_and_out
 test_missing_chrome_devtools_axi_blocks
 test_missing_node_blocks_and_records_ledger
 test_pinned_mcp_compatibility_cache_is_installed_once
+test_partial_mcp_compatibility_cache_is_repaired
 test_concurrent_mcp_cache_install_waits_for_atomic_publish
 test_failed_mcp_install_is_not_published
 test_invalid_custom_mcp_cache_is_preserved
