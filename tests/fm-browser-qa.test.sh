@@ -77,7 +77,7 @@ dir=${FM_FAKE_BROWSER_DIR:?}
 cmd=${1:-}
 shift || true
 mkdir -p "$dir"
-printf '%s\t%s\t%s\n' "$cmd" "${CHROME_DEVTOOLS_AXI_SESSION:-}" "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" >> "$dir/axi.log"
+printf '%s\t%s\t%s\t%s\n' "$cmd" "${CHROME_DEVTOOLS_AXI_SESSION:-}" "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" "${CHROME_DEVTOOLS_AXI_MCP_PATH:-}" >> "$dir/axi.log"
 
 next_id() {
   local max=0 id
@@ -233,6 +233,11 @@ run_qa() {
     "FM_FAKE_BROWSER_DIR=$browser_dir"
     "FM_BROWSER_QA_OPEN_SETTLE=0"
   )
+  if [ "${CHROME_DEVTOOLS_AXI_MCP_PATH+x}" = x ]; then
+    env_args+=("CHROME_DEVTOOLS_AXI_MCP_PATH=$CHROME_DEVTOOLS_AXI_MCP_PATH")
+  else
+    env_args+=("CHROME_DEVTOOLS_AXI_MCP_PATH=/operator/chrome-devtools-mcp.js")
+  fi
   if [ "${FM_BROWSER_QA_PROFILE_DIR+x}" = x ]; then
     env_args+=("FM_BROWSER_QA_PROFILE_DIR=$FM_BROWSER_QA_PROFILE_DIR")
   fi
@@ -299,6 +304,71 @@ SH
   assert_contains "$out" "blocked: chrome-devtools-axi is not installed" \
     "missing chrome-devtools-axi should be blocked"
   pass "fm-browser-qa.sh: missing chrome-devtools-axi blocks"
+}
+
+test_pinned_mcp_compatibility_cache_is_installed_once() {
+  local dir fakebin expected_path npm_calls
+  dir="$TMP_ROOT/mcp-compat"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+
+  cat > "$fakebin/npm" <<'SH'
+#!/usr/bin/env bash
+set -eu
+dir=${FM_FAKE_BROWSER_DIR:?}
+printf '%s\n' "$*" >> "$dir/npm.log"
+prefix=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--prefix" ]; then
+    prefix=$2
+    shift 2
+    continue
+  fi
+  shift
+done
+[ -n "$prefix" ] || exit 2
+package_dir="$prefix/node_modules/chrome-devtools-mcp"
+mkdir -p "$package_dir/build/src/bin"
+printf '{"version":"1.7.0"}\n' > "$package_dir/package.json"
+printf '// fake chrome-devtools-mcp\n' > "$package_dir/build/src/bin/chrome-devtools-mcp.js"
+SH
+  chmod +x "$fakebin/npm"
+
+  expected_path="$dir/home/.local/share/fm-browser-qa/chrome-devtools-mcp-1.7.0/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js"
+  env \
+    "PATH=$fakebin:/usr/bin:/bin" \
+    "HOME=$dir/home" \
+    "FM_FAKE_BROWSER_DIR=$dir/browser" \
+    "FM_BROWSER_QA_OPEN_SETTLE=0" \
+    bash "$ROOT/bin/fm-browser-qa.sh" --url "https://example.test/qa" --out "$dir/evidence-one" >/dev/null
+  env \
+    "PATH=$fakebin:/usr/bin:/bin" \
+    "HOME=$dir/home" \
+    "FM_FAKE_BROWSER_DIR=$dir/browser" \
+    "FM_BROWSER_QA_OPEN_SETTLE=0" \
+    bash "$ROOT/bin/fm-browser-qa.sh" --url "https://example.test/qa" --out "$dir/evidence-two" >/dev/null
+
+  npm_calls=$(wc -l < "$dir/browser/npm.log" | tr -d '[:space:]')
+  [ "$npm_calls" -eq 1 ] || fail "pinned MCP compatibility package should install once, got $npm_calls installs"
+  [ -f "$expected_path" ] || fail "pinned MCP compatibility script was not cached at the expected path"
+  awk -F '\t' -v expected="$expected_path" '$4 != expected { exit 1 }' "$dir/browser/axi.log" \
+    || fail "AXI commands did not all use the pinned MCP compatibility path"
+  pass "fm-browser-qa.sh: pinned MCP compatibility cache is installed once and reused"
+}
+
+test_explicit_mcp_path_bypasses_compatibility_cache() {
+  local dir fakebin
+  dir="$TMP_ROOT/mcp-override"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+
+  CHROME_DEVTOOLS_AXI_MCP_PATH=/operator/custom-mcp.js \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence" >/dev/null
+
+  assert_absent "$dir/browser/npm.log" "explicit MCP path should bypass compatibility installation"
+  awk -F '\t' '$4 != "/operator/custom-mcp.js" { exit 1 }' "$dir/browser/axi.log" \
+    || fail "AXI commands did not preserve the explicit MCP path"
+  pass "fm-browser-qa.sh: explicit MCP path bypasses the compatibility cache"
 }
 
 test_browser_unreachable_without_start_blocks() {
@@ -663,6 +733,7 @@ test_signal_cleans_up_axi_session() {
 
   env \
     "PATH=$fakebin:/usr/bin:/bin" \
+    "CHROME_DEVTOOLS_AXI_MCP_PATH=/operator/chrome-devtools-mcp.js" \
     "FM_FAKE_BROWSER_DIR=$dir/browser" \
     "FM_BROWSER_QA_OPEN_SETTLE=1" \
     "TMPDIR=$tmp_root" \
@@ -763,6 +834,8 @@ NODE
 
 test_requires_url_and_out
 test_missing_chrome_devtools_axi_blocks
+test_pinned_mcp_compatibility_cache_is_installed_once
+test_explicit_mcp_path_bypasses_compatibility_cache
 test_browser_unreachable_without_start_blocks
 test_start_if_needed_uses_persistent_visible_profile
 test_start_if_needed_refuses_existing_temporary_profile

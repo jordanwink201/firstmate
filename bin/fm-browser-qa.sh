@@ -2,6 +2,8 @@
 # Deterministic browser QA wrapper for firstmate tasks.
 # Attaches to an authenticated Chrome remote-debugging endpoint, proves the
 # exact active URL/title through chrome-devtools-axi, and writes evidence.
+# Uses a cached chrome-devtools-mcp 1.7.0 transport unless
+# CHROME_DEVTOOLS_AXI_MCP_PATH is already set by the operator.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 set -eu
@@ -131,6 +133,10 @@ fi
 
 TMP_DIR=
 AXI_SESSION_NAME=
+MCP_COMPAT_LOCK_DIR=
+# chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
+# Remove this pin after AXI sends pageId or supports disabling page-id routing.
+MCP_COMPAT_VERSION=1.7.0
 
 axi() (
   unset CHROME_DEVTOOLS_AXI_PORT
@@ -175,6 +181,9 @@ cleanup() {
   if [ -n "$TMP_DIR" ]; then
     rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
   fi
+  if [ -n "$MCP_COMPAT_LOCK_DIR" ]; then
+    rm -rf "$MCP_COMPAT_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
   exit "$status"
 }
 
@@ -190,9 +199,101 @@ trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
-AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
+
+mcp_compat_package_json() {
+  printf '%s/node_modules/chrome-devtools-mcp/package.json\n' "$1"
+}
+
+mcp_compat_script() {
+  printf '%s/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js\n' "$1"
+}
+
+mcp_compat_valid() {
+  local install_dir=$1 package_json script actual_version
+  package_json=$(mcp_compat_package_json "$install_dir")
+  script=$(mcp_compat_script "$install_dir")
+  [ -f "$package_json" ] && [ -f "$script" ] || return 1
+  actual_version=$(node - "$package_json" <<'NODE' 2>/dev/null || true
+const fs = require('fs');
+const packageJson = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+process.stdout.write(String(packageJson.version || ''));
+NODE
+  )
+  [ "$actual_version" = "$MCP_COMPAT_VERSION" ]
+}
+
+release_mcp_compat_lock() {
+  [ -n "$MCP_COMPAT_LOCK_DIR" ] || return 0
+  rm -rf "$MCP_COMPAT_LOCK_DIR" >/dev/null 2>&1 || true
+  MCP_COMPAT_LOCK_DIR=
+}
+
+acquire_mcp_compat_lock() {
+  local lock_dir=$1 tries owner
+  tries=${FM_BROWSER_QA_MCP_LOCK_TRIES:-100}
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    if mcp_compat_valid "$MCP_COMPAT_DIR"; then
+      return 1
+    fi
+    owner=
+    [ -f "$lock_dir/pid" ] && owner=$(sed -n '1p' "$lock_dir/pid" 2>/dev/null || true)
+    case "$owner" in
+      ''|*[!0-9]*) ;;
+      *)
+        if ! kill -0 "$owner" 2>/dev/null; then
+          rm -rf "$lock_dir" >/dev/null 2>&1 || true
+          continue
+        fi
+        ;;
+    esac
+    [ "$tries" -gt 0 ] \
+      || blocked "timed out waiting for chrome-devtools-mcp $MCP_COMPAT_VERSION compatibility cache"
+    sleep "${FM_BROWSER_QA_MCP_LOCK_SLEEP:-0.1}"
+    tries=$((tries - 1))
+  done
+  MCP_COMPAT_LOCK_DIR=$lock_dir
+  printf '%s\n' "$$" > "$lock_dir/pid"
+  return 0
+}
+
+ensure_mcp_compat() {
+  local cache_parent install_output install_error
+  if [ "${CHROME_DEVTOOLS_AXI_MCP_PATH+x}" = x ]; then
+    return 0
+  fi
+  [ -n "${HOME:-}" ] || blocked "HOME is not set; cannot prepare the chrome-devtools-mcp compatibility cache"
+  MCP_COMPAT_DIR=${FM_BROWSER_QA_MCP_COMPAT_DIR:-$HOME/.local/share/fm-browser-qa/chrome-devtools-mcp-$MCP_COMPAT_VERSION}
+  if ! mcp_compat_valid "$MCP_COMPAT_DIR"; then
+    command -v npm >/dev/null 2>&1 \
+      || blocked "npm is required to install chrome-devtools-mcp $MCP_COMPAT_VERSION for chrome-devtools-axi compatibility"
+    cache_parent=$(dirname "$MCP_COMPAT_DIR")
+    mkdir -p "$cache_parent" \
+      || blocked "could not create chrome-devtools-mcp compatibility cache parent: $cache_parent"
+    if acquire_mcp_compat_lock "$MCP_COMPAT_DIR.lock"; then
+      if ! mcp_compat_valid "$MCP_COMPAT_DIR"; then
+        install_output="$TMP_DIR/mcp-install.out"
+        install_error="$TMP_DIR/mcp-install.err"
+        if ! npm install --prefix "$MCP_COMPAT_DIR" --no-save --no-package-lock \
+          --ignore-scripts --omit=dev "chrome-devtools-mcp@$MCP_COMPAT_VERSION" \
+          > "$install_output" 2> "$install_error"; then
+          release_mcp_compat_lock
+          blocked "could not install chrome-devtools-mcp $MCP_COMPAT_VERSION compatibility cache: $(stream_detail "$install_error" "$install_output")"
+        fi
+      fi
+      release_mcp_compat_lock
+    fi
+  fi
+  mcp_compat_valid "$MCP_COMPAT_DIR" \
+    || blocked "chrome-devtools-mcp compatibility cache is invalid after install: $MCP_COMPAT_DIR"
+  CHROME_DEVTOOLS_AXI_MCP_PATH=$(mcp_compat_script "$MCP_COMPAT_DIR")
+  export CHROME_DEVTOOLS_AXI_MCP_PATH
+}
+
+STAGE=mcp-compat
+ensure_mcp_compat
+AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
 STAGE=browser-check
 
 append_warning() {
