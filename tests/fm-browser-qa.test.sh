@@ -179,9 +179,19 @@ NODE
     ;;
   screenshot)
     path=${1:?}
+    printf '%s\n' "$path" >> "$dir/screenshot-path.log"
     if [ -e "$dir/screenshot_fail" ]; then
       echo "screenshot exploded" >&2
       exit 1
+    fi
+    if [ -e "$dir/screenshot_temp_only" ]; then
+      case "$path" in
+        /tmp/fm-browser-qa-mcp.*/*) ;;
+        *)
+          printf 'screenshot: %s\n' "$path"
+          exit 0
+          ;;
+      esac
     fi
     printf 'fake png\n' > "$path"
     ;;
@@ -1062,6 +1072,31 @@ test_screenshot_failure_blocks() {
   pass "fm-browser-qa.sh: screenshot failure blocks"
 }
 
+test_screenshot_uses_mcp_writable_temp_then_publishes_evidence() {
+  local dir fakebin evidence screenshot_tmp tmp_root
+  dir="$TMP_ROOT/screenshot-temp-only"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  : > "$dir/browser/screenshot_temp_only"
+  evidence="$dir/evidence"
+  tmp_root="$dir/tmp"
+  mkdir -p "$tmp_root"
+
+  TMPDIR="$tmp_root" run_qa "$fakebin" "$dir/browser" \
+    --url "https://example.test/qa" --out "$evidence" >/dev/null
+
+  assert_grep "fake png" "$evidence/screenshot.png" \
+    "screenshot captured through MCP's writable temp root was not published as evidence"
+  assert_present "$evidence/report.md" \
+    "temp-root screenshot capture should complete the evidence report"
+  screenshot_tmp=$(tail -1 "$dir/browser/screenshot-path.log")
+  assert_absent "$screenshot_tmp" \
+    "MCP-writable screenshot staging directory should be removed after the run"
+  assert_tmp_root_empty "$tmp_root" \
+    "temp-root screenshot capture should clean up its staging file"
+  pass "fm-browser-qa.sh: MCP temp-root screenshot is published as evidence"
+}
+
 test_console_and_network_failures_warn_only() {
   local dir fakebin evidence
   dir="$TMP_ROOT/warnings"
@@ -1221,6 +1256,7 @@ test_successful_evidence_cleans_up_axi_session
 test_cleanup_error_preserves_original_status
 test_snapshot_failure_blocks
 test_screenshot_failure_blocks
+test_screenshot_uses_mcp_writable_temp_then_publishes_evidence
 test_console_and_network_failures_warn_only
 test_signal_cleans_up_axi_session
 test_signal_during_temp_allocation_removes_temp_dir

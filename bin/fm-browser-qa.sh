@@ -2,8 +2,15 @@
 # Deterministic browser QA wrapper for firstmate tasks.
 # Attaches to an authenticated Chrome remote-debugging endpoint, proves the
 # exact active URL/title through chrome-devtools-axi, and writes evidence.
-# Uses a cached chrome-devtools-mcp 1.7.0 transport unless
-# CHROME_DEVTOOLS_AXI_MCP_PATH is already set by the operator.
+# Compatibility: when CHROME_DEVTOOLS_AXI_MCP_PATH is unset, validates and reuses
+# exact chrome-devtools-mcp 1.7.0 from $HOME/.local/share/fm-browser-qa, installing
+# with npm only when needed and serializing concurrent staged publication.
+# An explicit CHROME_DEVTOOLS_AXI_MCP_PATH bypasses the cache without modifying
+# the global chrome-devtools-axi installation.
+# Installing or repairing the compatibility cache requires npm and perl.
+# Diagnostics: blocked runs leave FAILED.md after the evidence directory exists,
+# and every exit best-effort appends JSONL to FM_BROWSER_QA_LEDGER or the default
+# $HOME/.local/share/fm-browser-qa/runs.jsonl when either path is available.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 set -eu
@@ -34,6 +41,7 @@ MCP_COMPAT_DIR=
 MCP_COMPAT_LOCK_FILE=
 MCP_COMPAT_LOCK_PID=
 MCP_COMPAT_STAGING_DIR=
+MCP_OUTPUT_DIR=
 JSON_RESULT=
 # chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
 # Remove this pin after AXI sends pageId or supports disabling page-id routing.
@@ -173,6 +181,14 @@ remove_mcp_compat_staging() {
   rm -rf "$staging_dir" >/dev/null 2>&1 || true
 }
 
+remove_mcp_output_dir() {
+  local output_dir
+  [ -n "$MCP_OUTPUT_DIR" ] || return 0
+  output_dir=$MCP_OUTPUT_DIR
+  MCP_OUTPUT_DIR=
+  rm -rf "$output_dir" >/dev/null 2>&1 || true
+}
+
 cleanup() {
   local status=$?
   trap - EXIT
@@ -181,6 +197,7 @@ cleanup() {
   if [ -n "$AXI_SESSION_NAME" ]; then
     axi stop >/dev/null 2>&1 || true
   fi
+  remove_mcp_output_dir
   remove_mcp_compat_staging
   release_mcp_compat_lock
   if [ -n "$TMP_DIR" ]; then
@@ -788,12 +805,18 @@ fi
 [ -s "$OUT_DIR/snapshot.txt" ] || blocked "snapshot evidence was empty: $(stream_detail "$TMP_DIR/snapshot.err")"
 
 STAGE=screenshot
-if ! axi screenshot "$OUT_DIR/screenshot.png" > "$TMP_DIR/screenshot.out" 2> "$TMP_DIR/screenshot.err"; then
+MCP_OUTPUT_DIR=$(mktemp -d "/tmp/fm-browser-qa-mcp.XXXXXX") \
+  || blocked "could not create MCP-compatible screenshot staging directory"
+SCREENSHOT_TMP="$MCP_OUTPUT_DIR/screenshot.png"
+if ! axi screenshot "$SCREENSHOT_TMP" > "$TMP_DIR/screenshot.out" 2> "$TMP_DIR/screenshot.err"; then
   blocked "screenshot evidence failed: $(stream_detail "$TMP_DIR/screenshot.err" "$TMP_DIR/screenshot.out")"
 fi
 # axi can exit 0 without producing the file, and it echoes the path it resolved,
 # so surface both streams here rather than reporting a bare "was empty".
-[ -s "$OUT_DIR/screenshot.png" ] || blocked "screenshot evidence was empty: $(stream_detail "$TMP_DIR/screenshot.out" "$TMP_DIR/screenshot.err")"
+[ -s "$SCREENSHOT_TMP" ] || blocked "screenshot evidence was empty: $(stream_detail "$TMP_DIR/screenshot.out" "$TMP_DIR/screenshot.err")"
+cp "$SCREENSHOT_TMP" "$OUT_DIR/screenshot.png" \
+  || blocked "could not publish screenshot evidence: $OUT_DIR/screenshot.png"
+[ -s "$OUT_DIR/screenshot.png" ] || blocked "published screenshot evidence was empty: $OUT_DIR/screenshot.png"
 
 STAGE=console
 if ! axi console > "$OUT_DIR/console.txt" 2> "$TMP_DIR/console.err"; then
