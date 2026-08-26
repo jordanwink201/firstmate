@@ -2,9 +2,50 @@
 # Deterministic browser QA wrapper for firstmate tasks.
 # Attaches to an authenticated Chrome remote-debugging endpoint, proves the
 # exact active URL/title through chrome-devtools-axi, and writes evidence.
+# Compatibility: when CHROME_DEVTOOLS_AXI_MCP_PATH is unset, validates and reuses
+# exact chrome-devtools-mcp 1.7.0 from $HOME/.local/share/fm-browser-qa, installing
+# with npm only when needed and serializing concurrent staged publication.
+# An explicit CHROME_DEVTOOLS_AXI_MCP_PATH bypasses the cache without modifying
+# the global chrome-devtools-axi installation.
+# Installing or repairing the compatibility cache requires npm and perl.
+# Diagnostics: blocked runs leave FAILED.md after the evidence directory exists,
+# and every exit best-effort appends JSONL to FM_BROWSER_QA_LEDGER or the default
+# $HOME/.local/share/fm-browser-qa/runs.jsonl when either path is available.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 set -eu
+export LC_ALL=C
+
+# Failure bookkeeping. STAGE names the step in progress so an abort can say where
+# it died; BLOCK_REASON is set by blocked() and read by the exit trap. Both are
+# initialised here because blocked() can fire during the dependency checks below.
+STAGE=init
+BLOCK_REASON=
+if [ -n "${FM_BROWSER_QA_LEDGER:-}" ]; then
+  LEDGER_FILE=$FM_BROWSER_QA_LEDGER
+elif [ -n "${HOME:-}" ]; then
+  LEDGER_FILE="$HOME/.local/share/fm-browser-qa/runs.jsonl"
+else
+  LEDGER_FILE=
+fi
+TARGET_URL=
+OUT_DIR=
+BROWSER_URL=http://127.0.0.1:9222
+SESSION_INPUT=
+START_IF_NEEDED=0
+LOGICAL_SESSION_NAME=
+TMP_DIR=
+WARNINGS_FILE=
+AXI_SESSION_NAME=
+MCP_COMPAT_DIR=
+MCP_COMPAT_LOCK_FILE=
+MCP_COMPAT_LOCK_PID=
+MCP_COMPAT_STAGING_DIR=
+MCP_OUTPUT_DIR=
+JSON_RESULT=
+# chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
+# Remove this pin after AXI sends pageId or supports disabling page-id routing.
+MCP_COMPAT_VERSION=1.7.0
 
 usage() {
   cat >&2 <<'EOF'
@@ -18,8 +59,42 @@ die_usage() {
   exit 2
 }
 
+# chrome-devtools-axi reports some failures on stdout rather than stderr, so a
+# message built from the .err file alone comes out empty. Join whatever either
+# stream produced, in the order given.
+stream_detail() {
+  local detail='' f chunk
+  for f in "$@"; do
+    [ -s "$f" ] || continue
+    chunk=$(tr '\n' ' ' < "$f" | cut -c1-400)
+    detail="$detail${detail:+ | }$chunk"
+  done
+  [ -n "$detail" ] || detail="no output on stdout or stderr"
+  printf '%s' "$detail"
+}
+
+# The evidence directory is the only thing that outlives the run, so record the
+# failure there. Without this a partial directory is the sole clue and the stage
+# has to be inferred from which artifacts are missing.
+write_failure_marker() {
+  [ -n "${OUT_DIR:-}" ] && [ -d "${OUT_DIR:-}" ] || return 0
+  {
+    echo "# Browser QA FAILED"
+    echo
+    echo "- Stage: $STAGE"
+    echo "- Reason: $BLOCK_REASON"
+    echo "- Exact URL: ${TARGET_URL:-<unset>}"
+    echo "- Browser endpoint: ${BROWSER_URL:-<unset>}"
+    echo "- Logical evidence session: ${LOGICAL_SESSION_NAME:-<unset>}"
+    echo "- AXI bridge session: ${AXI_SESSION_NAME:-<unset>}"
+    echo "- Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$OUT_DIR/FAILED.md" 2>/dev/null || true
+}
+
 blocked() {
+  BLOCK_REASON=$1
   echo "blocked: $1" >&2
+  write_failure_marker
   exit 1
 }
 
@@ -30,11 +105,117 @@ sanitize_token() {
   printf '%s\n' "$token"
 }
 
-TARGET_URL=
-OUT_DIR=
-BROWSER_URL=http://127.0.0.1:9222
-SESSION_INPUT=
-START_IF_NEEDED=0
+axi() (
+  unset CHROME_DEVTOOLS_AXI_PORT
+  export CHROME_DEVTOOLS_AXI_SESSION="$AXI_SESSION_NAME"
+  export CHROME_DEVTOOLS_AXI_BROWSER_URL="$BROWSER_URL"
+  chrome-devtools-axi "$@"
+)
+
+# One JSON line per run, so failure rates and stage distribution are answerable
+# after the fact instead of only from whatever terminal saw the run.
+json_quote() {
+  local LC_ALL=C value=$1 result='"' char code
+  while [ -n "$value" ]; do
+    char=${value%"${value#?}"}
+    value=${value#?}
+    case "$char" in
+      '"') result="$result\\\"" ;;
+      "\\") result="$result\\\\" ;;
+      $'\b') result="$result\\b" ;;
+      $'\f') result="$result\\f" ;;
+      $'\n') result="$result\\n" ;;
+      $'\r') result="$result\\r" ;;
+      $'\t') result="$result\\t" ;;
+      *)
+        LC_ALL=C printf -v code '%d' "'$char"
+        if [ "$code" -lt 32 ]; then
+          printf -v char '\\u%04x' "$code"
+        fi
+        result="$result$char"
+        ;;
+    esac
+  done
+  JSON_RESULT="$result\""
+}
+
+json_nullable() {
+  if [ -n "$1" ]; then
+    json_quote "$1"
+  else
+    JSON_RESULT=null
+  fi
+}
+
+append_ledger() {
+  local LC_ALL=C status=$1 dir ts_json stage_json reason_json url_json out_json session_json axi_json
+  [ -n "$LEDGER_FILE" ] || return 0
+  dir=$(dirname "$LEDGER_FILE")
+  mkdir -p "$dir" >/dev/null 2>&1 || return 0
+  json_quote "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; ts_json=$JSON_RESULT
+  json_quote "$STAGE"; stage_json=$JSON_RESULT
+  json_nullable "$BLOCK_REASON"; reason_json=$JSON_RESULT
+  json_nullable "$TARGET_URL"; url_json=$JSON_RESULT
+  json_nullable "$OUT_DIR"; out_json=$JSON_RESULT
+  json_nullable "$LOGICAL_SESSION_NAME"; session_json=$JSON_RESULT
+  json_nullable "$AXI_SESSION_NAME"; axi_json=$JSON_RESULT
+  printf '{"ts":%s,"status":%s,"stage":%s,"reason":%s,"url":%s,"out_dir":%s,"session":%s,"axi_session":%s}\n' \
+    "$ts_json" "$status" "$stage_json" "$reason_json" "$url_json" "$out_json" "$session_json" "$axi_json" \
+    >> "$LEDGER_FILE" 2>/dev/null || true
+}
+
+release_mcp_compat_lock() {
+  local lock_pid
+  [ -n "$MCP_COMPAT_LOCK_PID" ] || return 0
+  lock_pid=$MCP_COMPAT_LOCK_PID
+  MCP_COMPAT_LOCK_PID=
+  kill -TERM "$lock_pid" >/dev/null 2>&1 || true
+  wait "$lock_pid" >/dev/null 2>&1 || true
+}
+
+remove_mcp_compat_staging() {
+  local staging_dir
+  [ -n "$MCP_COMPAT_STAGING_DIR" ] || return 0
+  staging_dir=$MCP_COMPAT_STAGING_DIR
+  MCP_COMPAT_STAGING_DIR=
+  rm -rf "$staging_dir" >/dev/null 2>&1 || true
+}
+
+remove_mcp_output_dir() {
+  local output_dir
+  [ -n "$MCP_OUTPUT_DIR" ] || return 0
+  output_dir=$MCP_OUTPUT_DIR
+  MCP_OUTPUT_DIR=
+  rm -rf "$output_dir" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+  LC_ALL=C append_ledger "$status"
+  if [ -n "$AXI_SESSION_NAME" ]; then
+    axi stop >/dev/null 2>&1 || true
+  fi
+  remove_mcp_output_dir
+  remove_mcp_compat_staging
+  release_mcp_compat_lock
+  if [ -n "$TMP_DIR" ]; then
+    rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
+  fi
+  exit "$status"
+}
+
+handle_signal() {
+  local status=$1
+  trap - HUP INT TERM
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -88,44 +269,189 @@ else
   LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$OUT_DIR")")"
 fi
 
-TMP_DIR=
-AXI_SESSION_NAME=
-
-axi() (
-  unset CHROME_DEVTOOLS_AXI_PORT
-  export CHROME_DEVTOOLS_AXI_SESSION="$AXI_SESSION_NAME"
-  export CHROME_DEVTOOLS_AXI_BROWSER_URL="$BROWSER_URL"
-  chrome-devtools-axi "$@"
-)
-
-cleanup() {
-  local status=$?
-  trap - EXIT
-  trap '' HUP INT TERM
-  if [ -n "$AXI_SESSION_NAME" ]; then
-    axi stop >/dev/null 2>&1 || true
-  fi
-  if [ -n "$TMP_DIR" ]; then
-    rm -rf "$TMP_DIR" >/dev/null 2>&1 || true
-  fi
-  exit "$status"
-}
-
-handle_signal() {
-  local status=$1
-  trap - HUP INT TERM
-  exit "$status"
-}
-
-trap cleanup EXIT
-trap 'handle_signal 129' HUP
-trap 'handle_signal 130' INT
-trap 'handle_signal 143' TERM
-
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
-AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
+
+mcp_compat_package_json() {
+  printf '%s/node_modules/chrome-devtools-mcp/package.json\n' "$1"
+}
+
+mcp_compat_script() {
+  printf '%s/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js\n' "$1"
+}
+
+mcp_compat_valid() {
+  local install_dir=$1 package_json script
+  package_json=$(mcp_compat_package_json "$install_dir")
+  script=$(mcp_compat_script "$install_dir")
+  node - "$package_json" "$script" "$MCP_COMPAT_VERSION" <<'NODE' >/dev/null 2>&1 || return 1
+const fs = require('fs');
+const path = require('path');
+const [packageJsonPath, scriptPath, expectedVersion] = process.argv.slice(2);
+const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+const expectedBin = './build/src/bin/chrome-devtools-mcp.js';
+if (packageJson.name !== 'chrome-devtools-mcp') process.exit(1);
+if (packageJson.version !== expectedVersion) process.exit(1);
+if (!packageJson.bin || packageJson.bin['chrome-devtools-mcp'] !== expectedBin) process.exit(1);
+if (path.resolve(path.dirname(packageJsonPath), expectedBin) !== path.resolve(scriptPath)) process.exit(1);
+const stat = fs.statSync(scriptPath);
+if (!stat.isFile() || stat.size === 0) process.exit(1);
+NODE
+  node --check "$script" >/dev/null 2>&1 || return 1
+  node - "$script" <<'NODE' >/dev/null 2>&1
+const { spawnSync } = require('child_process');
+const scriptPath = process.argv[2];
+const probe = spawnSync(process.execPath, [scriptPath, '--help'], {
+  env: {
+    ...process.env,
+    CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS: '1',
+    CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS: '1',
+  },
+  stdio: 'ignore',
+  timeout: 5000,
+  killSignal: 'SIGKILL',
+});
+if (probe.error || probe.signal || probe.status !== 0) process.exit(1);
+NODE
+}
+
+acquire_mcp_compat_lock() {
+  local lock_path=$1 ready_file lock_token lock_status=0
+  command -v perl >/dev/null 2>&1 \
+    || blocked "perl is required to coordinate the chrome-devtools-mcp compatibility cache"
+  ready_file="$TMP_DIR/mcp-lock-ready"
+  lock_token="$$:$(sanitize_token "$(basename "$TMP_DIR")")"
+  rm -f "$ready_file"
+  perl - "$lock_path" "$ready_file" "$$" "$lock_token" <<'PERL' &
+use strict;
+use warnings;
+use Fcntl qw(:flock :DEFAULT :mode SEEK_SET O_NOFOLLOW);
+use IO::Handle;
+
+my ($lock_path, $ready_file, $parent_pid, $lock_token) = @ARGV;
+sysopen my $lock, $lock_path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600 or exit 2;
+my @lock_stat = stat $lock;
+my @path_stat = lstat $lock_path;
+exit 6 unless @lock_stat && @path_stat;
+exit 6 unless S_ISREG($lock_stat[2]) && $lock_stat[3] == 1 && $lock_stat[4] == $<;
+exit 6 unless $lock_stat[0] == $path_stat[0] && $lock_stat[1] == $path_stat[1];
+chmod 0600, $lock_path or exit 6;
+my $running = 1;
+$SIG{HUP} = $SIG{INT} = $SIG{TERM} = sub { $running = 0 };
+while ($running && getppid() == $parent_pid) {
+  last if flock($lock, LOCK_EX | LOCK_NB);
+  select undef, undef, undef, 0.05;
+}
+exit 3 unless $running && getppid() == $parent_pid;
+@lock_stat = stat $lock;
+@path_stat = lstat $lock_path;
+exit 6 unless @lock_stat && @path_stat;
+exit 6 unless S_ISREG($lock_stat[2]) && $lock_stat[3] == 1 && $lock_stat[4] == $<;
+exit 6 unless $lock_stat[0] == $path_stat[0] && $lock_stat[1] == $path_stat[1];
+seek $lock, 0, SEEK_SET or exit 4;
+truncate $lock, 0 or exit 4;
+print {$lock} "$parent_pid\t$$\t$lock_token\n" or exit 4;
+$lock->flush or exit 4;
+open my $ready, '>', $ready_file or exit 5;
+print {$ready} "$lock_token\n" or exit 5;
+close $ready or exit 5;
+while ($running && getppid() == $parent_pid) {
+  select undef, undef, undef, 0.05;
+}
+seek $lock, 0, SEEK_SET;
+truncate $lock, 0;
+close $lock;
+PERL
+  MCP_COMPAT_LOCK_PID=$!
+  while [ ! -s "$ready_file" ]; do
+    if ! kill -0 "$MCP_COMPAT_LOCK_PID" 2>/dev/null; then
+      wait "$MCP_COMPAT_LOCK_PID" || lock_status=$?
+      MCP_COMPAT_LOCK_PID=
+      blocked "could not acquire chrome-devtools-mcp compatibility cache lock ($lock_status): $lock_path"
+    fi
+    sleep "${FM_BROWSER_QA_MCP_LOCK_SLEEP:-0.1}"
+  done
+}
+
+prepare_mcp_compat_lock_file() {
+  local cache_parent=$1 canonical_parent canonical_cache lock_dir lock_key
+  canonical_parent=$(cd "$cache_parent" && pwd -P) \
+    || blocked "could not resolve chrome-devtools-mcp compatibility cache parent: $cache_parent"
+  canonical_cache="$canonical_parent/$(basename "$MCP_COMPAT_DIR")"
+  lock_dir="$HOME/.local/share/fm-browser-qa/locks"
+  [ ! -L "$lock_dir" ] \
+    || blocked "chrome-devtools-mcp compatibility lock directory must not be a symlink: $lock_dir"
+  if [ -e "$lock_dir" ] && [ ! -d "$lock_dir" ]; then
+    blocked "chrome-devtools-mcp compatibility lock path is not a directory: $lock_dir"
+  fi
+  mkdir -p "$lock_dir" \
+    || blocked "could not create chrome-devtools-mcp compatibility lock directory: $lock_dir"
+  chmod 700 "$lock_dir" \
+    || blocked "could not secure chrome-devtools-mcp compatibility lock directory: $lock_dir"
+  lock_key=$(node -e \
+    'const crypto=require("crypto"); process.stdout.write(crypto.createHash("sha256").update(process.argv[1]).digest("hex"))' \
+    "$canonical_cache") \
+    || blocked "could not identify chrome-devtools-mcp compatibility cache lock: $canonical_cache"
+  MCP_COMPAT_LOCK_FILE="$lock_dir/chrome-devtools-mcp-$MCP_COMPAT_VERSION-$lock_key.lock"
+}
+
+ensure_mcp_compat() {
+  local cache_parent default_cache_dir install_output install_error replace_invalid=0
+  if [ "${CHROME_DEVTOOLS_AXI_MCP_PATH+x}" = x ]; then
+    return 0
+  fi
+  [ -n "${HOME:-}" ] || blocked "HOME is not set; cannot prepare the chrome-devtools-mcp compatibility cache"
+  default_cache_dir="$HOME/.local/share/fm-browser-qa/chrome-devtools-mcp-$MCP_COMPAT_VERSION"
+  MCP_COMPAT_DIR=${FM_BROWSER_QA_MCP_COMPAT_DIR:-$default_cache_dir}
+  [ "$MCP_COMPAT_DIR" != "$default_cache_dir" ] || replace_invalid=1
+  if ! mcp_compat_valid "$MCP_COMPAT_DIR"; then
+    if [ "$replace_invalid" -eq 0 ] && { [ -e "$MCP_COMPAT_DIR" ] || [ -L "$MCP_COMPAT_DIR" ]; }; then
+      blocked "refusing to replace an invalid custom chrome-devtools-mcp compatibility cache: $MCP_COMPAT_DIR"
+    fi
+    command -v npm >/dev/null 2>&1 \
+      || blocked "npm is required to install chrome-devtools-mcp $MCP_COMPAT_VERSION for chrome-devtools-axi compatibility"
+    cache_parent=$(dirname "$MCP_COMPAT_DIR")
+    mkdir -p "$cache_parent" \
+      || blocked "could not create chrome-devtools-mcp compatibility cache parent: $cache_parent"
+    prepare_mcp_compat_lock_file "$cache_parent"
+    acquire_mcp_compat_lock "$MCP_COMPAT_LOCK_FILE"
+    if ! mcp_compat_valid "$MCP_COMPAT_DIR"; then
+      MCP_COMPAT_STAGING_DIR=$(mktemp -d "$cache_parent/.chrome-devtools-mcp-$MCP_COMPAT_VERSION.staging.XXXXXX") \
+        || blocked "could not create chrome-devtools-mcp compatibility staging directory in: $cache_parent"
+      install_output="$TMP_DIR/mcp-install.out"
+      install_error="$TMP_DIR/mcp-install.err"
+      if ! npm install --prefix "$MCP_COMPAT_STAGING_DIR" --no-save --no-package-lock \
+        --ignore-scripts --omit=dev "chrome-devtools-mcp@$MCP_COMPAT_VERSION" \
+        > "$install_output" 2> "$install_error"; then
+        blocked "could not install chrome-devtools-mcp $MCP_COMPAT_VERSION compatibility cache: $(stream_detail "$install_error" "$install_output")"
+      fi
+      mcp_compat_valid "$MCP_COMPAT_STAGING_DIR" \
+        || blocked "installed chrome-devtools-mcp compatibility cache failed validation: $MCP_COMPAT_STAGING_DIR"
+      if [ -e "$MCP_COMPAT_DIR" ] || [ -L "$MCP_COMPAT_DIR" ]; then
+        [ "$replace_invalid" -eq 1 ] \
+          || blocked "refusing to replace an invalid custom chrome-devtools-mcp compatibility cache: $MCP_COMPAT_DIR"
+        rm -rf "$MCP_COMPAT_DIR" \
+          || blocked "could not replace invalid chrome-devtools-mcp compatibility cache: $MCP_COMPAT_DIR"
+      fi
+      mv "$MCP_COMPAT_STAGING_DIR" "$MCP_COMPAT_DIR" \
+        || blocked "could not publish chrome-devtools-mcp compatibility cache: $MCP_COMPAT_DIR"
+      MCP_COMPAT_STAGING_DIR=
+    fi
+    mcp_compat_valid "$MCP_COMPAT_DIR" \
+      || blocked "chrome-devtools-mcp compatibility cache is invalid after publish: $MCP_COMPAT_DIR"
+    release_mcp_compat_lock
+  fi
+  mcp_compat_valid "$MCP_COMPAT_DIR" \
+    || blocked "chrome-devtools-mcp compatibility cache is invalid after install: $MCP_COMPAT_DIR"
+  CHROME_DEVTOOLS_AXI_MCP_PATH=$(mcp_compat_script "$MCP_COMPAT_DIR")
+  export CHROME_DEVTOOLS_AXI_MCP_PATH
+}
+
+STAGE=mcp-compat
+ensure_mcp_compat
+AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
+STAGE=browser-check
 
 append_warning() {
   printf '%s\n' "- $1" >> "$WARNINGS_FILE"
@@ -365,13 +691,16 @@ probe_page() {
 }
 
 probe_error() {
-  cat "$TMP_DIR/probe-$(safe_page_id "$1").err"
+  local safe_id
+  safe_id=$(safe_page_id "$1")
+  stream_detail "$TMP_DIR/probe-$safe_id.err" "$TMP_DIR/select-$safe_id.out" \
+    "$TMP_DIR/eval-$safe_id.out"
 }
 
 list_page_ids() {
   local label=$1
   if ! axi pages > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
-    blocked "could not enumerate browser pages: $(cat "$TMP_DIR/pages-$label.err")"
+    blocked "could not enumerate browser pages: $(stream_detail "$TMP_DIR/pages-$label.err" "$TMP_DIR/pages-$label.txt")"
   fi
   awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$TMP_DIR/pages-$label.txt"
 }
@@ -399,13 +728,14 @@ scan_pages() {
 
 open_target_page() {
   if ! axi newpage "$TARGET_URL" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
-    blocked "could not open exact QA URL in authenticated browser: $(cat "$TMP_DIR/newpage.err")"
+    blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
 }
 
 NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
 
+STAGE=page-scan
 SCAN_DIR="$TMP_DIR/scan-initial"
 INITIAL_IDS=$(list_page_ids initial)
 scan_pages "$SCAN_DIR" "$INITIAL_IDS" tolerate
@@ -448,6 +778,7 @@ if [ "$MATCH_COUNT" -gt 1 ]; then
   blocked "multiple tabs match the exact QA URL; close duplicates and retry: $TARGET_URL"
 fi
 
+STAGE=identity
 MATCH_LINE=$(sed -n '1p' "$MATCHES")
 PAGE_ID=$(printf '%s\n' "$MATCH_LINE" | cut -f1)
 FINAL_IDENTITY="$TMP_DIR/final-identity.json"
@@ -467,16 +798,27 @@ fi
 
 write_identity "$FINAL_IDENTITY" "$PAGE_ID"
 
+STAGE=snapshot
 if ! axi snapshot > "$OUT_DIR/snapshot.txt" 2> "$TMP_DIR/snapshot.err"; then
-  blocked "snapshot evidence failed: $(cat "$TMP_DIR/snapshot.err")"
+  blocked "snapshot evidence failed: $(stream_detail "$TMP_DIR/snapshot.err" "$OUT_DIR/snapshot.txt")"
 fi
-[ -s "$OUT_DIR/snapshot.txt" ] || blocked "snapshot evidence was empty"
+[ -s "$OUT_DIR/snapshot.txt" ] || blocked "snapshot evidence was empty: $(stream_detail "$TMP_DIR/snapshot.err")"
 
-if ! axi screenshot "$OUT_DIR/screenshot.png" > "$TMP_DIR/screenshot.out" 2> "$TMP_DIR/screenshot.err"; then
-  blocked "screenshot evidence failed: $(cat "$TMP_DIR/screenshot.err")"
+STAGE=screenshot
+MCP_OUTPUT_DIR=$(mktemp -d "/tmp/fm-browser-qa-mcp.XXXXXX") \
+  || blocked "could not create MCP-compatible screenshot staging directory"
+SCREENSHOT_TMP="$MCP_OUTPUT_DIR/screenshot.png"
+if ! axi screenshot "$SCREENSHOT_TMP" > "$TMP_DIR/screenshot.out" 2> "$TMP_DIR/screenshot.err"; then
+  blocked "screenshot evidence failed: $(stream_detail "$TMP_DIR/screenshot.err" "$TMP_DIR/screenshot.out")"
 fi
-[ -s "$OUT_DIR/screenshot.png" ] || blocked "screenshot evidence was empty"
+# axi can exit 0 without producing the file, and it echoes the path it resolved,
+# so surface both streams here rather than reporting a bare "was empty".
+[ -s "$SCREENSHOT_TMP" ] || blocked "screenshot evidence was empty: $(stream_detail "$TMP_DIR/screenshot.out" "$TMP_DIR/screenshot.err")"
+cp "$SCREENSHOT_TMP" "$OUT_DIR/screenshot.png" \
+  || blocked "could not publish screenshot evidence: $OUT_DIR/screenshot.png"
+[ -s "$OUT_DIR/screenshot.png" ] || blocked "published screenshot evidence was empty: $OUT_DIR/screenshot.png"
 
+STAGE=console
 if ! axi console > "$OUT_DIR/console.txt" 2> "$TMP_DIR/console.err"; then
   {
     echo "warning: console capture failed"
@@ -485,6 +827,7 @@ if ! axi console > "$OUT_DIR/console.txt" 2> "$TMP_DIR/console.err"; then
   append_warning "console capture failed; see console.txt"
 fi
 
+STAGE=network
 if ! axi network > "$OUT_DIR/network.txt" 2> "$TMP_DIR/network.err"; then
   {
     echo "warning: network capture failed"
@@ -492,6 +835,11 @@ if ! axi network > "$OUT_DIR/network.txt" 2> "$TMP_DIR/network.err"; then
   } > "$OUT_DIR/network.txt"
   append_warning "network capture failed; see network.txt"
 fi
+
+STAGE=report
+# Evidence directories get reused across runs, so a marker left by an earlier
+# failed run would contradict the report about to be written.
+rm -f "$OUT_DIR/FAILED.md"
 
 {
   echo "# Browser QA Report"
@@ -519,4 +867,5 @@ fi
   fi
 } > "$OUT_DIR/report.md"
 
+STAGE="done"
 echo "ok: browser QA evidence written to $OUT_DIR"
