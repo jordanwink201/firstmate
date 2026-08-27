@@ -313,6 +313,11 @@ Use `bin/fm-browser-qa.sh --url <exact-url> --out <evidence-dir>` for preview QA
 Pass the exact intended QA URL: the helper matches only the browser-normalized form of that URL (for example `https://host` matches the `https://host/` Chrome reports) with no fuzzy matching, host aliases, or query rewriting.
 The helper attaches to that browser by default, opens the exact URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
 It also writes best-effort `console.txt` and `network.txt`, recording capture failures as warnings.
+Until `chrome-devtools-axi` supports current MCP page-id routing, the helper uses a validated, cached compatible MCP transport without modifying the global AXI installation.
+The script header owns the exact pin, cache path, bypass override, and conditional install requirements.
+Once the evidence directory exists, a blocked run leaves `FAILED.md` with its stage and reason, while a successful report clears a stale failure marker.
+When a default or operator-supplied ledger path is available, every invocation best-effort appends one JSON object recording its outcome.
+The script header owns the exact ledger path and override.
 
 Do not put project preview URLs in tracked firstmate policy.
 The exact QA URL comes from a task brief, PR, or local playbook; if firstmate is unsure of the exact URL, ask the captain.
