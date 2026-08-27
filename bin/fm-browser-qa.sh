@@ -43,6 +43,11 @@ MCP_COMPAT_LOCK_PID=
 MCP_COMPAT_STAGING_DIR=
 MCP_OUTPUT_DIR=
 JSON_RESULT=
+CURL_TIMEOUT=${FM_BROWSER_QA_CURL_TIMEOUT:-2}
+case "$CURL_TIMEOUT" in
+  1|2|3|4|5) ;;
+  *) CURL_TIMEOUT=2 ;;
+esac
 # chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
 # Remove this pin after AXI sends pageId or supports disabling page-id routing.
 MCP_COMPAT_VERSION=1.7.0
@@ -274,7 +279,7 @@ WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
 
 target_reachable() {
-  curl -sS --max-time "${FM_BROWSER_QA_CURL_TIMEOUT:-2}" --output /dev/null "$TARGET_URL" >/dev/null 2>&1
+  curl --fail -sS --max-time "$CURL_TIMEOUT" --output /dev/null "$TARGET_URL" >/dev/null 2>&1
 }
 
 STAGE=target-reachability
@@ -470,7 +475,7 @@ browser_json_url() {
 }
 
 browser_reachable() {
-  curl -fsS --max-time "${FM_BROWSER_QA_CURL_TIMEOUT:-2}" "$(browser_json_url)" >/dev/null 2>&1
+  curl -fsS --max-time "$CURL_TIMEOUT" "$(browser_json_url)" >/dev/null 2>&1
 }
 
 browser_debugging_port() {
@@ -735,10 +740,17 @@ scan_pages() {
 }
 
 open_target_page() {
+  local landing_identity=$1
   if ! axi newpage "$TARGET_URL" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
     blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
+  if ! axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/newpage-eval.out" 2> "$TMP_DIR/newpage-eval.err"; then
+    blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/newpage-eval.err" "$TMP_DIR/newpage-eval.out")"
+  fi
+  if ! parse_eval_identity "$TMP_DIR/newpage-eval.out" "$landing_identity" 2> "$TMP_DIR/newpage-parse.err"; then
+    blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/newpage-parse.err" "$TMP_DIR/newpage-eval.out")"
+  fi
 }
 
 NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
@@ -753,7 +765,11 @@ MATCH_COUNT=$(count_lines "$MATCHES")
 
 if [ "$MATCH_COUNT" -eq 0 ]; then
   LANDING_IDS=
-  open_target_page
+  LANDING_IDENTITY="$TMP_DIR/newpage-identity.json"
+  open_target_page "$LANDING_IDENTITY"
+  if is_auth_blocked "$(json_field "$LANDING_IDENTITY" href)" "$(json_field "$LANDING_IDENTITY" title)"; then
+    auth_blocked
+  fi
   POST_IDS=$(list_page_ids after-open)
   for page_id in $POST_IDS; do
     known=0
@@ -786,13 +802,6 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
   MATCHES="$SCAN_DIR/matches.tsv"
   MATCH_COUNT=$(count_lines "$MATCHES")
   if [ "$MATCH_COUNT" -eq 0 ]; then
-    for page_id in $LANDING_IDS; do
-      identity_json="$SCAN_DIR/page-$(safe_page_id "$page_id").json"
-      [ -f "$identity_json" ] || continue
-      if is_auth_blocked "$(json_field "$identity_json" href)" "$(json_field "$identity_json" title)"; then
-        auth_blocked
-      fi
-    done
     blocked "exact QA URL is not open after navigation: $TARGET_URL"
   fi
 fi

@@ -23,6 +23,24 @@ SH
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 url=${*: -1}
+fail_http=0
+max_time=
+previous=
+for arg in "$@"; do
+  case "$arg" in
+    -f|--fail|--fail-with-body) fail_http=1 ;;
+  esac
+  if [ "$previous" = "--max-time" ]; then
+    max_time=$arg
+  fi
+  previous=$arg
+done
+if [ -e "$FM_FAKE_BROWSER_DIR/require_bounded_timeout" ]; then
+  case "$max_time" in
+    1|2|3|4|5) ;;
+    *) exit 28 ;;
+  esac
+fi
 if [ -e "$FM_FAKE_BROWSER_DIR/curl.log" ]; then
   printf '%s\n' "$url" >> "$FM_FAKE_BROWSER_DIR/curl.log"
 fi
@@ -32,6 +50,9 @@ case "$url" in
     ;;
   *)
     [ ! -e "$FM_FAKE_BROWSER_DIR/target_down" ] || exit 7
+    if [ -e "$FM_FAKE_BROWSER_DIR/target_http_error" ] && [ "$fail_http" -eq 1 ]; then
+      exit 22
+    fi
     ;;
 esac
 if [ -e "$FM_FAKE_BROWSER_DIR/curl_fail" ]; then
@@ -179,6 +200,11 @@ NODE
       id=$(next_id)
     fi
     printf '%s\t%s\n' "$href" "$title" > "$(page_file "$id")"
+    printf '%s\n' "$id" > "$dir/selected"
+    if [ -e "$dir/newpage_mutates_page" ]; then
+      IFS='	' read -r mutate_id mutate_href mutate_title < "$dir/newpage_mutates_page"
+      printf '%s\t%s\n' "$mutate_href" "$mutate_title" > "$(page_file "$mutate_id")"
+    fi
     printf '%s\n' "$url" >> "$dir/newpage.log"
     printf 'page:\n  title: %s\n' "$title"
     ;;
@@ -803,6 +829,43 @@ test_unreachable_target_blocks_before_opening_browser_tab() {
   pass "fm-browser-qa.sh: unreachable target blocks before opening a browser tab"
 }
 
+test_http_error_target_blocks_before_opening_browser_tab() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/target-http-error"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://feature-down.example.test/qa"
+  mkdir -p "$dir/browser"
+  : > "$dir/browser/target_http_error"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence" --start-if-needed)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "HTTP error target should exit 1"
+  assert_contains "$out" "blocked: target host is unreachable; likely torn-down feature branch for exact QA URL: $target_url" \
+    "HTTP error target should report the likely torn-down feature branch"
+  assert_absent "$dir/browser/open.log" "HTTP error target should not start Chrome"
+  assert_absent "$dir/browser/newpage_started" "HTTP error target should not open a browser tab"
+  assert_absent "$dir/browser/axi.log" "HTTP error target should not start an AXI bridge"
+  pass "fm-browser-qa.sh: HTTP error target blocks before opening a browser tab"
+}
+
+test_curl_timeout_override_remains_bounded() {
+  local dir fakebin
+  dir="$TMP_ROOT/bounded-curl-timeout"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  : > "$dir/browser/require_bounded_timeout"
+
+  FM_BROWSER_QA_CURL_TIMEOUT=0 \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-zero" >/dev/null
+  FM_BROWSER_QA_CURL_TIMEOUT=999 \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-large" >/dev/null
+
+  pass "fm-browser-qa.sh: curl timeout override remains bounded"
+}
+
 test_browser_unreachable_without_start_blocks() {
   local dir fakebin out status
   dir="$TMP_ROOT/browser-down"
@@ -965,7 +1028,7 @@ test_auth_blocked_reported() {
   dir="$TMP_ROOT/auth"
   fakebin=$(make_fake_browser_tools "$dir")
   mkdir -p "$dir/browser"
-  write_page "$dir/browser" 1 "https://example.test/other" "Other"
+  write_page "$dir/browser" 1 "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access"
   printf '%s\t%s\n' "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access" > "$dir/browser/newpage_redirect"
   printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
 
@@ -1008,7 +1071,8 @@ test_unrelated_sign_in_tab_does_not_report_auth_expired() {
   local dir fakebin out status
   dir="$TMP_ROOT/signin-other"
   fakebin=$(make_fake_browser_tools "$dir")
-  write_page "$dir/browser" 1 "https://github.com/login" "Sign in to GitHub"
+  write_page "$dir/browser" 1 "https://github.com/" "GitHub"
+  printf '%s\t%s\t%s\n' 1 "https://github.com/login" "Sign in to GitHub" > "$dir/browser/newpage_mutates_page"
   printf '%s\t%s\n' "https://example.test/elsewhere" "Elsewhere" > "$dir/browser/newpage_redirect"
 
   set +e
@@ -1313,6 +1377,8 @@ test_compatibility_lock_refuses_symlink_sidecar
 test_explicit_mcp_path_bypasses_compatibility_cache
 test_explicit_mcp_path_works_without_home
 test_unreachable_target_blocks_before_opening_browser_tab
+test_http_error_target_blocks_before_opening_browser_tab
+test_curl_timeout_override_remains_bounded
 test_browser_unreachable_without_start_blocks
 test_start_if_needed_uses_persistent_visible_profile
 test_start_if_needed_refuses_existing_temporary_profile
