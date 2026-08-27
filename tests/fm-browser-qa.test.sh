@@ -1107,6 +1107,34 @@ test_delayed_auth_redirect_is_reprobed_authoritatively() {
   pass "fm-browser-qa.sh: delayed auth redirect is re-probed authoritatively"
 }
 
+test_later_reused_tab_auth_observation_is_reconciled() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/auth-later-reused"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://example.test/qa"
+  write_page "$dir/browser" 1 "https://example.test/other" "Other"
+  printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
+  printf '%s\t%s\n' "https://example.test/loading" "Loading" > "$dir/browser/newpage_redirect"
+  printf '%s\t%s\t%s\n' 3 "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access" \
+    > "$dir/browser/delayed_redirect_1"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "later reused-tab auth redirect should exit 1"
+  assert_contains "$out" "blocked: authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "later reused-tab auth redirect should retain the exact session-expired message"
+  assert_not_contains "$out" "exact QA URL is not open after navigation" \
+    "later reused-tab auth redirect should not fall through to generic navigation failure"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "later reused-tab auth redirect should record the distinct authentication-expired reason"
+  pass "fm-browser-qa.sh: later reused-tab auth observation is reconciled"
+}
+
 test_authoritative_exact_target_is_accepted() {
   local dir fakebin out status target_url
   dir="$TMP_ROOT/authoritative-exact"
@@ -1527,6 +1555,7 @@ test_multiple_exact_tabs_refused
 test_selected_url_mismatch_refused
 test_auth_blocked_reported
 test_delayed_auth_redirect_is_reprobed_authoritatively
+test_later_reused_tab_auth_observation_is_reconciled
 test_authoritative_exact_target_is_accepted
 test_authoritative_auth_precedes_unprobeable_fallback
 test_unprobeable_fallback_preserves_navigation_failure

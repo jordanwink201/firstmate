@@ -827,6 +827,17 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
     initial_title=$(json_field "$initial_identity" title)
     post_href=$(json_field "$post_identity" href)
     post_title=$(json_field "$post_identity" title)
+    if [ "$page_id" = "$LANDING_PAGE_ID" ]; then
+      if is_auth_blocked "$post_href" "$post_title"; then
+        auth_blocked
+      fi
+      if [ "$post_href" = "$NORM_TARGET_URL" ]; then
+        AUTHORITATIVE_IDENTITY=$post_identity
+        AUTHORITATIVE_HREF=$post_href
+        AUTHORITATIVE_TITLE=$post_title
+      fi
+      continue
+    fi
     if [ "$post_href" != "$initial_href" ] || [ "$post_title" != "$initial_title" ]; then
       LANDING_IDS="$LANDING_IDS $page_id"
     fi
