@@ -162,6 +162,11 @@ case "$cmd" in
   selectpage)
     id=${1:?}
     [ -e "$(page_file "$id")" ] || { echo "no such page: $id" >&2; exit 1; }
+    if [ -e "$dir/unprobeable_once_$id" ]; then
+      rm -f "$dir/unprobeable_once_$id"
+      echo "cannot attach to page $id" >&2
+      exit 1
+    fi
     if [ -e "$dir/unprobeable_$id" ]; then
       echo "cannot attach to page $id" >&2
       exit 1
@@ -1102,6 +1107,87 @@ test_delayed_auth_redirect_is_reprobed_authoritatively() {
   pass "fm-browser-qa.sh: delayed auth redirect is re-probed authoritatively"
 }
 
+test_authoritative_exact_target_is_accepted() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/authoritative-exact"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://example.test/qa"
+  write_page "$dir/browser" 1 "https://example.test/other" "Other"
+  : > "$dir/browser/unprobeable_once_1"
+  printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "authoritative exact target should succeed"
+  assert_not_contains "$out" "exact QA URL is not open after navigation" \
+    "authoritative exact target should not report a navigation failure"
+  assert_grep '"active_url": "https://example.test/qa"' "$dir/evidence/identity.json" \
+    "authoritative exact target should be retained as the verified match"
+  pass "fm-browser-qa.sh: authoritative exact target is accepted"
+}
+
+test_authoritative_auth_precedes_unprobeable_fallback() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/auth-before-fallback"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://example.test/qa"
+  write_page "$dir/browser" 1 "https://example.test/other" "Other"
+  printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
+  printf '%s\t%s\t%s\n' 2 "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access" \
+    > "$dir/browser/delayed_redirect_1"
+  printf '%s\t%s\t%s\n' 2 "chrome://gpu" "GPU Internals" > "$dir/browser/newpage_mutates_page"
+  : > "$dir/browser/unprobeable_2"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "authoritative auth redirect should exit 1"
+  assert_contains "$out" "blocked: authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "authoritative auth redirect should retain the exact session-expired message"
+  assert_not_contains "$out" "could not prove browser page 2 identity" \
+    "unprobeable fallback should not preempt the authoritative auth verdict"
+  assert_not_contains "$out" "exact QA URL is not open after navigation" \
+    "authoritative auth redirect should not fall through to generic navigation failure"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "authoritative auth redirect should record the distinct authentication-expired reason"
+  pass "fm-browser-qa.sh: authoritative auth precedes fallback probing"
+}
+
+test_unprobeable_fallback_preserves_navigation_failure() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/unprobeable-fallback"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://example.test/qa"
+  write_page "$dir/browser" 1 "https://example.test/other" "Other"
+  printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
+  printf '%s\t%s\n' "https://example.test/elsewhere" "Elsewhere" > "$dir/browser/newpage_redirect"
+  printf '%s\t%s\t%s\n' 2 "chrome://gpu" "GPU Internals" > "$dir/browser/newpage_mutates_page"
+  : > "$dir/browser/unprobeable_2"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "unresolved navigation with unprobeable fallback should exit 1"
+  assert_contains "$out" "blocked: exact QA URL is not open after navigation: $target_url" \
+    "unprobeable fallback should preserve the exact generic navigation message"
+  assert_not_contains "$out" "could not prove browser page 2 identity" \
+    "unprobeable fallback should not replace the navigation classification"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "exact QA URL is not open after navigation: $target_url" \
+    "unprobeable fallback should record the distinct generic exact-URL reason"
+  pass "fm-browser-qa.sh: unprobeable fallback preserves navigation failure"
+}
+
 test_unprobeable_unrelated_tab_is_skipped() {
   local dir fakebin evidence
   dir="$TMP_ROOT/unprobeable-other"
@@ -1441,6 +1527,9 @@ test_multiple_exact_tabs_refused
 test_selected_url_mismatch_refused
 test_auth_blocked_reported
 test_delayed_auth_redirect_is_reprobed_authoritatively
+test_authoritative_exact_target_is_accepted
+test_authoritative_auth_precedes_unprobeable_fallback
+test_unprobeable_fallback_preserves_navigation_failure
 test_unprobeable_unrelated_tab_is_skipped
 test_unrelated_sign_in_tab_does_not_report_auth_expired
 test_sign_in_substring_title_is_not_auth
