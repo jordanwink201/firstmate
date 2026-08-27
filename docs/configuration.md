@@ -311,7 +311,12 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 Browser QA also needs an authenticated Chrome remote-debugging endpoint, defaulting to `http://127.0.0.1:9222`.
 Use `bin/fm-browser-qa.sh --url <exact-url> --out <evidence-dir>` for preview QA.
 Pass the exact intended QA URL: the helper matches only the browser-normalized form of that URL (for example `https://host` matches the `https://host/` Chrome reports) with no fuzzy matching, host aliases, or query rewriting.
+Before preparing the MCP transport or touching the browser, the helper makes a bounded curl request to the exact target URL.
+Network failures, timeouts, and HTTP errors block as a likely torn-down feature host, while HTTP redirects proceed so Cloudflare Access can receive the authentication classification.
+`FM_BROWSER_QA_CURL_TIMEOUT` controls both target and browser reachability requests; it defaults to 2 seconds, honors positive finite values accepted by curl, and resets invalid or unbounded values to 2.
 The helper attaches to that browser by default, opens the exact URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
+After navigation, an authoritative landing on Cloudflare Access or a sign-in page uses the authenticated-browser-session-expired blocker.
+If neither that landing nor the tolerant broader tab scan finds the exact URL, the helper uses the exact-QA-URL blocker without letting an unrelated unprobeable tab replace that classification.
 It also writes best-effort `console.txt` and `network.txt`, recording capture failures as warnings.
 Until `chrome-devtools-axi` supports current MCP page-id routing, the helper uses a validated, cached compatible MCP transport without modifying the global AXI installation.
 The script header owns the exact pin, cache path, bypass override, and conditional install requirements.
@@ -321,7 +326,8 @@ The script header owns the exact ledger path and override.
 
 Do not put project preview URLs in tracked firstmate policy.
 The exact QA URL comes from a task brief, PR, or local playbook; if firstmate is unsure of the exact URL, ask the captain.
-If the authenticated browser is unreachable, expired, on Cloudflare Access, or on a sign-in page, the helper exits with `blocked: ...` wording so the task stops instead of inventing Python websocket, `chrome-remote-interface`, or Playwright fallbacks.
+If the Chrome remote-debugging endpoint is unavailable, the helper retains its browser-endpoint blocker.
+All target, browser, authentication, and exact-URL blockers use `blocked: ...` wording so the task stops instead of inventing Python websocket, `chrome-remote-interface`, or Playwright fallbacks.
 
 ## X mode (.env)
 
