@@ -1135,6 +1135,62 @@ test_later_reused_tab_auth_observation_is_reconciled() {
   pass "fm-browser-qa.sh: later reused-tab auth observation is reconciled"
 }
 
+test_late_new_landing_auth_is_reconciled() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/auth-late-new"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://example.test/qa"
+  mkdir -p "$dir/browser"
+  printf '%s\t%s\n' "https://example.test/loading" "Loading" > "$dir/browser/newpage_redirect"
+  printf '%s\t%s\t%s\n' 2 "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access" \
+    > "$dir/browser/delayed_redirect_1"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "late new landing auth redirect should exit 1"
+  assert_contains "$out" "blocked: authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "late new landing auth redirect should retain the exact session-expired message"
+  assert_not_contains "$out" "exact QA URL is not open after navigation" \
+    "late new landing auth redirect should not fall through to generic navigation failure"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "late new landing auth redirect should record the distinct authentication-expired reason"
+  pass "fm-browser-qa.sh: late new landing auth is reconciled"
+}
+
+test_late_unidentified_landing_auth_is_reconciled() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/auth-late-unidentified"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://example.test/qa"
+  write_page "$dir/browser" 1 "https://example.test/other" "Other"
+  : > "$dir/browser/unprobeable_once_1"
+  printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
+  printf '%s\t%s\n' "https://example.test/loading" "Loading" > "$dir/browser/newpage_redirect"
+  printf '%s\t%s\t%s\n' 2 "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access" \
+    > "$dir/browser/delayed_redirect_1"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "late unidentified landing auth redirect should exit 1"
+  assert_contains "$out" "blocked: authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "late unidentified landing auth redirect should retain the exact session-expired message"
+  assert_not_contains "$out" "exact QA URL is not open after navigation" \
+    "late unidentified landing auth redirect should not fall through to generic navigation failure"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "late unidentified landing auth redirect should record the distinct authentication-expired reason"
+  pass "fm-browser-qa.sh: late unidentified landing auth is reconciled"
+}
+
 test_authoritative_exact_target_is_accepted() {
   local dir fakebin out status target_url
   dir="$TMP_ROOT/authoritative-exact"
@@ -1556,6 +1612,8 @@ test_selected_url_mismatch_refused
 test_auth_blocked_reported
 test_delayed_auth_redirect_is_reprobed_authoritatively
 test_later_reused_tab_auth_observation_is_reconciled
+test_late_new_landing_auth_is_reconciled
+test_late_unidentified_landing_auth_is_reconciled
 test_authoritative_exact_target_is_accepted
 test_authoritative_auth_precedes_unprobeable_fallback
 test_unprobeable_fallback_preserves_navigation_failure

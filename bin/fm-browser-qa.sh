@@ -806,6 +806,22 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
     auth_blocked
   fi
   for page_id in $POST_IDS; do
+    if [ "$page_id" = "$LANDING_PAGE_ID" ]; then
+      post_identity="$TMP_DIR/post-open-page-$(safe_page_id "$page_id").json"
+      if probe_page "$page_id" "$post_identity"; then
+        post_href=$(json_field "$post_identity" href)
+        post_title=$(json_field "$post_identity" title)
+        if is_auth_blocked "$post_href" "$post_title"; then
+          auth_blocked
+        fi
+        if [ "$post_href" = "$NORM_TARGET_URL" ]; then
+          AUTHORITATIVE_IDENTITY=$post_identity
+          AUTHORITATIVE_HREF=$post_href
+          AUTHORITATIVE_TITLE=$post_title
+        fi
+      fi
+      continue
+    fi
     known=0
     for known_id in $INITIAL_IDS; do
       if [ "$page_id" = "$known_id" ]; then
@@ -827,17 +843,6 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
     initial_title=$(json_field "$initial_identity" title)
     post_href=$(json_field "$post_identity" href)
     post_title=$(json_field "$post_identity" title)
-    if [ "$page_id" = "$LANDING_PAGE_ID" ]; then
-      if is_auth_blocked "$post_href" "$post_title"; then
-        auth_blocked
-      fi
-      if [ "$post_href" = "$NORM_TARGET_URL" ]; then
-        AUTHORITATIVE_IDENTITY=$post_identity
-        AUTHORITATIVE_HREF=$post_href
-        AUTHORITATIVE_TITLE=$post_title
-      fi
-      continue
-    fi
     if [ "$post_href" != "$initial_href" ] || [ "$post_title" != "$initial_title" ]; then
       LANDING_IDS="$LANDING_IDS $page_id"
     fi
