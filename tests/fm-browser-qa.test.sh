@@ -7,8 +7,11 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-browser-qa)
 REAL_NODE=$(command -v node || true)
+REAL_CURL=$(command -v curl || true)
 
 [ -n "$REAL_NODE" ] || fail "node is required for fm-browser-qa tests"
+[ -n "$REAL_CURL" ] || fail "curl is required for fm-browser-qa tests"
+export FM_REAL_CURL=$REAL_CURL
 
 make_fake_browser_tools() {
   local dir=$1 fakebin
@@ -35,11 +38,11 @@ for arg in "$@"; do
   fi
   previous=$arg
 done
-if [ -e "$FM_FAKE_BROWSER_DIR/require_bounded_timeout" ]; then
-  case "$max_time" in
-    1|2|3|4|5) ;;
-    *) exit 28 ;;
-  esac
+if [ "$url" = "--version" ]; then
+  exec "$FM_REAL_CURL" "$@"
+fi
+if [ -e "$FM_FAKE_BROWSER_DIR/curl_timeout.log" ]; then
+  printf '%s\n' "$max_time" >> "$FM_FAKE_BROWSER_DIR/curl_timeout.log"
 fi
 if [ -e "$FM_FAKE_BROWSER_DIR/curl.log" ]; then
   printf '%s\n' "$url" >> "$FM_FAKE_BROWSER_DIR/curl.log"
@@ -851,19 +854,31 @@ test_http_error_target_blocks_before_opening_browser_tab() {
   pass "fm-browser-qa.sh: HTTP error target blocks before opening a browser tab"
 }
 
-test_curl_timeout_override_remains_bounded() {
-  local dir fakebin
+test_curl_timeout_override_preserves_finite_values() {
+  local dir fakebin expected
   dir="$TMP_ROOT/bounded-curl-timeout"
   fakebin=$(make_fake_browser_tools "$dir")
   write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
-  : > "$dir/browser/require_bounded_timeout"
+  : > "$dir/browser/curl_timeout.log"
 
-  FM_BROWSER_QA_CURL_TIMEOUT=0 \
-    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-zero" >/dev/null
-  FM_BROWSER_QA_CURL_TIMEOUT=999 \
-    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-large" >/dev/null
+  for expected in 10 2.92 999; do
+    : > "$dir/browser/curl_timeout.log"
+    FM_BROWSER_QA_CURL_TIMEOUT=$expected \
+      run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-$expected" >/dev/null
+    awk -v expected="$expected" '$0 != expected { exit 1 } END { if (NR != 2) exit 1 }' \
+      "$dir/browser/curl_timeout.log" \
+      || fail "finite curl timeout $expected should be preserved for target and browser checks"
+  done
 
-  pass "fm-browser-qa.sh: curl timeout override remains bounded"
+  for expected in 0 0.0009 invalid 1e16 1e9999; do
+    : > "$dir/browser/curl_timeout.log"
+    FM_BROWSER_QA_CURL_TIMEOUT=$expected \
+      run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-invalid-$expected" >/dev/null
+    awk '$0 != "2" { exit 1 } END { if (NR != 2) exit 1 }' "$dir/browser/curl_timeout.log" \
+      || fail "invalid or unbounded curl timeout $expected should use the bounded default"
+  done
+
+  pass "fm-browser-qa.sh: curl timeout override preserves finite values"
 }
 
 test_browser_unreachable_without_start_blocks() {
@@ -1378,7 +1393,7 @@ test_explicit_mcp_path_bypasses_compatibility_cache
 test_explicit_mcp_path_works_without_home
 test_unreachable_target_blocks_before_opening_browser_tab
 test_http_error_target_blocks_before_opening_browser_tab
-test_curl_timeout_override_remains_bounded
+test_curl_timeout_override_preserves_finite_values
 test_browser_unreachable_without_start_blocks
 test_start_if_needed_uses_persistent_visible_profile
 test_start_if_needed_refuses_existing_temporary_profile

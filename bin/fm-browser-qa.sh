@@ -44,10 +44,6 @@ MCP_COMPAT_STAGING_DIR=
 MCP_OUTPUT_DIR=
 JSON_RESULT=
 CURL_TIMEOUT=${FM_BROWSER_QA_CURL_TIMEOUT:-2}
-case "$CURL_TIMEOUT" in
-  1|2|3|4|5) ;;
-  *) CURL_TIMEOUT=2 ;;
-esac
 # chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
 # Remove this pin after AXI sends pageId or supports disabling page-id routing.
 MCP_COMPAT_VERSION=1.7.0
@@ -108,6 +104,16 @@ sanitize_token() {
   token=$(printf '%s' "$raw" | LC_ALL=C tr -c '[:alnum:]_.-' '-' | sed 's/^-*//; s/-*$//')
   [ -n "$token" ] || token=default
   printf '%s\n' "$token"
+}
+
+curl_timeout_valid() {
+  node - "$1" <<'NODE' >/dev/null 2>&1 || return 1
+const raw = process.argv[2];
+const syntax = /^\+?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+const value = Number(raw);
+process.exit(syntax.test(raw) && Number.isFinite(value) && value >= 0.001 ? 0 : 1);
+NODE
+  curl --silent --show-error --max-time "$1" --version >/dev/null 2>&1
 }
 
 axi() (
@@ -264,6 +270,7 @@ done
 command -v chrome-devtools-axi >/dev/null 2>&1 || blocked "chrome-devtools-axi is not installed or not on PATH"
 command -v curl >/dev/null 2>&1 || blocked "curl is not installed or not on PATH"
 command -v node >/dev/null 2>&1 || blocked "node is not installed or not on PATH"
+curl_timeout_valid "$CURL_TIMEOUT" || CURL_TIMEOUT=2
 
 BROWSER_URL=${BROWSER_URL%/}
 mkdir -p "$OUT_DIR" || blocked "could not create evidence directory: $OUT_DIR"
