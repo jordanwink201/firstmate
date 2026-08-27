@@ -22,7 +22,19 @@ SH
 
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
-if [ -e "$FM_FAKE_BROWSER_DIR/browser_down" ]; then
+url=${*: -1}
+if [ -e "$FM_FAKE_BROWSER_DIR/curl.log" ]; then
+  printf '%s\n' "$url" >> "$FM_FAKE_BROWSER_DIR/curl.log"
+fi
+case "$url" in
+  */json/version)
+    [ ! -e "$FM_FAKE_BROWSER_DIR/browser_down" ] || exit 7
+    ;;
+  *)
+    [ ! -e "$FM_FAKE_BROWSER_DIR/target_down" ] || exit 7
+    ;;
+esac
+if [ -e "$FM_FAKE_BROWSER_DIR/curl_fail" ]; then
   exit 7
 fi
 printf '{"Browser":"fake"}\n'
@@ -161,7 +173,11 @@ NODE
       href=$url
       title=${FM_FAKE_BROWSER_TITLE:-QA Target}
     fi
-    id=$(next_id)
+    if [ -e "$dir/newpage_reuses_page" ]; then
+      id=$(cat "$dir/newpage_reuses_page")
+    else
+      id=$(next_id)
+    fi
     printf '%s\t%s\n' "$href" "$title" > "$(page_file "$id")"
     printf '%s\n' "$url" >> "$dir/newpage.log"
     printf 'page:\n  title: %s\n' "$title"
@@ -284,6 +300,21 @@ NODE
 assert_tmp_root_empty() {
   local dir=$1 label=$2
   [ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit)" ] || fail "$label"
+}
+
+assert_ledger_block_reason() {
+  local ledger=$1 expected_stage=$2 expected_reason=$3 label=$4
+  node - "$ledger" "$expected_stage" "$expected_reason" <<'NODE' || fail "$label"
+const fs = require('fs');
+const [ledger, expectedStage, expectedReason] = process.argv.slice(2);
+const rows = fs.readFileSync(ledger, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+const expectedKeys = ['axi_session', 'out_dir', 'reason', 'session', 'stage', 'status', 'ts', 'url'].sort();
+if (rows.length !== 1) process.exit(1);
+const row = rows[0];
+const keys = Object.keys(row).sort();
+if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) process.exit(1);
+if (row.status !== 1 || row.stage !== expectedStage || row.reason !== expectedReason) process.exit(1);
+NODE
 }
 
 test_requires_url_and_out() {
@@ -742,6 +773,36 @@ NODE
   pass "fm-browser-qa.sh: explicit MCP path works without HOME"
 }
 
+test_unreachable_target_blocks_before_opening_browser_tab() {
+  local dir fakebin out status target_url curl_count
+  dir="$TMP_ROOT/target-down"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://feature-down.example.test/qa"
+  mkdir -p "$dir/browser"
+  : > "$dir/browser/target_down"
+  : > "$dir/browser/curl.log"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence" --start-if-needed)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "unreachable target should exit 1"
+  assert_contains "$out" "blocked: target host is unreachable; likely torn-down feature branch for exact QA URL: $target_url" \
+    "unreachable target should report the likely torn-down feature branch"
+  curl_count=$(wc -l < "$dir/browser/curl.log" | tr -d '[:space:]')
+  [ "$curl_count" -eq 1 ] || fail "unreachable target should be checked once, got $curl_count curl calls"
+  assert_grep "$target_url" "$dir/browser/curl.log" "unreachable target check should curl the exact target URL"
+  assert_absent "$dir/browser/open.log" "unreachable target should not start Chrome"
+  assert_absent "$dir/browser/newpage_started" "unreachable target should not open a browser tab"
+  assert_absent "$dir/browser/axi.log" "unreachable target should not start an AXI bridge"
+  assert_ledger_block_reason "$dir/runs.jsonl" "target-reachability" \
+    "target host is unreachable; likely torn-down feature branch for exact QA URL: $target_url" \
+    "unreachable target should record the distinct likely torn-down reason"
+  pass "fm-browser-qa.sh: unreachable target blocks before opening a browser tab"
+}
+
 test_browser_unreachable_without_start_blocks() {
   local dir fakebin out status
   dir="$TMP_ROOT/browser-down"
@@ -904,10 +965,13 @@ test_auth_blocked_reported() {
   dir="$TMP_ROOT/auth"
   fakebin=$(make_fake_browser_tools "$dir")
   mkdir -p "$dir/browser"
+  write_page "$dir/browser" 1 "https://example.test/other" "Other"
   printf '%s\t%s\n' "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access" > "$dir/browser/newpage_redirect"
+  printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
 
   set +e
-  out=$(run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
   status=$?
   set -e
   expect_code 1 "$status" "auth page should exit 1"
@@ -915,6 +979,11 @@ test_auth_blocked_reported() {
     "auth page should be reported as authenticated-session blocked"
   assert_grep "Google Chrome" "$dir/browser/osascript.log" \
     "auth block should foreground the QA Chrome window"
+  assert_not_contains "$out" "exact QA URL is not open after navigation" \
+    "Cloudflare landed URL should not fall through to generic navigation failure"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "auth page should record the distinct authentication-expired reason"
   pass "fm-browser-qa.sh: auth/sign-in pages block clearly"
 }
 
@@ -943,7 +1012,8 @@ test_unrelated_sign_in_tab_does_not_report_auth_expired() {
   printf '%s\t%s\n' "https://example.test/elsewhere" "Elsewhere" > "$dir/browser/newpage_redirect"
 
   set +e
-  out=$(run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
   status=$?
   set -e
   expect_code 1 "$status" "unresolved navigation should exit 1"
@@ -951,6 +1021,9 @@ test_unrelated_sign_in_tab_does_not_report_auth_expired() {
     "unrelated sign-in tab must not trigger the auth verdict"
   assert_contains "$out" "blocked: exact QA URL is not open after navigation" \
     "unresolved navigation should report the navigation failure"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "exact QA URL is not open after navigation: https://example.test/qa" \
+    "unresolved navigation should record the distinct generic exact-URL reason"
   pass "fm-browser-qa.sh: unrelated sign-in tab does not fake an auth verdict"
 }
 
@@ -1239,6 +1312,7 @@ test_invalid_custom_mcp_cache_is_preserved
 test_compatibility_lock_refuses_symlink_sidecar
 test_explicit_mcp_path_bypasses_compatibility_cache
 test_explicit_mcp_path_works_without_home
+test_unreachable_target_blocks_before_opening_browser_tab
 test_browser_unreachable_without_start_blocks
 test_start_if_needed_uses_persistent_visible_profile
 test_start_if_needed_refuses_existing_temporary_profile

@@ -273,6 +273,14 @@ TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
 
+target_reachable() {
+  curl -sS --max-time "${FM_BROWSER_QA_CURL_TIMEOUT:-2}" --output /dev/null "$TARGET_URL" >/dev/null 2>&1
+}
+
+STAGE=target-reachability
+target_reachable \
+  || blocked "target host is unreachable; likely torn-down feature branch for exact QA URL: $TARGET_URL"
+
 mcp_compat_package_json() {
   printf '%s/node_modules/chrome-devtools-mcp/package.json\n' "$1"
 }
@@ -737,15 +745,16 @@ NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
 
 STAGE=page-scan
 SCAN_DIR="$TMP_DIR/scan-initial"
+INITIAL_SCAN_DIR=$SCAN_DIR
 INITIAL_IDS=$(list_page_ids initial)
 scan_pages "$SCAN_DIR" "$INITIAL_IDS" tolerate
 MATCHES="$SCAN_DIR/matches.tsv"
 MATCH_COUNT=$(count_lines "$MATCHES")
 
 if [ "$MATCH_COUNT" -eq 0 ]; then
+  LANDING_IDS=
   open_target_page
   POST_IDS=$(list_page_ids after-open)
-  NEW_IDS=
   for page_id in $POST_IDS; do
     known=0
     for known_id in $INITIAL_IDS; do
@@ -755,15 +764,29 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
       fi
     done
     if [ "$known" -eq 0 ]; then
-      NEW_IDS="$NEW_IDS $page_id"
+      LANDING_IDS="$LANDING_IDS $page_id"
+      continue
+    fi
+    initial_identity="$INITIAL_SCAN_DIR/page-$(safe_page_id "$page_id").json"
+    [ -f "$initial_identity" ] || continue
+    post_identity="$TMP_DIR/post-open-page-$(safe_page_id "$page_id").json"
+    if ! probe_page "$page_id" "$post_identity"; then
+      continue
+    fi
+    initial_href=$(json_field "$initial_identity" href)
+    initial_title=$(json_field "$initial_identity" title)
+    post_href=$(json_field "$post_identity" href)
+    post_title=$(json_field "$post_identity" title)
+    if [ "$post_href" != "$initial_href" ] || [ "$post_title" != "$initial_title" ]; then
+      LANDING_IDS="$LANDING_IDS $page_id"
     fi
   done
   SCAN_DIR="$TMP_DIR/scan-after-open"
-  scan_pages "$SCAN_DIR" "$NEW_IDS" strict
+  scan_pages "$SCAN_DIR" "$LANDING_IDS" strict
   MATCHES="$SCAN_DIR/matches.tsv"
   MATCH_COUNT=$(count_lines "$MATCHES")
   if [ "$MATCH_COUNT" -eq 0 ]; then
-    for page_id in $NEW_IDS; do
+    for page_id in $LANDING_IDS; do
       identity_json="$SCAN_DIR/page-$(safe_page_id "$page_id").json"
       [ -f "$identity_json" ] || continue
       if is_auth_blocked "$(json_field "$identity_json" href)" "$(json_field "$identity_json" title)"; then
