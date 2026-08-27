@@ -725,6 +725,21 @@ list_page_ids() {
   awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$TMP_DIR/pages-$label.txt"
 }
 
+selected_page_id() {
+  awk '
+    /^[[:space:]]*[A-Za-z0-9_.-]+,/ && /,true[[:space:]]*$/ {
+      gsub(/^[[:space:]]*/, "", $0)
+      sub(/,.*/, "", $0)
+      selected = $0
+      count++
+    }
+    END {
+      if (count != 1) exit 1
+      print selected
+    }
+  ' "$1"
+}
+
 scan_pages() {
   local scan_dir=$1 ids=$2 mode=$3 page_id identity_json href
   mkdir -p "$scan_dir"
@@ -778,6 +793,9 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
     auth_blocked
   fi
   POST_IDS=$(list_page_ids after-open)
+  if ! LANDING_PAGE_ID=$(selected_page_id "$TMP_DIR/pages-after-open.txt"); then
+    blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/pages-after-open.err" "$TMP_DIR/pages-after-open.txt")"
+  fi
   for page_id in $POST_IDS; do
     known=0
     for known_id in $INITIAL_IDS; do
@@ -809,6 +827,13 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
   MATCHES="$SCAN_DIR/matches.tsv"
   MATCH_COUNT=$(count_lines "$MATCHES")
   if [ "$MATCH_COUNT" -eq 0 ]; then
+    AUTHORITATIVE_IDENTITY="$TMP_DIR/newpage-authoritative-identity.json"
+    if ! probe_page "$LANDING_PAGE_ID" "$AUTHORITATIVE_IDENTITY"; then
+      blocked "could not prove browser page $LANDING_PAGE_ID identity: $(probe_error "$LANDING_PAGE_ID")"
+    fi
+    if is_auth_blocked "$(json_field "$AUTHORITATIVE_IDENTITY" href)" "$(json_field "$AUTHORITATIVE_IDENTITY" title)"; then
+      auth_blocked
+    fi
     blocked "exact QA URL is not open after navigation: $TARGET_URL"
   fi
 fi

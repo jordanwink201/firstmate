@@ -151,7 +151,11 @@ case "$cmd" in
       [ -e "$file" ] || continue
       id=${file##*/page_}
       title=$(cut -f2- "$file")
-      printf '  %s,%s,false\n' "$id" "$title"
+      selected=false
+      if [ -e "$dir/selected" ] && [ "$(cat "$dir/selected")" = "$id" ]; then
+        selected=true
+      fi
+      printf '  %s,%s,%s\n' "$id" "$title" "$selected"
     done
     printf 'help[2]:\n'
     ;;
@@ -187,6 +191,12 @@ const value = eval(expr);
 // Match real chrome-devtools-axi output: the eval value is stringified twice.
 process.stdout.write(`result: ${JSON.stringify(JSON.stringify(value))}\n`);
 NODE
+    if [ -e "$dir/delayed_redirect_$id" ]; then
+      IFS='	' read -r redirect_count redirect_href redirect_title < "$dir/delayed_redirect_$id"
+      if [ "$count" -eq "$redirect_count" ]; then
+        printf '%s\t%s\n' "$redirect_href" "$redirect_title" > "$(page_file "$id")"
+      fi
+    fi
     ;;
   newpage)
     url=${1:?}
@@ -1065,6 +1075,33 @@ test_auth_blocked_reported() {
   pass "fm-browser-qa.sh: auth/sign-in pages block clearly"
 }
 
+test_delayed_auth_redirect_is_reprobed_authoritatively() {
+  local dir fakebin out status target_url
+  dir="$TMP_ROOT/auth-delayed"
+  fakebin=$(make_fake_browser_tools "$dir")
+  target_url="https://example.test/qa"
+  write_page "$dir/browser" 1 "https://example.test/other" "Other"
+  printf '%s\n' 1 > "$dir/browser/newpage_reuses_page"
+  printf '%s\t%s\t%s\n' 2 "https://example.cloudflareaccess.com/cdn-cgi/access/login" "Cloudflare Access" \
+    > "$dir/browser/delayed_redirect_1"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+    run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "delayed auth redirect should exit 1"
+  assert_contains "$out" "blocked: authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "delayed auth redirect should report the exact authenticated-session-expired message"
+  assert_not_contains "$out" "exact QA URL is not open after navigation" \
+    "delayed auth redirect should not fall through to generic navigation failure"
+  assert_ledger_block_reason "$dir/runs.jsonl" "page-scan" \
+    "authenticated browser session expired; sign in to the foregrounded QA Chrome window, then rerun" \
+    "delayed auth redirect should record the distinct authentication-expired reason"
+  pass "fm-browser-qa.sh: delayed auth redirect is re-probed authoritatively"
+}
+
 test_unprobeable_unrelated_tab_is_skipped() {
   local dir fakebin evidence
   dir="$TMP_ROOT/unprobeable-other"
@@ -1403,6 +1440,7 @@ test_no_exact_tab_opens_new_page_then_verifies
 test_multiple_exact_tabs_refused
 test_selected_url_mismatch_refused
 test_auth_blocked_reported
+test_delayed_auth_redirect_is_reprobed_authoritatively
 test_unprobeable_unrelated_tab_is_skipped
 test_unrelated_sign_in_tab_does_not_report_auth_expired
 test_sign_in_substring_title_is_not_auth
