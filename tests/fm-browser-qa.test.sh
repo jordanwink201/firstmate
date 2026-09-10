@@ -1506,6 +1506,41 @@ NODE
   pass "fm-browser-qa.sh: inventory preserves titled and untitled selected URLs"
 }
 
+test_opaque_url_tabs_preserve_target_selection() {
+  local dir fakebin identity evidence out mode url='https://teachers.example.test/classes'
+  for mode in qa attach; do
+    dir="$TMP_ROOT/inventory-opaque-$mode"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 5 "$url" 'Classes'
+    write_page "$dir/browser" 2 'data:text/plain,Hello world' ''
+    write_page "$dir/browser" 3 'data:text/plain,Hello world (example)' 'Plain text'
+    write_page "$dir/browser" 7 "$url" 'Classes'
+    printf '2\n' > "$dir/browser/selected"
+
+    if [ "$mode" = attach ]; then
+      out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" \
+        --axi-session inventory-opaque --out "$dir/evidence") \
+        || fail "opaque URL tabs must not block attachment to a healthy target"
+      evidence="$dir/evidence/attached-identity.json"
+    else
+      out=$(run_qa "$fakebin" "$dir/browser" --url "$url" --out "$dir/evidence") \
+        || fail "opaque URL tabs must not block existing-tab QA"
+      evidence="$dir/evidence/identity.json"
+    fi
+    assert_not_contains "$out" 'skipped browser page' "titled and untitled opaque URLs should remain probeable when selected"
+    assert_absent "$dir/browser/newpage.log" "mixed inventory should reuse the healthy exact target"
+    [ "$(cat "$dir/browser/selected")" = 7 ] || fail "mixed inventory must leave the verified target selected"
+    node - "$evidence" "$url" <<'NODE' || fail "mixed inventory must publish the current target identity"
+const fs = require('fs');
+const [file, url] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (identity.page_id !== '7' || identity.active_url !== url || identity.title !== 'Classes') process.exit(1);
+NODE
+  done
+  pass "fm-browser-qa.sh: opaque URL tabs retain selection markers and allow healthy target QA and attachment"
+}
+
 test_real_mcp_to_axi_inventory_conversion() {
   local dir fakebin identity axi_cli out mode
   if [ -z "$REAL_AXI_BIN" ] || [ ! -f "$REAL_MCP_RESPONSE" ]; then
@@ -1529,24 +1564,28 @@ NODE
     fakebin=$(make_fake_browser_tools "$dir")
     identity="$dir/wrapper/identity.json"
     write_identity_json "$identity" 5 "https://teachers.example.test/classes" 'Classes'
+    write_page "$dir/browser" 2 'data:text/plain,Hello world' ''
+    write_page "$dir/browser" 3 'data:text/plain,Hello world (example)' 'Plain text'
     write_page "$dir/browser" 7 "https://teachers.example.test/classes" 'Classes'
     printf '7\n' > "$dir/browser/selected"
     out=$(env PATH="$fakebin:/usr/bin:/bin" FM_FAKE_BROWSER_DIR="$dir/browser" \
       FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_CLI="$axi_cli" chrome-devtools-axi pages)
     assert_contains "$out" '7,Classes,false' "real AXI conversion must reproduce loss of the titled URL and selected marker"
+    assert_contains "$out" '2,data:text/plain,Hello,false' "real AXI conversion should reproduce truncation of an opaque URL containing spaces"
 
     if [ "$mode" = attach ]; then
-      FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
-        --select-identity "$identity" --axi-session real-inventory --out "$dir/evidence" >/dev/null \
+      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
+        --select-identity "$identity" --axi-session real-inventory --out "$dir/evidence") \
         || fail "attachment must accept titled pages emitted by real MCP despite AXI's lossy pages conversion"
       assert_present "$dir/evidence/attached-identity.json" "real MCP attachment should publish evidence"
     else
-      FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
-        --url "https://teachers.example.test/classes" --out "$dir/evidence" >/dev/null \
+      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
+        --url "https://teachers.example.test/classes" --out "$dir/evidence") \
         || fail "existing-tab QA must accept titled pages emitted by real MCP"
       assert_present "$dir/evidence/identity.json" "real MCP QA should publish evidence"
       assert_absent "$dir/browser/newpage.log" "real MCP QA must reuse the existing exact page"
     fi
+    assert_not_contains "$out" 'skipped browser page' "real MCP opaque URLs should remain probeable when selected"
     [ "$(cat "$dir/browser/selected")" = 7 ] || fail "real MCP inventory must retain the verified selected ID"
   done
   pass "fm-browser-qa.sh: real MCP-to-AXI conversion preserves successful titled-page QA through the raw inventory path"
@@ -2148,6 +2187,7 @@ test_trailing_slash_url_is_normalized
 test_attached_identity_rediscovers_page_when_fresh_session_ids_differ
 test_attached_identity_uses_title_to_select_unique_duplicate_url
 test_page_inventory_preserves_titled_urls_and_selection
+test_opaque_url_tabs_preserve_target_selection
 test_real_mcp_to_axi_inventory_conversion
 test_attached_identity_rejects_existing_session_endpoint_mismatch
 test_attached_identity_rejects_unverifiable_session_binding

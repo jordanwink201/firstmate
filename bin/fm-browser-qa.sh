@@ -826,8 +826,8 @@ for (const line of raw.split('\n')) {
     continue;
   }
   if (!inPages || !line.trim()) continue;
-  const titled = line.match(/^(\d+): .* \(([A-Za-z][A-Za-z0-9+.-]*:\S*)\)( \[selected\])?(?: isolatedContext=.*)?$/);
-  const page = titled || line.match(/^(\d+): ([A-Za-z][A-Za-z0-9+.-]*:\S*)( \[selected\])?(?: isolatedContext=.*)?$/);
+  const titled = line.match(/^(\d+): .* \(([A-Za-z][A-Za-z0-9+.-]*:.*?)\)( \[selected\])?(?: isolatedContext=.*)?$/);
+  const page = titled || line.match(/^(\d+): ([A-Za-z][A-Za-z0-9+.-]*:.*?)( \[selected\])?(?: isolatedContext=.*)?$/);
   if (!page || ids.has(page[1])) throw new Error('could not parse an unambiguous MCP page inventory');
   new URL(page[2]);
   ids.add(page[1]);
