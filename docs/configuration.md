@@ -315,6 +315,11 @@ Before preparing the MCP transport or touching the browser, the helper makes a b
 Network failures, timeouts, and HTTP errors block as a likely torn-down feature host, while HTTP redirects proceed so Cloudflare Access can receive the authentication classification.
 `FM_BROWSER_QA_CURL_TIMEOUT` controls both target and browser reachability requests; it defaults to 2 seconds, honors positive finite values accepted by curl, and resets invalid or unbounded values to 2.
 The helper attaches to that browser by default, opens the exact URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
+`identity.json.page_id` is scoped only to the helper's AXI bridge session and must not be reused in a separate AXI session.
+Before follow-up `chrome-devtools-axi` work in a separate AXI session, run `bin/fm-browser-qa.sh --select-identity <evidence-dir>/identity.json --axi-session <session> --out <evidence-dir>/attach`.
+The attached-session selector uses the identity's browser endpoint and browser-normalized URL, reprobes current tabs for the verified URL and title, selects the current session-local page ID, and verifies URL and title again after selection.
+It refuses zero matches, indistinguishable duplicate URL/title matches, browser endpoint mismatches, and page drift before returning success.
+The selector leaves the named AXI session selected for immediate follow-up commands; use that same `CHROME_DEVTOOLS_AXI_SESSION` and the identity's `browser_url`, then stop that caller-owned session when QA is complete.
 After navigation, an authoritative landing on Cloudflare Access or a sign-in page uses the authenticated-browser-session-expired blocker.
 If neither that landing nor the tolerant broader tab scan finds the exact URL, the helper uses the exact-QA-URL blocker without letting an unrelated unprobeable tab replace that classification.
 It also writes best-effort `console.txt` and `network.txt`, recording capture failures as warnings.

@@ -150,12 +150,12 @@ case "$cmd" in
     for file in "$dir"/page_*; do
       [ -e "$file" ] || continue
       id=${file##*/page_}
-      title=$(cut -f2- "$file")
+      href=$(cut -f1 "$file")
       selected=false
       if [ -e "$dir/selected" ] && [ "$(cat "$dir/selected")" = "$id" ]; then
         selected=true
       fi
-      printf '  %s,%s,%s\n' "$id" "$title" "$selected"
+      printf '  %s,%s,%s\n' "$id" "$href" "$selected"
     done
     printf 'help[2]:\n'
     ;;
@@ -292,6 +292,25 @@ write_page() {
   local dir=$1 id=$2 href=$3 title=$4
   mkdir -p "$dir"
   printf '%s\t%s\n' "$href" "$title" > "$dir/page_$id"
+}
+
+write_identity_json() {
+  local file=$1 page_id=$2 active_url=$3 title=$4 browser_url=${5:-http://127.0.0.1:9222}
+  mkdir -p "$(dirname "$file")"
+  "$REAL_NODE" - "$file" "$page_id" "$active_url" "$title" "$browser_url" <<'NODE'
+const fs = require('fs');
+const [file, pageId, activeUrl, title, browserUrl] = process.argv.slice(2);
+fs.writeFileSync(file, JSON.stringify({
+  page_id: pageId,
+  requested_url: activeUrl,
+  active_url: activeUrl,
+  title,
+  browser_url: browserUrl,
+  session: 'fmqa-wrapper',
+  axi_session: 'fmqa-wrapper-local',
+  captured_at: '2026-09-10T00:00:00.000Z',
+}, null, 2) + '\n');
+NODE
 }
 
 compat_lock_path() {
@@ -1341,6 +1360,126 @@ test_trailing_slash_url_is_normalized() {
   pass "fm-browser-qa.sh: browser-equivalent trailing-slash URL matches without a new tab"
 }
 
+test_attached_identity_rediscovers_page_when_fresh_session_ids_differ() {
+  local dir fakebin identity evidence out eval_out
+  dir="$TMP_ROOT/attach-id-churn"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  evidence="$dir/evidence"
+  write_identity_json "$identity" 5 "https://teachers.example.test/login" "Login | Teacher Portal"
+  write_page "$dir/browser" 3 "https://teachers.example.test/login" "Login | Teacher Portal"
+  write_page "$dir/browser" 5 "https://feature.example.test/student/progress" "My Progress"
+
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup --out "$evidence")
+
+  assert_contains "$out" "ok: selected attached browser QA page 3 in AXI session followup" \
+    "attached resolver should select the fresh session-local target id"
+  [ "$(cat "$dir/browser/selected")" = 3 ] \
+    || fail "attached resolver selected the stale wrapper page id instead of the rediscovered target"
+  node - "$evidence/attached-identity.json" <<'NODE' || fail "attached resolver evidence should record the fresh page and stale source id distinctly"
+const fs = require('fs');
+const identity = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (identity.page_id !== '3') process.exit(1);
+if (identity.source_page_id !== '5') process.exit(1);
+if (identity.active_url !== 'https://teachers.example.test/login') process.exit(1);
+if (identity.title !== 'Login | Teacher Portal') process.exit(1);
+NODE
+  eval_out=$(env \
+    "PATH=$fakebin:/usr/bin:/bin" \
+    "FM_FAKE_BROWSER_DIR=$dir/browser" \
+    "CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222" \
+    "CHROME_DEVTOOLS_AXI_SESSION=followup" \
+    chrome-devtools-axi eval '({href: location.href, title: document.title})')
+  assert_contains "$eval_out" "https://teachers.example.test/login" \
+    "caller-owned attached AXI session should be ready for the intended page"
+  assert_absent "$dir/browser/axi_stopped" \
+    "attached resolver should leave the caller-owned AXI session available"
+  pass "fm-browser-qa.sh: attached identity rediscovers a fresh session-local page id"
+}
+
+test_attached_identity_uses_title_to_select_unique_duplicate_url() {
+  local dir fakebin identity out
+  dir="$TMP_ROOT/attach-title-disambiguates"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 4 "https://teachers.example.test/classes" "Classes | Teacher Portal"
+  write_page "$dir/browser" 1 "https://teachers.example.test/classes" "Loading"
+  write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes | Teacher Portal"
+
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-title)
+
+  assert_contains "$out" "ok: selected attached browser QA page 7 in AXI session followup-title" \
+    "attached resolver should use the verified title to choose the unique matching URL"
+  [ "$(cat "$dir/browser/selected")" = 7 ] \
+    || fail "attached resolver did not select the unique URL/title match"
+  pass "fm-browser-qa.sh: attached identity uses title to select a unique duplicate URL"
+}
+
+test_attached_identity_zero_exact_matches_refused() {
+  local dir fakebin identity out status
+  dir="$TMP_ROOT/attach-zero-match"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 5 "https://teachers.example.test/login" "Login | Teacher Portal"
+  write_page "$dir/browser" 1 "https://teachers.example.test/dashboard" "Dashboard"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-zero --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "attached resolver should exit 1 when no exact URL matches"
+  assert_contains "$out" "blocked: no browser tabs match attached browser QA identity URL: https://teachers.example.test/login" \
+    "attached resolver should report the missing exact URL"
+  assert_absent "$dir/evidence/attached-identity.json" \
+    "attached resolver should not write success evidence when no page matches"
+  pass "fm-browser-qa.sh: attached identity refuses zero exact URL matches"
+}
+
+test_attached_identity_indistinguishable_matches_refused() {
+  local dir fakebin identity out status
+  dir="$TMP_ROOT/attach-ambiguous"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes | Teacher Portal"
+  write_page "$dir/browser" 3 "https://teachers.example.test/classes" "Classes | Teacher Portal"
+  write_page "$dir/browser" 8 "https://teachers.example.test/classes" "Classes | Teacher Portal"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-ambiguous --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "attached resolver should exit 1 on indistinguishable matches"
+  assert_contains "$out" "blocked: multiple tabs match attached browser QA identity URL and title; cannot choose a unique page" \
+    "attached resolver should refuse indistinguishable URL/title matches"
+  assert_absent "$dir/evidence/attached-identity.json" \
+    "attached resolver should not write success evidence for ambiguous matches"
+  pass "fm-browser-qa.sh: attached identity refuses indistinguishable exact matches"
+}
+
+test_attached_identity_post_selection_drift_refused() {
+  local dir fakebin identity out status
+  dir="$TMP_ROOT/attach-drift"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 5 "https://teachers.example.test/login" "Login | Teacher Portal"
+  write_page "$dir/browser" 2 "https://teachers.example.test/login" "Login | Teacher Portal"
+  : > "$dir/browser/mismatch_on_final"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-drift --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "attached resolver should exit 1 when the page drifts after candidate resolution"
+  assert_contains "$out" "blocked: attached browser page drifted after selection: expected https://teachers.example.test/login got https://example.test/wrong" \
+    "attached resolver should report post-selection page drift"
+  assert_absent "$dir/evidence/attached-identity.json" \
+    "attached resolver should not write success evidence after post-selection drift"
+  pass "fm-browser-qa.sh: attached identity refuses post-selection page drift"
+}
+
 test_successful_evidence_cleans_up_axi_session() {
   local dir fakebin evidence tmp_root
   dir="$TMP_ROOT/cleanup-success"
@@ -1621,6 +1760,11 @@ test_unprobeable_unrelated_tab_is_skipped
 test_unrelated_sign_in_tab_does_not_report_auth_expired
 test_sign_in_substring_title_is_not_auth
 test_trailing_slash_url_is_normalized
+test_attached_identity_rediscovers_page_when_fresh_session_ids_differ
+test_attached_identity_uses_title_to_select_unique_duplicate_url
+test_attached_identity_zero_exact_matches_refused
+test_attached_identity_indistinguishable_matches_refused
+test_attached_identity_post_selection_drift_refused
 test_successful_evidence_cleans_up_axi_session
 test_cleanup_error_preserves_original_status
 test_snapshot_failure_blocks
