@@ -52,6 +52,7 @@ CURL_TIMEOUT=${FM_BROWSER_QA_CURL_TIMEOUT:-2}
 MODE=qa
 STOP_AXI_ON_CLEANUP=1
 ATTACH_EXPECTED_TITLE=
+ATTACH_BINDING_READY=0
 # chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
 # Remove this pin after AXI sends pageId or supports disabling page-id routing.
 MCP_COMPAT_VERSION=1.7.0
@@ -160,10 +161,18 @@ NODE
 }
 
 axi() (
+  local status=0
+  if [ "$ATTACH_BINDING_READY" -eq 1 ]; then
+    verify_attached_session_binding
+  fi
   unset CHROME_DEVTOOLS_AXI_PORT CHROME_DEVTOOLS_AXI_AUTO_CONNECT
   export CHROME_DEVTOOLS_AXI_SESSION="$AXI_SESSION_NAME"
   export CHROME_DEVTOOLS_AXI_BROWSER_URL="$BROWSER_URL"
-  chrome-devtools-axi "$@"
+  chrome-devtools-axi "$@" || status=$?
+  if [ "$ATTACH_BINDING_READY" -eq 1 ]; then
+    verify_attached_session_binding
+  fi
+  return "$status"
 )
 
 # One JSON line per run, so failure rates and stage distribution are answerable
@@ -880,18 +889,23 @@ page_inventory_url() {
 
 verify_attached_session_binding() {
   STAGE=attach-session
-  if ! axi start > "$TMP_DIR/attach-start.out" 2> "$TMP_DIR/attach-start.err"; then
-    blocked "could not start attached AXI session: $(stream_detail "$TMP_DIR/attach-start.err" "$TMP_DIR/attach-start.out")"
-  fi
-  if ! node - "$AXI_SESSION_NAME" "$BROWSER_URL" "$TMP_DIR/attach-start.out" <<'NODE' 2> "$TMP_DIR/attach-binding.err"
+  if ! node - "$AXI_SESSION_NAME" "$BROWSER_URL" "$TMP_DIR/attach-start.out" "$TMP_DIR/attach-binding.json" "${1:-verify}" <<'NODE' 2> "$TMP_DIR/attach-binding.err"
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFileSync } = require('child_process');
-const [session, expected, startFile] = process.argv.slice(2);
+const [session, expected, startFile, bindingFile, mode] = process.argv.slice(2);
 try {
   const stateDir = path.join(os.homedir(), '.chrome-devtools-axi', ...(session === 'default' ? [] : ['sessions', session]));
-  const binding = JSON.parse(fs.readFileSync(path.join(stateDir, 'bridge.pid'), 'utf8'));
+  const stateFile = path.join(stateDir, 'bridge.pid');
+  const binding = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const original = mode === 'capture' ? binding : JSON.parse(fs.readFileSync(bindingFile, 'utf8'));
+  const requireOriginal = current => {
+    if (current.pid !== original.pid || current.port !== original.port) {
+      throw new Error('AXI session bridge changed during attachment; rerun page discovery');
+    }
+  };
+  requireOriginal(binding);
   const ports = [...fs.readFileSync(startFile, 'utf8').matchAll(/^port:\s*(\d+)\s*$/gm)];
   if (!Number.isSafeInteger(binding.pid) || binding.pid <= 0 || ports.length !== 1 || Number(ports[0][1]) !== binding.port) {
     throw new Error('AXI session state does not identify the ready bridge');
@@ -916,6 +930,8 @@ try {
   }
   const actual = endpoint.replace(/\/$/, '');
   if (actual !== expected) throw new Error(`browser endpoint mismatch: expected ${expected} got ${actual}`);
+  requireOriginal(JSON.parse(fs.readFileSync(stateFile, 'utf8')));
+  if (mode === 'capture') fs.writeFileSync(bindingFile, JSON.stringify({ pid: binding.pid, port: binding.port }));
 } catch (error) {
   console.error(error.stderr !== undefined ? 'could not inspect the running AXI bridge' : error.message);
   process.exit(1);
@@ -1068,7 +1084,12 @@ open_target_page() {
 NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
 
 if [ "$MODE" = select ]; then
-  verify_attached_session_binding
+  STAGE=attach-session
+  if ! axi start > "$TMP_DIR/attach-start.out" 2> "$TMP_DIR/attach-start.err"; then
+    blocked "could not start attached AXI session: $(stream_detail "$TMP_DIR/attach-start.err" "$TMP_DIR/attach-start.out")"
+  fi
+  verify_attached_session_binding capture
+  ATTACH_BINDING_READY=1
   select_attached_identity_page
   STAGE="done"
   exit 0

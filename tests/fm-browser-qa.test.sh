@@ -302,6 +302,28 @@ NODE
     exit 1
     ;;
 esac
+if [ -f "$dir/replace_bridge_at" ]; then
+  read -r replacement_command replacement_count < "$dir/replace_bridge_at"
+  if [ "$cmd" = "$replacement_command" ]; then
+    command_count=0
+    [ ! -f "$dir/replacement_command_count" ] || command_count=$(cat "$dir/replacement_command_count")
+    command_count=$((command_count + 1))
+    printf '%s\n' "$command_count" > "$dir/replacement_command_count"
+    if [ "$command_count" -eq "$replacement_count" ]; then
+      state_dir="$HOME/.chrome-devtools-axi"
+      if [ "${CHROME_DEVTOOLS_AXI_SESSION:-default}" != default ]; then
+        state_dir="$state_dir/sessions/$CHROME_DEVTOOLS_AXI_SESSION"
+      fi
+      printf '{"pid":42430,"port":9666}\n' > "$state_dir/bridge.pid"
+      cp "$dir/page_7" "$dir/page_2"
+      printf 'https://teachers.example.test/dashboard\tDashboard\n' > "$dir/page_1"
+      cp "$dir/page_1" "$dir/page_7"
+      printf '1\n' > "$dir/selected"
+      : > "$dir/bridge_replaced"
+      printf 'bridge-replaced\n' >> "$dir/axi.log"
+    fi
+  fi
+fi
 SH
   chmod +x "$fakebin/chrome-devtools-axi"
 
@@ -1556,6 +1578,58 @@ test_attached_identity_explicit_endpoint_overrides_ambient_auto_connect() {
   pass "fm-browser-qa.sh: attached identity overrides ambient auto-connect for fresh sessions"
 }
 
+test_attached_identity_rejects_bridge_replacement_during_selection() {
+  local dir fakebin identity boundary out status
+  for boundary in pages:1 selectpage:1 eval:1 selectpage:2 eval:2; do
+    dir="$TMP_ROOT/attach-replacement-${boundary/:/-}"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+    write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+    printf '%s %s\n' "${boundary%:*}" "${boundary#*:}" > "$dir/browser/replace_bridge_at"
+
+    set +e
+    out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-replacement --out "$dir/evidence")
+    status=$?
+    set -e
+
+    assert_present "$dir/browser/bridge_replaced" "test must replace the bridge at $boundary"
+    expect_code 1 "$status" "replacement at $boundary must invalidate attachment"
+    assert_contains "$out" "AXI session bridge changed during attachment" \
+      "same-endpoint replacement at $boundary should report lost bridge continuity"
+    assert_not_contains "$out" "ok: selected attached browser QA page" "replacement must not report success"
+    assert_present "$dir/evidence/FAILED.md" "replacement must leave failure evidence"
+    assert_absent "$dir/evidence/attached-identity.json" "replacement must not publish stale identity"
+    assert_absent "$dir/evidence/attached-report.md" "replacement must not publish stale report"
+    [ "$(tail -n 1 "$dir/browser/axi.log")" = bridge-replaced ] \
+      || fail "attachment must stop sending AXI commands after bridge replacement"
+  done
+  pass "fm-browser-qa.sh: attached identity rejects bridge replacement throughout discovery and selection"
+}
+
+test_attached_identity_preserves_final_selection_without_restart() {
+  local dir fakebin identity out
+  dir="$TMP_ROOT/attach-final-binding"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+  write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+  printf 'start 2\n' > "$dir/browser/replace_bridge_at"
+
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-final --out "$dir/evidence")
+
+  assert_contains "$out" "ok: selected attached browser QA page 7" "stable attachment should succeed"
+  assert_absent "$dir/browser/bridge_replaced" "final binding verification must not restart the bridge"
+  [ "$(cat "$dir/browser/selected")" = 7 ] || fail "caller must retain the verified selected page"
+  node - "$dir/evidence/attached-identity.json" "$dir/browser/selected" <<'NODE' || fail "published page ID must describe the caller's selected page"
+const fs = require('fs');
+const [identityFile, selectedFile] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+if (identity.page_id !== fs.readFileSync(selectedFile, 'utf8').trim()) process.exit(1);
+NODE
+  pass "fm-browser-qa.sh: final attachment verification preserves the original bridge and selected page"
+}
+
 test_attached_identity_successful_retry_clears_failure_marker() {
   local dir fakebin identity status
   dir="$TMP_ROOT/attach-retry"
@@ -1940,6 +2014,8 @@ test_attached_identity_rejects_existing_session_endpoint_mismatch
 test_attached_identity_rejects_unverifiable_session_binding
 test_attached_identity_reads_live_bridge_connection_settings
 test_attached_identity_explicit_endpoint_overrides_ambient_auto_connect
+test_attached_identity_rejects_bridge_replacement_during_selection
+test_attached_identity_preserves_final_selection_without_restart
 test_attached_identity_successful_retry_clears_failure_marker
 test_attached_identity_zero_exact_matches_refused
 test_attached_identity_indistinguishable_matches_refused
