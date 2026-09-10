@@ -810,6 +810,34 @@ safe_page_id() {
   printf '%s' "$1" | LC_ALL=C tr -c '[:alnum:]_.-' '_'
 }
 
+page_inventory() {
+  axi run <<'NODE'
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const cli = pathToFileURL(realpathSync(process.argv[1]));
+const { callTool } = await import(new URL('../src/client.js', cli));
+const raw = await callTool('list_pages');
+const pages = [];
+const ids = new Set();
+let inPages = false;
+for (const line of raw.split('\n')) {
+  if (line.startsWith('## ')) {
+    inPages = line === '## Pages' || line === '## Extension Pages';
+    continue;
+  }
+  if (!inPages || !line.trim()) continue;
+  const titled = line.match(/^(\d+): .* \(([A-Za-z][A-Za-z0-9+.-]*:\S*)\)( \[selected\])?(?: isolatedContext=.*)?$/);
+  const page = titled || line.match(/^(\d+): ([A-Za-z][A-Za-z0-9+.-]*:\S*)( \[selected\])?(?: isolatedContext=.*)?$/);
+  if (!page || ids.has(page[1])) throw new Error('could not parse an unambiguous MCP page inventory');
+  new URL(page[2]);
+  ids.add(page[1]);
+  pages.push({ id: page[1], url: page[2], selected: Boolean(page[3]) });
+}
+console.log(`pages[${pages.length}]{id,url,selected}:`);
+for (const page of pages) console.log(`  ${page.id},${page.url},${page.selected}`);
+NODE
+}
+
 probe_page() {
   local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file selected_id attempts_left=2
   safe_id=$(safe_page_id "$page_id")
@@ -821,7 +849,7 @@ probe_page() {
     attempts_left=$((attempts_left - 1))
     axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
     parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" 2> "$err_file" || return 1
-    axi pages > "$pages_file" 2> "$err_file" || return 1
+    page_inventory > "$pages_file" 2> "$err_file" || return 1
     if ! selected_id=$(selected_page_id "$pages_file"); then
       echo "could not identify a unique selected browser page after evaluation" > "$err_file"
       return 1
@@ -848,7 +876,7 @@ probe_error() {
 
 list_page_ids() {
   local label=$1
-  if ! axi pages > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
+  if ! page_inventory > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
     blocked "could not enumerate browser pages: $(stream_detail "$TMP_DIR/pages-$label.err" "$TMP_DIR/pages-$label.txt")"
   fi
   awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$TMP_DIR/pages-$label.txt"

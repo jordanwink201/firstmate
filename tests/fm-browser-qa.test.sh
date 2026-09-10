@@ -8,6 +8,8 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-browser-qa)
 REAL_NODE=$(command -v node || true)
 REAL_CURL=$(command -v curl || true)
+REAL_AXI_BIN=$(command -v chrome-devtools-axi || true)
+REAL_MCP_RESPONSE=${FM_TEST_REAL_MCP_RESPONSE:-${HOME:-}/.local/share/fm-browser-qa/chrome-devtools-mcp-1.7.0/node_modules/chrome-devtools-mcp/build/src/McpResponse.js}
 
 [ -n "$REAL_NODE" ] || fail "node is required for fm-browser-qa tests"
 [ -n "$REAL_CURL" ] || fail "curl is required for fm-browser-qa tests"
@@ -112,12 +114,27 @@ exec /bin/ps "$@"
 SH
   chmod +x "$fakebin/ps"
 
+  "$REAL_NODE" - "$dir/axi-runtime" "$ROOT/tests/fixtures/fm-browser-qa-axi.mjs" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
+const [root, fixture] = process.argv.slice(2);
+fs.mkdirSync(path.join(root, 'dist/bin'), { recursive: true });
+fs.mkdirSync(path.join(root, 'dist/src'), { recursive: true });
+fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+const source = JSON.stringify(pathToFileURL(fixture).href);
+fs.writeFileSync(path.join(root, 'dist/bin/chrome-devtools-axi.js'), `import { run } from ${source}; await run();\n`);
+fs.writeFileSync(path.join(root, 'dist/src/client.js'), `export { callTool } from ${source};\n`);
+NODE
+
   cat > "$fakebin/chrome-devtools-axi" <<'SH'
 #!/usr/bin/env bash
 set -eu
 
 dir=${FM_FAKE_BROWSER_DIR:?}
 cmd=${1:-}
+inventory_mode=$cmd
+[ "$cmd" != run ] || cmd=pages
 shift || true
 mkdir -p "$dir"
 printf '%s\t%s\t%s\t%s\n' "$cmd" "${CHROME_DEVTOOLS_AXI_SESSION:-}" "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" "${CHROME_DEVTOOLS_AXI_MCP_PATH:-}" >> "$dir/axi.log"
@@ -182,22 +199,7 @@ case "$cmd" in
     printf 'status: ready\nport: 9666\n'
     ;;
   pages)
-    count=0
-    for file in "$dir"/page_*; do
-      [ -e "$file" ] && count=$((count + 1))
-    done
-    printf 'pages[%s]{id,url,selected}:\n' "$count"
-    for file in "$dir"/page_*; do
-      [ -e "$file" ] || continue
-      id=${file##*/page_}
-      href=$(cut -f1 "$file")
-      selected=false
-      if [ -e "$dir/selected" ] && [ "$(cat "$dir/selected")" = "$id" ]; then
-        selected=true
-      fi
-      printf '  %s,%s,%s\n' "$id" "$href" "$selected"
-    done
-    printf 'help[2]:\n'
+    node "$dir/../axi-runtime/dist/bin/chrome-devtools-axi.js" "$inventory_mode"
     ;;
   selectpage)
     id=${1:?}
@@ -1484,6 +1486,72 @@ test_attached_identity_uses_title_to_select_unique_duplicate_url() {
   pass "fm-browser-qa.sh: attached identity uses literal titles to select a unique duplicate URL"
 }
 
+test_page_inventory_preserves_titled_urls_and_selection() {
+  local dir fakebin identity title index=0 url='https://teachers.example.test/qa(a,b)?filter=(x,y)'
+  for title in '' 'Classes' 'Classes [selected] (Review), café' 'A long classroom page title with more than fifty characters in its full title'; do
+    index=$((index + 1))
+    dir="$TMP_ROOT/inventory-titles-$index"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 5 "$url" "$title"
+    write_page "$dir/browser" 7 "$url" "$title"
+    run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session inventory-titles --out "$dir/evidence" >/dev/null \
+      || fail "titled MCP inventory should preserve the selected page URL"
+    node - "$identity" "$dir/evidence/attached-identity.json" <<'NODE' || fail "inventory normalization must preserve the full evaluated identity"
+const fs = require('fs');
+const [expected, actual] = process.argv.slice(2).map(file => JSON.parse(fs.readFileSync(file, 'utf8')));
+if (actual.page_id !== '7' || actual.active_url !== expected.active_url || actual.title !== expected.title) process.exit(1);
+NODE
+  done
+  pass "fm-browser-qa.sh: inventory preserves titled and untitled selected URLs"
+}
+
+test_real_mcp_to_axi_inventory_conversion() {
+  local dir fakebin identity axi_cli out mode
+  if [ -z "$REAL_AXI_BIN" ] || [ ! -f "$REAL_MCP_RESPONSE" ]; then
+    pass "fm-browser-qa.sh: real MCP/AXI inventory conversion (skip: installed dependencies unavailable)"
+    return
+  fi
+  axi_cli=$("$REAL_AXI_BIN" run <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+const binDir = path.dirname(fs.realpathSync(process.argv[1]));
+const pkg = JSON.parse(fs.readFileSync(path.resolve(binDir, '../../package.json'), 'utf8'));
+if (pkg.version === '0.1.26') console.log(path.resolve(binDir, '../src/cli.js'));
+NODE
+  )
+  if [ -z "$axi_cli" ]; then
+    pass "fm-browser-qa.sh: real MCP/AXI inventory conversion (skip: requires AXI 0.1.26)"
+    return
+  fi
+  for mode in qa attach; do
+    dir="$TMP_ROOT/real-inventory-$mode"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 5 "https://teachers.example.test/classes" 'Classes'
+    write_page "$dir/browser" 7 "https://teachers.example.test/classes" 'Classes'
+    printf '7\n' > "$dir/browser/selected"
+    out=$(env PATH="$fakebin:/usr/bin:/bin" FM_FAKE_BROWSER_DIR="$dir/browser" \
+      FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_CLI="$axi_cli" chrome-devtools-axi pages)
+    assert_contains "$out" '7,Classes,false' "real AXI conversion must reproduce loss of the titled URL and selected marker"
+
+    if [ "$mode" = attach ]; then
+      FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
+        --select-identity "$identity" --axi-session real-inventory --out "$dir/evidence" >/dev/null \
+        || fail "attachment must accept titled pages emitted by real MCP despite AXI's lossy pages conversion"
+      assert_present "$dir/evidence/attached-identity.json" "real MCP attachment should publish evidence"
+    else
+      FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
+        --url "https://teachers.example.test/classes" --out "$dir/evidence" >/dev/null \
+        || fail "existing-tab QA must accept titled pages emitted by real MCP"
+      assert_present "$dir/evidence/identity.json" "real MCP QA should publish evidence"
+      assert_absent "$dir/browser/newpage.log" "real MCP QA must reuse the existing exact page"
+    fi
+    [ "$(cat "$dir/browser/selected")" = 7 ] || fail "real MCP inventory must retain the verified selected ID"
+  done
+  pass "fm-browser-qa.sh: real MCP-to-AXI conversion preserves successful titled-page QA through the raw inventory path"
+}
+
 test_attached_identity_rejects_existing_session_endpoint_mismatch() {
   local dir fakebin identity out status session
   for session in followup-endpoint default; do
@@ -2079,6 +2147,8 @@ test_sign_in_substring_title_is_not_auth
 test_trailing_slash_url_is_normalized
 test_attached_identity_rediscovers_page_when_fresh_session_ids_differ
 test_attached_identity_uses_title_to_select_unique_duplicate_url
+test_page_inventory_preserves_titled_urls_and_selection
+test_real_mcp_to_axi_inventory_conversion
 test_attached_identity_rejects_existing_session_endpoint_mismatch
 test_attached_identity_rejects_unverifiable_session_binding
 test_attached_identity_reads_live_bridge_connection_settings

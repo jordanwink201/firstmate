@@ -321,6 +321,7 @@ The attached-session selector uses the identity's browser endpoint and browser-n
 Before enumerating tabs, it verifies the named AXI session's running bridge and its connection settings; an existing session bound elsewhere or an unverifiable binding blocks attachment.
 It keeps that original bridge binding through discovery and selection, rejecting a replacement even at the same browser endpoint.
 Each page probe also checks the current inventory after evaluation to confirm that the discovered page ID remains selected at the evaluated URL, including when MCP reconnects within the same bridge.
+The helper reads unformatted MCP inventory through the existing AXI session so titled pages retain their URLs and selected markers with the pinned transport.
 It refuses zero matches, indistinguishable duplicate URL/title matches, browser endpoint mismatches, and page drift before returning success.
 The selector leaves the named AXI session selected for immediate follow-up commands; use that same `CHROME_DEVTOOLS_AXI_SESSION` and the identity's `browser_url`, then stop that caller-owned session when QA is complete.
 After navigation, an authoritative landing on Cloudflare Access or a sign-in page uses the authenticated-browser-session-expired blocker.
