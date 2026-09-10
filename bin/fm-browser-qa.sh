@@ -123,6 +123,7 @@ valid_axi_session_name() {
       return 1
       ;;
   esac
+  [ -n "$(printf '%s' "$1" | tr -d '.')" ] || return 1
 }
 
 curl_timeout_valid() {
@@ -159,7 +160,7 @@ NODE
 }
 
 axi() (
-  unset CHROME_DEVTOOLS_AXI_PORT
+  unset CHROME_DEVTOOLS_AXI_PORT CHROME_DEVTOOLS_AXI_AUTO_CONNECT
   export CHROME_DEVTOOLS_AXI_SESSION="$AXI_SESSION_NAME"
   export CHROME_DEVTOOLS_AXI_BROWSER_URL="$BROWSER_URL"
   chrome-devtools-axi "$@"
@@ -877,6 +878,54 @@ page_inventory_url() {
   ' "$pages_file"
 }
 
+verify_attached_session_binding() {
+  STAGE=attach-session
+  if ! axi start > "$TMP_DIR/attach-start.out" 2> "$TMP_DIR/attach-start.err"; then
+    blocked "could not start attached AXI session: $(stream_detail "$TMP_DIR/attach-start.err" "$TMP_DIR/attach-start.out")"
+  fi
+  if ! node - "$AXI_SESSION_NAME" "$BROWSER_URL" "$TMP_DIR/attach-start.out" <<'NODE' 2> "$TMP_DIR/attach-binding.err"
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execFileSync } = require('child_process');
+const [session, expected, startFile] = process.argv.slice(2);
+try {
+  const stateDir = path.join(os.homedir(), '.chrome-devtools-axi', ...(session === 'default' ? [] : ['sessions', session]));
+  const binding = JSON.parse(fs.readFileSync(path.join(stateDir, 'bridge.pid'), 'utf8'));
+  const ports = [...fs.readFileSync(startFile, 'utf8').matchAll(/^port:\s*(\d+)\s*$/gm)];
+  if (!Number.isSafeInteger(binding.pid) || binding.pid <= 0 || ports.length !== 1 || Number(ports[0][1]) !== binding.port) {
+    throw new Error('AXI session state does not identify the ready bridge');
+  }
+  const bridge = execFileSync('ps', ['eww', '-p', String(binding.pid), '-o', 'command='], {
+    encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (!/(?:^|\/)chrome-devtools-axi-bridge\.(?:js|ts)(?:\s|$)/.test(bridge)) {
+    throw new Error('AXI session bridge process could not be verified');
+  }
+  const setting = name => {
+    const values = [...bridge.matchAll(new RegExp(`(?:^|\\s)${name}=(\\S*)`, 'g'))];
+    if (values.length > 1) throw new Error('AXI bridge connection settings are ambiguous');
+    return values[0]?.[1];
+  };
+  if (setting('CHROME_DEVTOOLS_AXI_SESSION') !== session || Number(setting('CHROME_DEVTOOLS_AXI_PORT')) !== binding.port) {
+    throw new Error('AXI bridge process does not match the named session');
+  }
+  const endpoint = setting('CHROME_DEVTOOLS_AXI_BROWSER_URL');
+  if (!endpoint || setting('CHROME_DEVTOOLS_AXI_AUTO_CONNECT') === '1') {
+    throw new Error('AXI bridge has no verifiable explicit browser endpoint');
+  }
+  const actual = endpoint.replace(/\/$/, '');
+  if (actual !== expected) throw new Error(`browser endpoint mismatch: expected ${expected} got ${actual}`);
+} catch (error) {
+  console.error(error.stderr !== undefined ? 'could not inspect the running AXI bridge' : error.message);
+  process.exit(1);
+}
+NODE
+  then
+    blocked "could not verify attached AXI session browser endpoint: $(stream_detail "$TMP_DIR/attach-binding.err")"
+  fi
+}
+
 write_attached_identity() {
   [ -n "$OUT_DIR" ] || return 0
   node - "$IDENTITY_INPUT" "$1" "$2" "$BROWSER_URL" "$AXI_SESSION_NAME" "$OUT_DIR" <<'NODE'
@@ -915,7 +964,7 @@ NODE
 }
 
 scan_attached_pages() {
-  local scan_dir=$1 ids=$2 pages_file=$3 page_id identity_json href title inventory_href inventory_norm
+  local scan_dir=$1 ids=$2 pages_file=$3 page_id identity_json href inventory_href inventory_norm
   mkdir -p "$scan_dir"
   : > "$scan_dir/matches.tsv"
   for page_id in $ids; do
@@ -934,9 +983,8 @@ scan_attached_pages() {
       continue
     fi
     href=$(json_field "$identity_json" href)
-    title=$(json_field "$identity_json" title)
     if [ "$href" = "$NORM_TARGET_URL" ]; then
-      printf '%s\t%s\t%s\n' "$page_id" "$identity_json" "$title" >> "$scan_dir/matches.tsv"
+      printf '%s\t%s\n' "$page_id" "$identity_json" >> "$scan_dir/matches.tsv"
     fi
   done
 }
@@ -955,7 +1003,15 @@ select_attached_identity_page() {
   fi
   if [ "$url_count" -gt 1 ]; then
     title_matches="$scan_dir/title-matches.tsv"
-    awk -F '\t' -v title="$ATTACH_EXPECTED_TITLE" '$3 == title { print }' "$matches" > "$title_matches"
+    node - "$IDENTITY_INPUT" "$matches" <<'NODE' > "$title_matches"
+const fs = require('fs');
+const [sourceFile, matchesFile] = process.argv.slice(2);
+const { title } = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
+for (const line of fs.readFileSync(matchesFile, 'utf8').split('\n').filter(Boolean)) {
+  const identityFile = line.slice(line.indexOf('\t') + 1);
+  if (JSON.parse(fs.readFileSync(identityFile, 'utf8')).title === title) process.stdout.write(line + '\n');
+}
+NODE
     title_count=$(count_lines "$title_matches")
     if [ "$title_count" -eq 0 ]; then
       blocked "multiple tabs match attached browser QA identity URL but none match the verified title: $ATTACH_EXPECTED_TITLE"
@@ -978,10 +1034,18 @@ select_attached_identity_page() {
   if [ "$final_href" != "$NORM_TARGET_URL" ]; then
     blocked "attached browser page drifted after selection: expected $NORM_TARGET_URL got $final_href"
   fi
-  if [ "$final_title" != "$ATTACH_EXPECTED_TITLE" ]; then
+  if ! node - "$IDENTITY_INPUT" "$final_identity" <<'NODE'
+const fs = require('fs');
+const [sourceFile, identityFile] = process.argv.slice(2);
+process.exit(JSON.parse(fs.readFileSync(sourceFile, 'utf8')).title === JSON.parse(fs.readFileSync(identityFile, 'utf8')).title ? 0 : 1);
+NODE
+  then
     blocked "attached browser page title mismatch after selection: expected $ATTACH_EXPECTED_TITLE got $final_title"
   fi
-  write_attached_identity "$final_identity" "$page_id"
+  verify_attached_session_binding
+  STAGE=attach-evidence
+  write_attached_identity "$final_identity" "$page_id" || blocked "could not publish attached browser QA evidence"
+  [ -z "$OUT_DIR" ] || rm -f "$OUT_DIR/FAILED.md"
   echo "ok: selected attached browser QA page $page_id in AXI session $AXI_SESSION_NAME"
   echo "browser_url: $BROWSER_URL"
   echo "axi_session: $AXI_SESSION_NAME"
@@ -1004,6 +1068,7 @@ open_target_page() {
 NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
 
 if [ "$MODE" = select ]; then
+  verify_attached_session_binding
   select_attached_identity_page
   STAGE="done"
   exit 0

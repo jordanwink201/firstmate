@@ -94,6 +94,13 @@ SH
 
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = "eww" ]; then
+  if [ -e "$FM_FAKE_BROWSER_DIR/inspect_real_bridge" ]; then
+    exec /bin/ps "$@"
+  fi
+  cat "$FM_FAKE_BROWSER_DIR/bridge-process.out"
+  exit
+fi
 if [ "${1:-}" = "-p" ]; then
   pid=${2:?}
   if [ -f "$FM_FAKE_BROWSER_DIR/ps_$pid.out" ]; then
@@ -141,6 +148,19 @@ page_title() {
 }
 
 case "$cmd" in
+  start)
+    state_dir="$HOME/.chrome-devtools-axi"
+    if [ "${CHROME_DEVTOOLS_AXI_SESSION:-default}" != default ]; then
+      state_dir="$state_dir/sessions/$CHROME_DEVTOOLS_AXI_SESSION"
+    fi
+    mkdir -p "$state_dir"
+    if [ ! -e "$state_dir/bridge.pid" ]; then
+      printf '{"pid":42420,"port":9666}\n' > "$state_dir/bridge.pid"
+      printf 'node /axi/chrome-devtools-axi-bridge.js CHROME_DEVTOOLS_AXI_SESSION=%s CHROME_DEVTOOLS_AXI_PORT=9666 CHROME_DEVTOOLS_AXI_BROWSER_URL=%s CHROME_DEVTOOLS_AXI_AUTO_CONNECT=%s\n' \
+        "$CHROME_DEVTOOLS_AXI_SESSION" "$CHROME_DEVTOOLS_AXI_BROWSER_URL" "${CHROME_DEVTOOLS_AXI_AUTO_CONNECT:-}" > "$dir/bridge-process.out"
+    fi
+    printf 'status: ready\nport: 9666\n'
+    ;;
   pages)
     count=0
     for file in "$dir"/page_*; do
@@ -333,6 +353,9 @@ run_qa() {
     "FM_FAKE_BROWSER_DIR=$browser_dir"
     "FM_BROWSER_QA_OPEN_SETTLE=0"
   )
+  if [[ " $* " = *" --select-identity "* ]]; then
+    env_args+=("HOME=$browser_dir/home")
+  fi
   if [ "${CHROME_DEVTOOLS_AXI_MCP_PATH+x}" = x ]; then
     env_args+=("CHROME_DEVTOOLS_AXI_MCP_PATH=$CHROME_DEVTOOLS_AXI_MCP_PATH")
   else
@@ -1398,21 +1421,172 @@ NODE
 }
 
 test_attached_identity_uses_title_to_select_unique_duplicate_url() {
-  local dir fakebin identity out
-  dir="$TMP_ROOT/attach-title-disambiguates"
+  local dir fakebin identity out title index=0
+  for title in 'Classes | Teacher Portal' 'C:\new\tab' $'Classes\tPortal'; do
+    index=$((index + 1))
+    dir="$TMP_ROOT/attach-title-disambiguates-$index"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 4 "https://teachers.example.test/classes" "$title"
+    write_page "$dir/browser" 1 "https://teachers.example.test/classes" "Loading"
+    write_page "$dir/browser" 7 "https://teachers.example.test/classes" "$title"
+
+    out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-title)
+
+    assert_contains "$out" "ok: selected attached browser QA page 7 in AXI session followup-title" \
+      "attached resolver should use the literal verified title to choose the unique matching URL"
+    [ "$(cat "$dir/browser/selected")" = 7 ] \
+      || fail "attached resolver did not select the unique URL/title match"
+  done
+  pass "fm-browser-qa.sh: attached identity uses literal titles to select a unique duplicate URL"
+}
+
+test_attached_identity_rejects_existing_session_endpoint_mismatch() {
+  local dir fakebin identity out status session
+  for session in followup-endpoint default; do
+    dir="$TMP_ROOT/attach-endpoint-$session"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes" http://127.0.0.1:9333
+    write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+    run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session "$session" >/dev/null \
+      || fail "initial attachment should bind the fresh session"
+    run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session "$session" >/dev/null \
+      || fail "existing session at the matching endpoint should be reusable"
+    write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+    : > "$dir/browser/axi.log"
+
+    set +e
+    out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session "$session" --out "$dir/evidence")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "existing wrong-endpoint session should be rejected despite matching URL/title"
+    assert_contains "$out" "browser endpoint mismatch: expected http://127.0.0.1:9222 got http://127.0.0.1:9333" \
+      "endpoint verification should compare the running bridge connection settings with the identity"
+    assert_absent "$dir/evidence/attached-identity.json" "wrong endpoint must not publish successful identity"
+    assert_present "$dir/evidence/FAILED.md" "wrong endpoint should publish failure evidence"
+    awk -F '\t' '$1 != "start" { exit 1 }' "$dir/browser/axi.log" \
+      || fail "wrong endpoint must be refused before enumerating, selecting, or stopping the session"
+  done
+  pass "fm-browser-qa.sh: attached identity verifies existing named and default session endpoints"
+}
+
+test_attached_identity_rejects_unverifiable_session_binding() {
+  local dir fakebin identity out status scenario
+  for scenario in missing-state wrong-port missing-process ambiguous-settings auto-connect wrong-session; do
+    dir="$TMP_ROOT/attach-binding-$scenario"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+    write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+    run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-binding >/dev/null \
+      || fail "initial attachment should succeed"
+    case "$scenario" in
+      missing-state) printf '{}\n' > "$dir/browser/home/.chrome-devtools-axi/sessions/followup-binding/bridge.pid" ;;
+      wrong-port) printf '{"pid":42420,"port":9777}\n' > "$dir/browser/home/.chrome-devtools-axi/sessions/followup-binding/bridge.pid" ;;
+      missing-process) : > "$dir/browser/bridge-process.out" ;;
+      ambiguous-settings) printf ' CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222\n' >> "$dir/browser/bridge-process.out" ;;
+      auto-connect) printf 'node /axi/chrome-devtools-axi-bridge.js CHROME_DEVTOOLS_AXI_SESSION=followup-binding CHROME_DEVTOOLS_AXI_PORT=9666 CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222 CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1\n' > "$dir/browser/bridge-process.out" ;;
+      wrong-session) printf 'node /axi/chrome-devtools-axi-bridge.js CHROME_DEVTOOLS_AXI_SESSION=other CHROME_DEVTOOLS_AXI_PORT=9666 CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222\n' > "$dir/browser/bridge-process.out" ;;
+    esac
+    : > "$dir/browser/axi.log"
+
+    set +e
+    out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-binding --out "$dir/evidence")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "unverifiable session binding should be rejected: $scenario"
+    assert_contains "$out" "blocked: could not verify attached AXI session browser endpoint" \
+      "unverifiable binding should have an actionable blocker"
+    awk -F '\t' '$1 != "start" { exit 1 }' "$dir/browser/axi.log" \
+      || fail "unverifiable binding must be refused before page enumeration or selection"
+    assert_absent "$dir/evidence/attached-identity.json" "unverifiable binding must not publish successful identity"
+  done
+  pass "fm-browser-qa.sh: attached identity refuses unverifiable session bindings"
+}
+
+test_attached_identity_reads_live_bridge_connection_settings() {
+  local dir fakebin identity bridge_pid out status success_status
+  dir="$TMP_ROOT/attach-live-binding"
   fakebin=$(make_fake_browser_tools "$dir")
   identity="$dir/wrapper/identity.json"
-  write_identity_json "$identity" 4 "https://teachers.example.test/classes" "Classes | Teacher Portal"
-  write_page "$dir/browser" 1 "https://teachers.example.test/classes" "Loading"
-  write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes | Teacher Portal"
+  write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+  write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+  mkdir -p "$dir/browser/home/.chrome-devtools-axi/sessions/live-binding"
+  : > "$dir/browser/inspect_real_bridge"
+  printf 'setInterval(() => {}, 1000);\n' > "$dir/chrome-devtools-axi-bridge.js"
+  env CHROME_DEVTOOLS_AXI_SESSION=live-binding CHROME_DEVTOOLS_AXI_PORT=9666 \
+    CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9333 CHROME_DEVTOOLS_AXI_AUTO_CONNECT=0 \
+    "$REAL_NODE" "$dir/chrome-devtools-axi-bridge.js" >/dev/null 2>&1 &
+  bridge_pid=$!
+  printf '{"pid":%s,"port":9666}\n' "$bridge_pid" > "$dir/browser/home/.chrome-devtools-axi/sessions/live-binding/bridge.pid"
 
-  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-title)
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session live-binding --out "$dir/evidence")
+  status=$?
+  write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes" http://127.0.0.1:9333
+  run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session live-binding --out "$dir/evidence" >/dev/null
+  success_status=$?
+  kill "$bridge_pid" >/dev/null 2>&1
+  wait "$bridge_pid" >/dev/null 2>&1
+  set -e
 
-  assert_contains "$out" "ok: selected attached browser QA page 7 in AXI session followup-title" \
-    "attached resolver should use the verified title to choose the unique matching URL"
-  [ "$(cat "$dir/browser/selected")" = 7 ] \
-    || fail "attached resolver did not select the unique URL/title match"
-  pass "fm-browser-qa.sh: attached identity uses title to select a unique duplicate URL"
+  expect_code 1 "$status" "live bridge endpoint mismatch should be rejected"
+  assert_contains "$out" "browser endpoint mismatch: expected http://127.0.0.1:9222 got http://127.0.0.1:9333" \
+    "binding check should read the actual running bridge environment"
+  expect_code 0 "$success_status" "matching live bridge endpoint should permit attachment"
+  assert_present "$dir/evidence/attached-identity.json" "matching live bridge should publish attachment evidence"
+  pass "fm-browser-qa.sh: attached identity reads connection settings from a live bridge process"
+}
+
+test_attached_identity_explicit_endpoint_overrides_ambient_auto_connect() {
+  local dir fakebin identity
+  dir="$TMP_ROOT/attach-ambient-auto-connect"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+  write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+
+  CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1 run_qa "$fakebin" "$dir/browser" \
+    --select-identity "$identity" --axi-session followup-auto --out "$dir/evidence" >/dev/null \
+    || fail "explicit identity endpoint should override ambient auto-connect for a fresh session"
+  assert_present "$dir/evidence/attached-identity.json" "fresh session should attach to the explicit browser endpoint"
+  pass "fm-browser-qa.sh: attached identity overrides ambient auto-connect for fresh sessions"
+}
+
+test_attached_identity_successful_retry_clears_failure_marker() {
+  local dir fakebin identity status
+  dir="$TMP_ROOT/attach-retry"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+  write_page "$dir/browser" 7 "https://teachers.example.test/dashboard" "Dashboard"
+
+  set +e
+  run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-retry --out "$dir/evidence" >/dev/null
+  status=$?
+  set -e
+  expect_code 1 "$status" "first attachment should fail without a matching page"
+  assert_present "$dir/evidence/FAILED.md" "first attachment should leave a failure marker"
+  write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+
+  mkdir "$dir/evidence/attached-report.md"
+  set +e
+  run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-retry --out "$dir/evidence" >/dev/null
+  status=$?
+  set -e
+  expect_code 1 "$status" "failed report publication must not succeed"
+  assert_present "$dir/evidence/FAILED.md" "failed publication must retain failure evidence"
+  rmdir "$dir/evidence/attached-report.md"
+
+  run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-retry --out "$dir/evidence" >/dev/null \
+    || fail "retry should succeed once the page matches and evidence can be published"
+  assert_present "$dir/evidence/attached-identity.json" "successful retry should publish attachment identity"
+  assert_present "$dir/evidence/attached-report.md" "successful retry should publish attachment report"
+  assert_absent "$dir/evidence/FAILED.md" "successful retry should clear the stale failure marker"
+  pass "fm-browser-qa.sh: successful attachment retry clears failure marker after publication"
 }
 
 test_attached_identity_zero_exact_matches_refused() {
@@ -1762,6 +1936,11 @@ test_sign_in_substring_title_is_not_auth
 test_trailing_slash_url_is_normalized
 test_attached_identity_rediscovers_page_when_fresh_session_ids_differ
 test_attached_identity_uses_title_to_select_unique_duplicate_url
+test_attached_identity_rejects_existing_session_endpoint_mismatch
+test_attached_identity_rejects_unverifiable_session_binding
+test_attached_identity_reads_live_bridge_connection_settings
+test_attached_identity_explicit_endpoint_overrides_ambient_auto_connect
+test_attached_identity_successful_retry_clears_failure_marker
 test_attached_identity_zero_exact_matches_refused
 test_attached_identity_indistinguishable_matches_refused
 test_attached_identity_post_selection_drift_refused

@@ -318,6 +318,7 @@ The helper attaches to that browser by default, opens the exact URL if no exact 
 `identity.json.page_id` is scoped only to the helper's AXI bridge session and must not be reused in a separate AXI session.
 Before follow-up `chrome-devtools-axi` work in a separate AXI session, run `bin/fm-browser-qa.sh --select-identity <evidence-dir>/identity.json --axi-session <session> --out <evidence-dir>/attach`.
 The attached-session selector uses the identity's browser endpoint and browser-normalized URL, reprobes current tabs for the verified URL and title, selects the current session-local page ID, and verifies URL and title again after selection.
+Before enumerating tabs, it verifies the named AXI session's running bridge and its connection settings; an existing session bound elsewhere or an unverifiable binding blocks attachment.
 It refuses zero matches, indistinguishable duplicate URL/title matches, browser endpoint mismatches, and page drift before returning success.
 The selector leaves the named AXI session selected for immediate follow-up commands; use that same `CHROME_DEVTOOLS_AXI_SESSION` and the identity's `browser_url`, then stop that caller-owned session when QA is complete.
 After navigation, an authoritative landing on Cloudflare Access or a sign-in page uses the authenticated-browser-session-expired blocker.
