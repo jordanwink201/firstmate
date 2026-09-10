@@ -147,6 +147,26 @@ page_title() {
   cut -f2- "$(page_file "$1")"
 }
 
+if [ -f "$dir/reconnect_mcp_before" ]; then
+  read -r reconnect_command reconnect_count < "$dir/reconnect_mcp_before"
+  if [ "$cmd" = "$reconnect_command" ]; then
+    command_count=0
+    [ ! -f "$dir/reconnect_command_count" ] || command_count=$(cat "$dir/reconnect_command_count")
+    command_count=$((command_count + 1))
+    printf '%s\n' "$command_count" > "$dir/reconnect_command_count"
+    if [ "$command_count" -eq "$reconnect_count" ]; then
+      state_dir="$HOME/.chrome-devtools-axi/sessions/${CHROME_DEVTOOLS_AXI_SESSION:-default}"
+      if [ -f "$state_dir/bridge.pid" ]; then
+        cp "$state_dir/bridge.pid" "$dir/bridge-before-mcp-reconnect.json"
+      fi
+      cp "$dir/page_7" "$dir/page_1"
+      printf 'https://teachers.example.test/dashboard\tDashboard\n' > "$dir/page_7"
+      printf '1\n' > "$dir/selected"
+      : > "$dir/mcp_reconnected"
+    fi
+  fi
+fi
+
 case "$cmd" in
   start)
     state_dir="$HOME/.chrome-devtools-axi"
@@ -206,6 +226,7 @@ case "$cmd" in
     title=$(page_title "$id")
     if [ -e "$dir/mismatch_on_final" ] && [ "$count" -gt 1 ]; then
       href="https://example.test/wrong"
+      printf '%s\t%s\n' "$href" "$title" > "$(page_file "$id")"
     fi
     expr=${1:?}
     node - "$href" "$title" "$expr" <<'NODE'
@@ -1630,6 +1651,54 @@ NODE
   pass "fm-browser-qa.sh: final attachment verification preserves the original bridge and selected page"
 }
 
+test_page_probes_reject_mcp_reconnection_with_unchanged_bridge() {
+  local dir fakebin identity mode boundary out status
+  for mode in attach qa; do
+    for boundary in eval:2 pages:3; do
+      dir="$TMP_ROOT/probe-mcp-reconnect-$mode-${boundary/:/-}"
+      fakebin=$(make_fake_browser_tools "$dir")
+      identity="$dir/wrapper/identity.json"
+      write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
+      write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
+      printf '%s %s\n' "${boundary%:*}" "${boundary#*:}" > "$dir/browser/reconnect_mcp_before"
+
+      set +e
+      if [ "$mode" = attach ]; then
+        out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-mcp --out "$dir/evidence")
+      else
+        out=$(run_qa "$fakebin" "$dir/browser" --url "https://teachers.example.test/classes" --out "$dir/evidence")
+      fi
+      status=$?
+      set -e
+
+      assert_present "$dir/browser/mcp_reconnected" "test must reconnect MCP before $boundary in $mode mode"
+      expect_code 1 "$status" "MCP reconnection during the final probe must invalidate the discovered page ID"
+      assert_contains "$out" "browser page mapping changed during probe: expected selected page 7 got 1" \
+        "MCP reconnection must be detected despite matching evaluated URL and title"
+      assert_present "$dir/evidence/FAILED.md" "MCP reconnection should leave failure evidence"
+      assert_absent "$dir/evidence/attached-identity.json" "MCP reconnection must not publish a stale attachment ID"
+      assert_absent "$dir/evidence/identity.json" "MCP reconnection must not publish a stale QA page ID"
+      assert_absent "$dir/evidence/attached-report.md" "MCP reconnection must not publish attachment success"
+      assert_absent "$dir/evidence/report.md" "MCP reconnection must not publish QA success"
+      node - "$dir/browser/page_1" "$identity" <<'NODE' || fail "reconnection fixture must preserve the expected URL and title"
+const fs = require('fs');
+const [pageFile, identityFile] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+const [url, title] = fs.readFileSync(pageFile, 'utf8').trimEnd().split('\t');
+if (identity.active_url !== url || identity.title !== title) process.exit(1);
+NODE
+      if [ "$mode" = attach ]; then
+        node - "$dir/browser/bridge-before-mcp-reconnect.json" "$dir/browser/home/.chrome-devtools-axi/sessions/followup-mcp/bridge.pid" <<'NODE' || fail "MCP reconnect must leave the AXI bridge PID and port unchanged"
+const fs = require('fs');
+const [before, after] = process.argv.slice(2).map(file => JSON.parse(fs.readFileSync(file, 'utf8')));
+if (before.pid !== 42420 || before.port !== 9666 || before.pid !== after.pid || before.port !== after.port) process.exit(1);
+NODE
+      fi
+    done
+  done
+  pass "fm-browser-qa.sh: shared page probes reject MCP reconnection without bridge replacement"
+}
+
 test_attached_identity_successful_retry_clears_failure_marker() {
   local dir fakebin identity status
   dir="$TMP_ROOT/attach-retry"
@@ -2016,6 +2085,7 @@ test_attached_identity_reads_live_bridge_connection_settings
 test_attached_identity_explicit_endpoint_overrides_ambient_auto_connect
 test_attached_identity_rejects_bridge_replacement_during_selection
 test_attached_identity_preserves_final_selection_without_restart
+test_page_probes_reject_mcp_reconnection_with_unchanged_bridge
 test_attached_identity_successful_retry_clears_failure_marker
 test_attached_identity_zero_exact_matches_refused
 test_attached_identity_indistinguishable_matches_refused

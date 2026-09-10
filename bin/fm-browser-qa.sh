@@ -811,19 +811,39 @@ safe_page_id() {
 }
 
 probe_page() {
-  local page_id=$1 out_json=$2 safe_id err_file
+  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file selected_id attempts_left=2
   safe_id=$(safe_page_id "$page_id")
   err_file="$TMP_DIR/probe-$safe_id.err"
+  evaluated_json="$TMP_DIR/probe-evaluated-$safe_id.json"
+  pages_file="$TMP_DIR/probe-pages-$safe_id.out"
   axi selectpage "$page_id" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
-  axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
-  parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$out_json" 2> "$err_file" || return 1
+  while [ "$attempts_left" -gt 0 ]; do
+    attempts_left=$((attempts_left - 1))
+    axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
+    parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" 2> "$err_file" || return 1
+    axi pages > "$pages_file" 2> "$err_file" || return 1
+    if ! selected_id=$(selected_page_id "$pages_file"); then
+      echo "could not identify a unique selected browser page after evaluation" > "$err_file"
+      return 1
+    fi
+    if [ "$selected_id" != "$page_id" ]; then
+      echo "browser page mapping changed during probe: expected selected page $page_id got $selected_id" > "$err_file"
+      return 1
+    fi
+    if [ "$(page_inventory_url "$pages_file" "$selected_id")" = "$(json_field "$evaluated_json" href)" ]; then
+      cp "$evaluated_json" "$out_json" 2> "$err_file" || return 1
+      return 0
+    fi
+  done
+  echo "browser page URL kept changing while confirming selected page $page_id" > "$err_file"
+  return 1
 }
 
 probe_error() {
   local safe_id
   safe_id=$(safe_page_id "$1")
   stream_detail "$TMP_DIR/probe-$safe_id.err" "$TMP_DIR/select-$safe_id.out" \
-    "$TMP_DIR/eval-$safe_id.out"
+    "$TMP_DIR/eval-$safe_id.out" "$TMP_DIR/probe-pages-$safe_id.out"
 }
 
 list_page_ids() {
