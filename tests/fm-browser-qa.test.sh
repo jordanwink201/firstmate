@@ -1699,7 +1699,7 @@ test_full_title_inventory_is_required() {
 
 test_page_inventory_preserves_titled_urls_and_selection() {
   local dir fakebin identity title index=0 url='https://teachers.example.test/qa(a,b)?filter=(x,y)'
-  for title in '' 'Classes' 'Classes [selected] (Review), café' 'A long classroom page title with more than fifty characters in its full title' $'Classes <&> " \' &amp;'; do
+  for title in '' 'Classes' 'Classes [selected] (Review), café' 'A long classroom page title with more than fifty characters in its full title' $'Classes <&> " \' &amp;' 'R&D &amp; Training'; do
     index=$((index + 1))
     dir="$TMP_ROOT/inventory-titles-$index"
     fakebin=$(make_fake_browser_tools "$dir")

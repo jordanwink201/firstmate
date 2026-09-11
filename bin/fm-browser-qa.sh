@@ -877,7 +877,6 @@ const [pagesFile, targetsFile] = process.argv.slice(2);
 const pages = JSON.parse(fs.readFileSync(pagesFile, 'utf8'));
 const targets = JSON.parse(fs.readFileSync(targetsFile, 'utf8'));
 if (!Array.isArray(targets)) throw new Error('browser did not return a full-title inventory');
-const entities = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
 const ids = new Set();
 const identities = targets.filter(target => target.type === 'page').map(target => {
   if (typeof target.id !== 'string' || !target.id || ids.has(target.id) ||
@@ -885,7 +884,7 @@ const identities = targets.filter(target => target.type === 'page').map(target =
     throw new Error('browser returned an invalid full-title inventory');
   }
   ids.add(target.id);
-  return { id: target.id, href: target.url, title: target.title.replace(/&(?:amp|lt|gt|quot|#39);/g, entity => entities[entity]) };
+  return { id: target.id, href: target.url, title: target.title };
 });
 console.log(JSON.stringify({ pages, identities }));
 NODE

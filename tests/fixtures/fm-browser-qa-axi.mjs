@@ -56,10 +56,9 @@ export async function callTool(name) {
 export async function run() {
   if (process.argv[2] === 'browser-targets') {
     const dir = process.env.FM_FAKE_BROWSER_DIR;
-    const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
     const targets = fs.readdirSync(dir).filter(file => /^page_\d+$/.test(file)).map(file => {
       const [url, ...title] = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\n$/, '').split('\t');
-      return { id: `browser-${file}`, type: 'page', url, title: title.join('\t').replace(/[&<>"']/g, char => entities[char]) };
+      return { id: `browser-${file}`, type: 'page', url, title: title.join('\t') };
     });
     console.log(JSON.stringify(targets));
     return;
