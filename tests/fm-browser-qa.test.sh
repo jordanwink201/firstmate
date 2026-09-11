@@ -249,6 +249,16 @@ NODE
         printf '%s\t%s\n' "$redirect_href" "$redirect_title" > "$(page_file "$id")"
       fi
     fi
+    if [ -f "$dir/switch_selection_after_eval" ]; then
+      read -r probe_id probe_count selected_id < "$dir/switch_selection_after_eval"
+      if [ "$id" = "$probe_id" ] && [ "$count" -eq "$probe_count" ]; then
+        if [ -e "$dir/copy_identity_on_selection_switch" ]; then
+          cp "$(page_file "$id")" "$(page_file "$selected_id")"
+        fi
+        printf '%s\n' "$selected_id" > "$dir/selected"
+        : > "$dir/selection_switched"
+      fi
+    fi
     ;;
   newpage)
     url=${1:?}
@@ -1363,6 +1373,37 @@ test_unprobeable_fallback_preserves_navigation_failure() {
   pass "fm-browser-qa.sh: unprobeable fallback preserves navigation failure"
 }
 
+test_duplicate_non_target_landing_preserves_exact_url_blocker() {
+  local dir fakebin out status title index=0 target_url='https://example.test/qa'
+  for title in 'Dashboard' 'Dashboard [selected]'; do
+    index=$((index + 1))
+    dir="$TMP_ROOT/duplicate-non-target-landing-$index"
+    fakebin=$(make_fake_browser_tools "$dir")
+    write_page "$dir/browser" 1 'https://example.test/dashboard' "$title"
+    printf '%s\t%s\n' 'https://example.test/dashboard' "$title" > "$dir/browser/newpage_redirect"
+
+    set +e
+    out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+      run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "a duplicate non-target landing should block the exact QA URL"
+    assert_contains "$out" "blocked: exact QA URL is not open after navigation: $target_url" \
+      "identical non-target tabs must preserve the exact-URL classification"
+    assert_not_contains "$out" 'could not prove browser landing page identity' \
+      "the selected landing should remain identifiable beside an identical tab"
+    assert_ledger_block_reason "$dir/runs.jsonl" 'page-scan' \
+      "exact QA URL is not open after navigation: $target_url" \
+      "the duplicate redirect should record the exact-URL reason"
+    [ "$(cat "$dir/browser/selected")" = 2 ] || fail "the redirected landing should remain selected"
+    assert_present "$dir/browser/page_1" "the existing non-target tab must remain open"
+    assert_present "$dir/browser/page_2" "the redirect fixture must create a second non-target tab"
+    assert_absent "$dir/evidence/identity.json" "a non-target landing must not publish successful identity"
+  done
+  pass "fm-browser-qa.sh: identical non-target landings preserve the exact-URL blocker"
+}
+
 test_unprobeable_unrelated_tab_is_skipped() {
   local dir fakebin evidence
   dir="$TMP_ROOT/unprobeable-other"
@@ -1817,6 +1858,46 @@ NODE
   pass "fm-browser-qa.sh: shared page probes reject MCP reconnection without bridge replacement"
 }
 
+test_page_probes_reject_selection_changes_after_evaluation() {
+  local dir fakebin identity mode scenario out status
+  for mode in attach qa; do
+    for scenario in different same-identity; do
+      dir="$TMP_ROOT/probe-selection-change-$mode-$scenario"
+      fakebin=$(make_fake_browser_tools "$dir")
+      identity="$dir/wrapper/identity.json"
+      write_identity_json "$identity" 5 'https://teachers.example.test/classes' 'Classes'
+      write_page "$dir/browser" 1 'https://teachers.example.test/dashboard' 'Dashboard'
+      write_page "$dir/browser" 2 'data:text/plain,Hello world [selected]' ''
+      write_page "$dir/browser" 7 'https://teachers.example.test/classes' 'Classes'
+      printf '7 2 1\n' > "$dir/browser/switch_selection_after_eval"
+      [ "$scenario" != same-identity ] || : > "$dir/browser/copy_identity_on_selection_switch"
+
+      set +e
+      if [ "$mode" = attach ]; then
+        out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-selection --out "$dir/evidence")
+      else
+        out=$(run_qa "$fakebin" "$dir/browser" --url 'https://teachers.example.test/classes' --out "$dir/evidence")
+      fi
+      status=$?
+      set -e
+
+      assert_present "$dir/browser/selection_switched" "the fixture must change selection after the final page evaluation"
+      expect_code 1 "$status" "an ordinary selection change must invalidate the final page probe"
+      assert_contains "$out" 'browser page identity or selection changed while confirming page 7' \
+        "the probe must reject a changed selection even when URL/title still match"
+      [ "$(cat "$dir/browser/selected")" = 1 ] || fail "the fixture should leave the other page selected"
+      assert_absent "$dir/browser/bridge_replaced" "the selection change must not replace the bridge"
+      assert_absent "$dir/browser/mcp_reconnected" "the selection change must not reconnect MCP"
+      assert_present "$dir/evidence/FAILED.md" "selection drift should leave failure evidence"
+      assert_absent "$dir/evidence/identity.json" "selection drift must not publish successful QA identity"
+      assert_absent "$dir/evidence/attached-identity.json" "selection drift must not publish successful attachment identity"
+      assert_absent "$dir/evidence/report.md" "selection drift must not publish a QA success report"
+      assert_absent "$dir/evidence/attached-report.md" "selection drift must not publish an attachment success report"
+    done
+  done
+  pass "fm-browser-qa.sh: shared probes reject ordinary selection changes after identity evaluation"
+}
+
 test_attached_identity_successful_retry_clears_failure_marker() {
   local dir fakebin identity status
   dir="$TMP_ROOT/attach-retry"
@@ -2208,6 +2289,7 @@ test_late_unidentified_landing_auth_is_reconciled
 test_authoritative_exact_target_is_accepted
 test_authoritative_auth_precedes_unprobeable_fallback
 test_unprobeable_fallback_preserves_navigation_failure
+test_duplicate_non_target_landing_preserves_exact_url_blocker
 test_unprobeable_unrelated_tab_is_skipped
 test_unrelated_sign_in_tab_does_not_report_auth_expired
 test_sign_in_substring_title_is_not_auth
@@ -2224,6 +2306,7 @@ test_attached_identity_explicit_endpoint_overrides_ambient_auto_connect
 test_attached_identity_rejects_bridge_replacement_during_selection
 test_attached_identity_preserves_final_selection_without_restart
 test_page_probes_reject_mcp_reconnection_with_unchanged_bridge
+test_page_probes_reject_selection_changes_after_evaluation
 test_attached_identity_successful_retry_clears_failure_marker
 test_attached_identity_zero_exact_matches_refused
 test_attached_identity_indistinguishable_matches_refused

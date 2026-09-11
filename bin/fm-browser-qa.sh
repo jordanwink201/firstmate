@@ -880,12 +880,12 @@ const suffix = /^(?: \[selected\])?(?: isolatedContext=.*)?$/;
 let matches;
 if (mode === 'ids') {
   matches = pages;
-} else if (mode === 'identity') {
+} else if (mode === 'selected-identity') {
   const { href, title } = JSON.parse(fs.readFileSync(value, 'utf8'));
   const shortTitle = title.length > 50 ? title.slice(0, 47) + '...' : title;
   const label = shortTitle ? `${shortTitle} (${href})` : href;
   matches = pages.filter(page => (!wanted || page.id === wanted) &&
-    page.label.startsWith(label) && suffix.test(page.label.slice(label.length)));
+    page.label.startsWith(label) && /^ \[selected\](?: isolatedContext=.*)?$/.test(page.label.slice(label.length)));
 } else if (mode === 'url') {
   matches = pages.filter(page => {
     if (page.id !== wanted) return false;
@@ -912,12 +912,12 @@ probe_page() {
     mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
     parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" 2> "$err_file" || return 1
     page_inventory > "$pages_file" 2> "$err_file" || return 1
-    if [ "$(inventory_lookup "$pages_file" identity "$evaluated_json" "$page_id")" = "$page_id" ]; then
+    if [ "$(inventory_lookup "$pages_file" selected-identity "$evaluated_json" "$page_id")" = "$page_id" ]; then
       cp "$evaluated_json" "$out_json" 2> "$err_file" || return 1
       return 0
     fi
   done
-  echo "browser page URL kept changing while confirming selected page $page_id" > "$err_file"
+  echo "browser page identity or selection changed while confirming page $page_id" > "$err_file"
   return 1
 }
 
@@ -938,7 +938,7 @@ list_page_ids() {
 
 landing_page_id() {
   local matches
-  matches=$(inventory_lookup "$TMP_DIR/pages-after-open.txt" identity "$1")
+  matches=$(inventory_lookup "$TMP_DIR/pages-after-open.txt" selected-identity "$1")
   [ -n "$matches" ] && [ "$(printf '%s\n' "$matches" | wc -l | tr -d '[:space:]')" = 1 ] || return 1
   printf '%s\n' "$matches"
 }

@@ -322,7 +322,7 @@ Before enumerating tabs, it verifies the named AXI session's running bridge and 
 It keeps that original bridge binding through discovery and selection, rejecting a replacement even at the same browser endpoint.
 Each page probe also checks the current inventory after evaluation to confirm that the discovered page ID remains selected at the evaluated URL, including when MCP reconnects within the same bridge.
 The helper keeps page selection and JSON identity evaluation on the established AXI bridge, rejecting MCP reconnects or selection fallback before comparing the evaluated identity with the discovered page ID.
-Inventory labels preserve literal URL text; selection is never inferred from a title or URL ending in `[selected]`.
+Selection metadata is checked only after matching the complete evaluated URL/title label, preserving literal `[selected]` text within either field.
 It refuses zero matches, indistinguishable duplicate URL/title matches, browser endpoint mismatches, and page drift before returning success.
 The selector leaves the named AXI session selected for immediate follow-up commands; use that same `CHROME_DEVTOOLS_AXI_SESSION` and the identity's `browser_url`, then stop that caller-owned session when QA is complete.
 After navigation, an authoritative landing on Cloudflare Access or a sign-in page uses the authenticated-browser-session-expired blocker.
