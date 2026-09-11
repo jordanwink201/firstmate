@@ -13,6 +13,7 @@
 # $HOME/.local/share/fm-browser-qa/runs.jsonl when either path is available.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
+#   fm-browser-qa.sh --select-identity <identity.json> --axi-session <session> [--out <dir>]
 set -eu
 export LC_ALL=C
 
@@ -31,7 +32,11 @@ fi
 TARGET_URL=
 OUT_DIR=
 BROWSER_URL=http://127.0.0.1:9222
+BROWSER_URL_SET=0
 SESSION_INPUT=
+IDENTITY_INPUT=
+AXI_SESSION_INPUT=
+INHERITED_AXI_SESSION=${CHROME_DEVTOOLS_AXI_SESSION:-}
 START_IF_NEEDED=0
 LOGICAL_SESSION_NAME=
 TMP_DIR=
@@ -44,6 +49,10 @@ MCP_COMPAT_STAGING_DIR=
 MCP_OUTPUT_DIR=
 JSON_RESULT=
 CURL_TIMEOUT=${FM_BROWSER_QA_CURL_TIMEOUT:-2}
+MODE=qa
+STOP_AXI_ON_CLEANUP=1
+ATTACH_EXPECTED_TITLE=
+ATTACH_BINDING_READY=0
 # chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
 # Remove this pin after AXI sends pageId or supports disabling page-id routing.
 MCP_COMPAT_VERSION=1.7.0
@@ -51,6 +60,7 @@ MCP_COMPAT_VERSION=1.7.0
 usage() {
   cat >&2 <<'EOF'
 usage: bin/fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
+       bin/fm-browser-qa.sh --select-identity <identity.json> --axi-session <session> [--out <dir>]
 EOF
 }
 
@@ -106,6 +116,17 @@ sanitize_token() {
   printf '%s\n' "$token"
 }
 
+valid_axi_session_name() {
+  [ -n "$1" ] || return 1
+  [ "${#1}" -le 64 ] || return 1
+  case "$1" in
+    *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-]*)
+      return 1
+      ;;
+  esac
+  [ -n "$(printf '%s' "$1" | tr -d '.')" ] || return 1
+}
+
 curl_timeout_valid() {
   node - "$1" <<'NODE' >/dev/null 2>&1 || return 1
 const raw = process.argv[2];
@@ -116,11 +137,42 @@ NODE
   curl --silent --show-error --max-time "$1" --version >/dev/null 2>&1
 }
 
+identity_json_field() {
+  node - "$1" "$2" "${3:-optional}" <<'NODE'
+const fs = require('fs');
+const [file, field, mode] = process.argv.slice(2);
+let identity;
+try {
+  identity = JSON.parse(fs.readFileSync(file, 'utf8'));
+} catch (error) {
+  console.error(`could not read browser QA identity: ${error.message}`);
+  process.exit(1);
+}
+const value = identity[field];
+if (typeof value !== 'string') {
+  if (mode === 'required') {
+    console.error(`browser QA identity missing string field ${field}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+process.stdout.write(value);
+NODE
+}
+
 axi() (
-  unset CHROME_DEVTOOLS_AXI_PORT
+  local status=0
+  if [ "$ATTACH_BINDING_READY" -eq 1 ]; then
+    verify_attached_session_binding
+  fi
+  unset CHROME_DEVTOOLS_AXI_PORT CHROME_DEVTOOLS_AXI_AUTO_CONNECT
   export CHROME_DEVTOOLS_AXI_SESSION="$AXI_SESSION_NAME"
   export CHROME_DEVTOOLS_AXI_BROWSER_URL="$BROWSER_URL"
-  chrome-devtools-axi "$@"
+  chrome-devtools-axi "$@" || status=$?
+  if [ "$ATTACH_BINDING_READY" -eq 1 ]; then
+    verify_attached_session_binding
+  fi
+  return "$status"
 )
 
 # One JSON line per run, so failure rates and stage distribution are answerable
@@ -205,7 +257,7 @@ cleanup() {
   trap - EXIT
   trap '' HUP INT TERM
   LC_ALL=C append_ledger "$status"
-  if [ -n "$AXI_SESSION_NAME" ]; then
+  if [ "$STOP_AXI_ON_CLEANUP" -eq 1 ] && [ -n "$AXI_SESSION_NAME" ]; then
     axi stop >/dev/null 2>&1 || true
   fi
   remove_mcp_output_dir
@@ -243,11 +295,23 @@ while [ "$#" -gt 0 ]; do
     --browser-url)
       [ "$#" -ge 2 ] || die_usage "--browser-url requires a value"
       BROWSER_URL=$2
+      BROWSER_URL_SET=1
       shift 2
       ;;
     --session)
       [ "$#" -ge 2 ] || die_usage "--session requires a value"
       SESSION_INPUT=$2
+      shift 2
+      ;;
+    --select-identity)
+      [ "$#" -ge 2 ] || die_usage "--select-identity requires a value"
+      MODE=select
+      IDENTITY_INPUT=$2
+      shift 2
+      ;;
+    --axi-session)
+      [ "$#" -ge 2 ] || die_usage "--axi-session requires a value"
+      AXI_SESSION_INPUT=$2
       shift 2
       ;;
     --start-if-needed)
@@ -264,8 +328,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$TARGET_URL" ] || die_usage "--url is required"
-[ -n "$OUT_DIR" ] || die_usage "--out is required"
+case "$MODE" in
+  qa)
+    [ -n "$TARGET_URL" ] || die_usage "--url is required"
+    [ -n "$OUT_DIR" ] || die_usage "--out is required"
+    [ -z "$IDENTITY_INPUT" ] || die_usage "--url cannot be combined with --select-identity"
+    [ -z "$AXI_SESSION_INPUT" ] || die_usage "--axi-session applies only with --select-identity"
+    ;;
+  select)
+    [ -n "$IDENTITY_INPUT" ] || die_usage "--select-identity is required"
+    [ -z "$TARGET_URL" ] || die_usage "--url cannot be combined with --select-identity"
+    [ -z "$SESSION_INPUT" ] || die_usage "--session applies only with --url; use --axi-session with --select-identity"
+    [ "$START_IF_NEEDED" -eq 0 ] || die_usage "--start-if-needed cannot be combined with --select-identity"
+    if [ -z "$AXI_SESSION_INPUT" ] && [ -n "$INHERITED_AXI_SESSION" ]; then
+      AXI_SESSION_INPUT=$INHERITED_AXI_SESSION
+    fi
+    [ -n "$AXI_SESSION_INPUT" ] || die_usage "--axi-session is required with --select-identity"
+    valid_axi_session_name "$AXI_SESSION_INPUT" \
+      || die_usage "--axi-session must be 1-64 characters of A-Z, a-z, 0-9, dot, underscore, or dash"
+    AXI_SESSION_NAME=$AXI_SESSION_INPUT
+    LOGICAL_SESSION_NAME="attach-$AXI_SESSION_NAME"
+    STOP_AXI_ON_CLEANUP=0
+    ;;
+  *)
+    die_usage "unknown mode: $MODE"
+    ;;
+esac
 
 command -v chrome-devtools-axi >/dev/null 2>&1 || blocked "chrome-devtools-axi is not installed or not on PATH"
 command -v curl >/dev/null 2>&1 || blocked "curl is not installed or not on PATH"
@@ -273,25 +361,44 @@ command -v node >/dev/null 2>&1 || blocked "node is not installed or not on PATH
 curl_timeout_valid "$CURL_TIMEOUT" || CURL_TIMEOUT=2
 
 BROWSER_URL=${BROWSER_URL%/}
-mkdir -p "$OUT_DIR" || blocked "could not create evidence directory: $OUT_DIR"
+[ -z "$OUT_DIR" ] || mkdir -p "$OUT_DIR" || blocked "could not create evidence directory: $OUT_DIR"
 
-if [ -n "$SESSION_INPUT" ]; then
-  LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$SESSION_INPUT")"
-else
-  LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$OUT_DIR")")"
+if [ "$MODE" = qa ]; then
+  if [ -n "$SESSION_INPUT" ]; then
+    LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$SESSION_INPUT")"
+  else
+    LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$OUT_DIR")")"
+  fi
 fi
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
 
+if [ "$MODE" = select ]; then
+  [ -f "$IDENTITY_INPUT" ] || blocked "browser QA identity file does not exist: $IDENTITY_INPUT"
+  IDENTITY_BROWSER_URL=$(identity_json_field "$IDENTITY_INPUT" browser_url required) \
+    || blocked "could not read browser QA identity browser_url: $IDENTITY_INPUT"
+  TARGET_URL=$(identity_json_field "$IDENTITY_INPUT" active_url required) \
+    || blocked "could not read browser QA identity active_url: $IDENTITY_INPUT"
+  ATTACH_EXPECTED_TITLE=$(identity_json_field "$IDENTITY_INPUT" title required) \
+    || blocked "could not read browser QA identity title: $IDENTITY_INPUT"
+  IDENTITY_BROWSER_URL=${IDENTITY_BROWSER_URL%/}
+  if [ "$BROWSER_URL_SET" -eq 1 ] && [ "$BROWSER_URL" != "$IDENTITY_BROWSER_URL" ]; then
+    blocked "browser endpoint override does not match browser QA identity: expected $IDENTITY_BROWSER_URL got $BROWSER_URL"
+  fi
+  BROWSER_URL=$IDENTITY_BROWSER_URL
+fi
+
 target_reachable() {
   curl --fail -sS --max-time "$CURL_TIMEOUT" --output /dev/null "$TARGET_URL" >/dev/null 2>&1
 }
 
-STAGE=target-reachability
-target_reachable \
-  || blocked "target host is unreachable; likely torn-down feature branch for exact QA URL: $TARGET_URL"
+if [ "$MODE" = qa ]; then
+  STAGE=target-reachability
+  target_reachable \
+    || blocked "target host is unreachable; likely torn-down feature branch for exact QA URL: $TARGET_URL"
+fi
 
 mcp_compat_package_json() {
   printf '%s/node_modules/chrome-devtools-mcp/package.json\n' "$1"
@@ -470,7 +577,9 @@ ensure_mcp_compat() {
 
 STAGE=mcp-compat
 ensure_mcp_compat
-AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
+if [ "$MODE" = qa ]; then
+  AXI_SESSION_NAME="fmqa-$(sanitize_token "$(basename "$TMP_DIR")")"
+fi
 STAGE=browser-check
 
 append_warning() {
@@ -624,18 +733,18 @@ NODE
 }
 
 parse_eval_identity() {
-  node - "$1" "$2" <<'NODE'
+  node - "$1" "$2" "${3:-}" <<'NODE'
 const fs = require('fs');
-const [input, output] = process.argv.slice(2);
+const [input, output, bindingFile] = process.argv.slice(2);
 const text = fs.readFileSync(input, 'utf8');
-const match = text.match(/^result:\s*(.+)$/m);
-if (!match) {
+const result = text.split('\n').find(line => line.startsWith('result:'))?.slice(7).trim();
+if (!result) {
   console.error('missing result line');
   process.exit(1);
 }
 let value;
 try {
-  value = JSON.parse(match[1].trim());
+  value = JSON.parse(result);
 } catch (error) {
   console.error(`invalid eval result JSON: ${error.message}`);
   process.exit(1);
@@ -653,7 +762,8 @@ if (!value || typeof value !== 'object' || typeof value.href !== 'string') {
 }
 fs.writeFileSync(output, JSON.stringify({
   href: value.href,
-  title: typeof value.title === 'string' ? value.title : ''
+  title: typeof value.title === 'string' ? value.title : '',
+  ...(bindingFile && fs.existsSync(bindingFile) ? { browser_target_ids: JSON.parse(fs.readFileSync(bindingFile, 'utf8')) } : {}),
 }, null, 2) + '\n');
 NODE
 }
@@ -701,43 +811,178 @@ safe_page_id() {
   printf '%s' "$1" | LC_ALL=C tr -c '[:alnum:]_.-' '_'
 }
 
+mcp_call() {
+  FM_QA_MCP_TOOL=$1 FM_QA_MCP_ARGS=$2 FM_QA_MCP_PORT_FILE="$TMP_DIR/mcp-port.json" axi run <<'NODE'
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const cli = pathToFileURL(realpathSync(process.argv[1]));
+const portFile = process.env.FM_QA_MCP_PORT_FILE;
+if (!existsSync(portFile)) {
+  const { ensureBridge } = await import(new URL('../src/client.js', cli));
+  writeFileSync(portFile, JSON.stringify(await ensureBridge()));
+}
+const port = JSON.parse(readFileSync(portFile, 'utf8'));
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid AXI bridge port');
+const name = process.env.FM_QA_MCP_TOOL;
+const args = JSON.parse(process.env.FM_QA_MCP_ARGS);
+const response = await fetch(`http://127.0.0.1:${port}/call`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name, args }),
+  signal: AbortSignal.timeout(120000),
+});
+const result = await response.json();
+if (!response.ok || result.error || typeof result.result !== 'string') {
+  throw new Error(result.error || 'AXI bridge did not return an MCP result');
+}
+const raw = result.result;
+if (/^Note: the browser was restarted or reconnected since the last call\./m.test(raw) ||
+    /^Note: the previously selected page (?:was closed|is no longer listed)\./m.test(raw)) {
+  throw new Error('MCP browser context changed during page probe');
+}
+if (name === 'evaluate_script') {
+  const match = raw.match(/Script ran on page and returned:\n```json\n([\s\S]*?)\n```/);
+  if (!match) throw new Error(`could not evaluate browser page identity: ${raw}`);
+  console.log(`result: ${JSON.stringify(JSON.parse(match[1]))}`);
+} else {
+  const pages = [];
+  const ids = new Set();
+  let inPages = false;
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('## ')) {
+      inPages = line === '## Pages' || line === '## Extension Pages';
+      continue;
+    }
+    if (!inPages || !line.trim()) continue;
+    const page = line.match(/^(\d+): /);
+    if (!page || ids.has(page[1])) throw new Error('could not parse an unambiguous MCP page inventory');
+    ids.add(page[1]);
+    pages.push({ id: page[1], label: line.slice(page[0].length) });
+  }
+  if (name === 'select_page' && !ids.has(String(args.pageId))) {
+    throw new Error(`could not select browser page ${args.pageId}: ${raw}`);
+  }
+  if (name === 'new_page' && !pages.length) throw new Error(`could not open browser page: ${raw}`);
+  console.log(JSON.stringify(pages));
+}
+NODE
+}
+
+page_inventory() {
+  mcp_call list_pages '{}' > "$TMP_DIR/mcp-inventory.json" || return 1
+  curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
+  node - "$TMP_DIR/mcp-inventory.json" "$TMP_DIR/browser-inventory.json" <<'NODE'
+const fs = require('fs');
+const [pagesFile, targetsFile] = process.argv.slice(2);
+const pages = JSON.parse(fs.readFileSync(pagesFile, 'utf8'));
+const targets = JSON.parse(fs.readFileSync(targetsFile, 'utf8'));
+if (!Array.isArray(targets)) throw new Error('browser did not return a full-title inventory');
+const ids = new Set();
+const identities = targets.filter(target => target.type === 'page').map(target => {
+  if (typeof target.id !== 'string' || !target.id || ids.has(target.id) ||
+      typeof target.url !== 'string' || typeof target.title !== 'string') {
+    throw new Error('browser returned an invalid full-title inventory');
+  }
+  ids.add(target.id);
+  return { id: target.id, href: target.url, title: target.title };
+});
+console.log(JSON.stringify({ pages, identities }));
+NODE
+}
+
+inventory_lookup() {
+  node - "$@" <<'NODE'
+const fs = require('fs');
+const [file, mode, value, wanted] = process.argv.slice(2);
+const { pages, identities } = JSON.parse(fs.readFileSync(file, 'utf8'));
+const suffix = /^(?: \[selected\])?(?: isolatedContext=.*)?$/;
+let matches;
+if (mode === 'ids') {
+  matches = pages;
+} else if (mode === 'identity' || mode === 'selected-identity' || mode === 'identity-count') {
+  const { href, title, browser_target_ids: boundIds } = JSON.parse(fs.readFileSync(value, 'utf8'));
+  const current = identities.filter(identity => identity.href === href && identity.title === title);
+  if (mode === 'identity-count') {
+    console.log(current.length);
+    process.exit(0);
+  }
+  const shortTitle = title.length > 50 ? title.slice(0, 47) + '...' : title;
+  const label = shortTitle ? `${shortTitle} (${href})` : href;
+  const metadata = mode === 'selected-identity' ? /^ \[selected\](?: isolatedContext=.*)?$/ : suffix;
+  const hasIdentity = boundIds
+    ? (mode === 'identity' ? boundIds.every(id => current.some(identity => identity.id === id))
+      : current.some(identity => boundIds.includes(identity.id)))
+    : current.length > 0;
+  matches = pages.filter(page => hasIdentity && (!wanted || page.id === wanted) &&
+    page.label.startsWith(label) && metadata.test(page.label.slice(label.length)));
+} else if (mode === 'url') {
+  matches = pages.filter(page => {
+    if (wanted && page.id !== wanted) return false;
+    if (page.label.startsWith(value) && suffix.test(page.label.slice(value.length))) return true;
+    const end = page.label.lastIndexOf(` (${value})`);
+    return end >= 0 && suffix.test(page.label.slice(end + value.length + 3));
+  });
+} else {
+  throw new Error('unknown inventory lookup');
+}
+for (const page of matches) console.log(page.id);
+NODE
+}
+
 probe_page() {
-  local page_id=$1 out_json=$2 safe_id err_file
+  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file binding_file attempts_left=2
   safe_id=$(safe_page_id "$page_id")
   err_file="$TMP_DIR/probe-$safe_id.err"
-  axi selectpage "$page_id" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
-  axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
-  parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$out_json" 2> "$err_file" || return 1
+  evaluated_json="$TMP_DIR/probe-evaluated-$safe_id.json"
+  pages_file="$TMP_DIR/probe-pages-$safe_id.out"
+  binding_file="$TMP_DIR/probe-targets-$safe_id.json"
+  mcp_call select_page "{\"pageId\":$page_id}" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
+  while [ "$attempts_left" -gt 0 ]; do
+    attempts_left=$((attempts_left - 1))
+    mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
+    parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" "$binding_file" 2> "$err_file" || return 1
+    page_inventory > "$pages_file" 2> "$err_file" || return 1
+    if [ "$(inventory_lookup "$pages_file" selected-identity "$evaluated_json" "$page_id")" = "$page_id" ]; then
+      node - "$evaluated_json" "$pages_file" "$binding_file" <<'NODE' 2> "$err_file" || return 1
+const fs = require('fs');
+const [identityFile, pagesFile, bindingFile] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+const { identities } = JSON.parse(fs.readFileSync(pagesFile, 'utf8'));
+const boundIds = identity.browser_target_ids;
+identity.browser_target_ids = identities.filter(current => current.href === identity.href && current.title === identity.title &&
+  (!boundIds || boundIds.includes(current.id))).map(current => current.id);
+if (!identity.browser_target_ids.length) throw new Error('browser target identity changed during page probe');
+fs.writeFileSync(bindingFile, JSON.stringify(identity.browser_target_ids));
+fs.writeFileSync(identityFile, JSON.stringify(identity) + '\n');
+NODE
+      cp "$evaluated_json" "$out_json" 2> "$err_file" || return 1
+      return 0
+    fi
+  done
+  echo "browser page identity or selection changed while confirming page $page_id" > "$err_file"
+  return 1
 }
 
 probe_error() {
   local safe_id
   safe_id=$(safe_page_id "$1")
   stream_detail "$TMP_DIR/probe-$safe_id.err" "$TMP_DIR/select-$safe_id.out" \
-    "$TMP_DIR/eval-$safe_id.out"
+    "$TMP_DIR/eval-$safe_id.out" "$TMP_DIR/probe-pages-$safe_id.out"
 }
 
 list_page_ids() {
   local label=$1
-  if ! axi pages > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
+  if ! page_inventory > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
     blocked "could not enumerate browser pages: $(stream_detail "$TMP_DIR/pages-$label.err" "$TMP_DIR/pages-$label.txt")"
   fi
-  awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$TMP_DIR/pages-$label.txt"
+  inventory_lookup "$TMP_DIR/pages-$label.txt" ids
 }
 
-selected_page_id() {
-  awk '
-    /^[[:space:]]*[A-Za-z0-9_.-]+,/ && /,true[[:space:]]*$/ {
-      gsub(/^[[:space:]]*/, "", $0)
-      sub(/,.*/, "", $0)
-      selected = $0
-      count++
-    }
-    END {
-      if (count != 1) exit 1
-      print selected
-    }
-  ' "$1"
+landing_page_id() {
+  local matches
+  matches=$(inventory_lookup "$TMP_DIR/pages-after-open.txt" selected-identity "$1")
+  [ -n "$matches" ] && [ "$(printf '%s\n' "$matches" | wc -l | tr -d '[:space:]')" = 1 ] || return 1
+  printf '%s\n' "$matches"
 }
 
 scan_pages() {
@@ -761,13 +1006,232 @@ scan_pages() {
   done
 }
 
+verify_attached_session_binding() {
+  STAGE=attach-session
+  if ! node - "$AXI_SESSION_NAME" "$BROWSER_URL" "$TMP_DIR/attach-start.out" "$TMP_DIR/attach-binding.json" "${1:-verify}" <<'NODE' 2> "$TMP_DIR/attach-binding.err"
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execFileSync } = require('child_process');
+const [session, expected, startFile, bindingFile, mode] = process.argv.slice(2);
+try {
+  const stateDir = path.join(os.homedir(), '.chrome-devtools-axi', ...(session === 'default' ? [] : ['sessions', session]));
+  const stateFile = path.join(stateDir, 'bridge.pid');
+  const binding = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  const original = mode === 'capture' ? binding : JSON.parse(fs.readFileSync(bindingFile, 'utf8'));
+  const requireOriginal = current => {
+    if (current.pid !== original.pid || current.port !== original.port) {
+      throw new Error('AXI session bridge changed during attachment; rerun page discovery');
+    }
+  };
+  requireOriginal(binding);
+  const ports = [...fs.readFileSync(startFile, 'utf8').matchAll(/^port:\s*(\d+)\s*$/gm)];
+  if (!Number.isSafeInteger(binding.pid) || binding.pid <= 0 || ports.length !== 1 || Number(ports[0][1]) !== binding.port) {
+    throw new Error('AXI session state does not identify the ready bridge');
+  }
+  const bridge = execFileSync('ps', ['eww', '-p', String(binding.pid), '-o', 'command='], {
+    encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (!/(?:^|\/)chrome-devtools-axi-bridge\.(?:js|ts)(?:\s|$)/.test(bridge)) {
+    throw new Error('AXI session bridge process could not be verified');
+  }
+  const setting = name => {
+    const values = [...bridge.matchAll(new RegExp(`(?:^|\\s)${name}=(\\S*)`, 'g'))];
+    if (values.length > 1) throw new Error('AXI bridge connection settings are ambiguous');
+    return values[0]?.[1];
+  };
+  if (setting('CHROME_DEVTOOLS_AXI_SESSION') !== session || Number(setting('CHROME_DEVTOOLS_AXI_PORT')) !== binding.port) {
+    throw new Error('AXI bridge process does not match the named session');
+  }
+  const endpoint = setting('CHROME_DEVTOOLS_AXI_BROWSER_URL');
+  if (!endpoint || setting('CHROME_DEVTOOLS_AXI_AUTO_CONNECT') === '1') {
+    throw new Error('AXI bridge has no verifiable explicit browser endpoint');
+  }
+  const actual = endpoint.replace(/\/$/, '');
+  if (actual !== expected) throw new Error(`browser endpoint mismatch: expected ${expected} got ${actual}`);
+  requireOriginal(JSON.parse(fs.readFileSync(stateFile, 'utf8')));
+  if (mode === 'capture') fs.writeFileSync(bindingFile, JSON.stringify({ pid: binding.pid, port: binding.port }));
+} catch (error) {
+  console.error(error.stderr !== undefined ? 'could not inspect the running AXI bridge' : error.message);
+  process.exit(1);
+}
+NODE
+  then
+    blocked "could not verify attached AXI session browser endpoint: $(stream_detail "$TMP_DIR/attach-binding.err")"
+  fi
+}
+
+write_attached_identity() {
+  [ -n "$OUT_DIR" ] || return 0
+  node - "$IDENTITY_INPUT" "$1" "$2" "$BROWSER_URL" "$AXI_SESSION_NAME" "$OUT_DIR" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const [sourceFile, identityFile, pageId, browserUrl, axiSessionName, outputDir] = process.argv.slice(2);
+const source = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
+const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+const attached = {
+  page_id: pageId,
+  page_id_scope: 'selected AXI session only',
+  requested_url: source.requested_url ?? '',
+  active_url: identity.href,
+  title: identity.title,
+  browser_url: browserUrl,
+  axi_session: axiSessionName,
+  source_identity: sourceFile,
+  source_page_id: source.page_id ?? null,
+  source_axi_session: source.axi_session ?? '',
+  selected_at: new Date().toISOString(),
+};
+fs.writeFileSync(path.join(outputDir, 'attached-identity.json'), JSON.stringify(attached, null, 2) + '\n');
+fs.writeFileSync(path.join(outputDir, 'attached-report.md'), [
+  '# Browser QA Attached Page Selection',
+  '',
+  `- Active URL: ${attached.active_url}`,
+  `- Title: ${attached.title}`,
+  `- Attached page ID: ${attached.page_id}`,
+  `- Page ID scope: ${attached.page_id_scope}`,
+  `- Browser endpoint: ${attached.browser_url}`,
+  `- AXI session: ${attached.axi_session}`,
+  `- Source identity: ${attached.source_identity}`,
+  '',
+].join('\n'));
+NODE
+}
+
+scan_attached_pages() {
+  local scan_dir=$1 ids=$2 pages_file=$3 page_id identity_json href
+  mkdir -p "$scan_dir"
+  : > "$scan_dir/matches.tsv"
+  for page_id in $ids; do
+    identity_json="$scan_dir/page-$(safe_page_id "$page_id").json"
+    if ! probe_page "$page_id" "$identity_json"; then
+      if [ "$(inventory_lookup "$pages_file" url "$NORM_TARGET_URL" "$page_id")" = "$page_id" ]; then
+        blocked "could not prove attached browser page $page_id identity: $(probe_error "$page_id")"
+      fi
+      echo "warning: skipped browser page $page_id: could not probe it" >&2
+      append_warning "skipped browser page $page_id: could not probe it"
+      continue
+    fi
+    href=$(json_field "$identity_json" href)
+    if [ "$href" = "$NORM_TARGET_URL" ]; then
+      printf '%s\t%s\n' "$page_id" "$identity_json" >> "$scan_dir/matches.tsv"
+    fi
+  done
+}
+
+select_attached_identity_page() {
+  local ids scan_dir matches url_count title_matches title_count match_line page_id
+  local final_identity final_href final_title
+  local candidate_dir candidate_id candidate_identity candidate_href pending_ids pages_file attempts_left=3
+  STAGE=attach-page-scan
+  scan_dir="$TMP_DIR/attach-scan"
+  ids=$(list_page_ids attach)
+  scan_attached_pages "$scan_dir" "$ids" "$TMP_DIR/pages-attach.txt"
+  matches="$scan_dir/matches.tsv"
+  url_count=$(count_lines "$matches")
+  if [ "$url_count" -eq 0 ]; then
+    blocked "no browser tabs match attached browser QA identity URL: $NORM_TARGET_URL"
+  fi
+  if [ "$url_count" -gt 1 ]; then
+    title_matches="$scan_dir/title-matches.tsv"
+    node - "$IDENTITY_INPUT" "$matches" <<'NODE' > "$title_matches"
+const fs = require('fs');
+const [sourceFile, matchesFile] = process.argv.slice(2);
+const { title } = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
+for (const line of fs.readFileSync(matchesFile, 'utf8').split('\n').filter(Boolean)) {
+  const identityFile = line.slice(line.indexOf('\t') + 1);
+  if (JSON.parse(fs.readFileSync(identityFile, 'utf8')).title === title) process.stdout.write(line + '\n');
+}
+NODE
+    title_count=$(count_lines "$title_matches")
+    if [ "$title_count" -eq 0 ]; then
+      blocked "multiple tabs match attached browser QA identity URL but none match the verified title: $ATTACH_EXPECTED_TITLE"
+    fi
+    if [ "$title_count" -gt 1 ]; then
+      blocked "multiple tabs match attached browser QA identity URL and title; cannot choose a unique page: $NORM_TARGET_URL"
+    fi
+    matches=$title_matches
+  fi
+
+  match_line=$(sed -n '1p' "$matches")
+  page_id=$(printf '%s\n' "$match_line" | cut -f1)
+  final_identity="$TMP_DIR/attached-final-identity.json"
+  candidate_dir="$TMP_DIR/attach-reconciled"
+  mkdir -p "$candidate_dir"
+  pages_file="$TMP_DIR/probe-pages-$(safe_page_id "$page_id").out"
+  while :; do
+    STAGE=attach-identity
+    if ! probe_page "$page_id" "$final_identity"; then
+      blocked "could not prove attached browser page $page_id identity after selection: $(probe_error "$page_id")"
+    fi
+    final_href=$(json_field "$final_identity" href)
+    final_title=$(json_field "$final_identity" title)
+    if [ "$final_href" != "$NORM_TARGET_URL" ]; then
+      blocked "attached browser page drifted after selection: expected $NORM_TARGET_URL got $final_href"
+    fi
+    if ! node - "$IDENTITY_INPUT" "$final_identity" <<'NODE'
+const fs = require('fs');
+const [sourceFile, identityFile] = process.argv.slice(2);
+process.exit(JSON.parse(fs.readFileSync(sourceFile, 'utf8')).title === JSON.parse(fs.readFileSync(identityFile, 'utf8')).title ? 0 : 1);
+NODE
+    then
+      blocked "attached browser page title mismatch after selection: expected $ATTACH_EXPECTED_TITLE got $final_title"
+    fi
+
+    pending_ids=
+    ids=$(inventory_lookup "$pages_file" url "$NORM_TARGET_URL")
+    for candidate_id in $ids; do
+      [ "$candidate_id" != "$page_id" ] || continue
+      candidate_identity="$candidate_dir/page-$(safe_page_id "$candidate_id").json"
+      if [ ! -f "$candidate_identity" ] ||
+         [ "$(inventory_lookup "$pages_file" identity "$candidate_identity" "$candidate_id")" != "$candidate_id" ]; then
+        pending_ids="$pending_ids $candidate_id"
+        continue
+      fi
+      candidate_href=$(json_field "$candidate_identity" href)
+      if [ "$candidate_href" = "$NORM_TARGET_URL" ] && node - "$IDENTITY_INPUT" "$candidate_identity" <<'NODE'
+const fs = require('fs');
+const [sourceFile, identityFile] = process.argv.slice(2);
+process.exit(JSON.parse(fs.readFileSync(sourceFile, 'utf8')).title === JSON.parse(fs.readFileSync(identityFile, 'utf8')).title ? 0 : 1);
+NODE
+      then
+        blocked "multiple tabs match attached browser QA identity URL and title; cannot choose a unique page: $NORM_TARGET_URL"
+      fi
+    done
+    if [ -z "$pending_ids" ]; then
+      if [ "$(inventory_lookup "$pages_file" identity-count "$final_identity")" -ne 1 ]; then
+        blocked "multiple tabs match attached browser QA identity URL and title; cannot choose a unique page: $NORM_TARGET_URL"
+      fi
+      break
+    fi
+    [ "$attempts_left" -gt 0 ] || blocked "attached browser page candidates kept changing; cannot prove a unique page: $NORM_TARGET_URL"
+    attempts_left=$((attempts_left - 1))
+    STAGE=attach-page-scan
+    for candidate_id in $pending_ids; do
+      candidate_identity="$candidate_dir/page-$(safe_page_id "$candidate_id").json"
+      if ! probe_page "$candidate_id" "$candidate_identity"; then
+        blocked "could not prove attached browser page $candidate_id identity during candidate reconciliation: $(probe_error "$candidate_id")"
+      fi
+    done
+  done
+  verify_attached_session_binding
+  STAGE=attach-evidence
+  write_attached_identity "$final_identity" "$page_id" || blocked "could not publish attached browser QA evidence"
+  [ -z "$OUT_DIR" ] || rm -f "$OUT_DIR/FAILED.md"
+  echo "ok: selected attached browser QA page $page_id in AXI session $AXI_SESSION_NAME"
+  echo "browser_url: $BROWSER_URL"
+  echo "axi_session: $AXI_SESSION_NAME"
+}
+
 open_target_page() {
   local landing_identity=$1
-  if ! axi newpage "$TARGET_URL" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
+  local args
+  args=$(node -e 'console.log(JSON.stringify({url: process.argv[1]}))' "$TARGET_URL")
+  if ! mcp_call new_page "$args" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
     blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
-  if ! axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/newpage-eval.out" 2> "$TMP_DIR/newpage-eval.err"; then
+  if ! mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/newpage-eval.out" 2> "$TMP_DIR/newpage-eval.err"; then
     blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/newpage-eval.err" "$TMP_DIR/newpage-eval.out")"
   fi
   if ! parse_eval_identity "$TMP_DIR/newpage-eval.out" "$landing_identity" 2> "$TMP_DIR/newpage-parse.err"; then
@@ -776,6 +1240,18 @@ open_target_page() {
 }
 
 NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
+
+if [ "$MODE" = select ]; then
+  STAGE=attach-session
+  if ! axi start > "$TMP_DIR/attach-start.out" 2> "$TMP_DIR/attach-start.err"; then
+    blocked "could not start attached AXI session: $(stream_detail "$TMP_DIR/attach-start.err" "$TMP_DIR/attach-start.out")"
+  fi
+  verify_attached_session_binding capture
+  ATTACH_BINDING_READY=1
+  select_attached_identity_page
+  STAGE="done"
+  exit 0
+fi
 
 STAGE=page-scan
 SCAN_DIR="$TMP_DIR/scan-initial"
@@ -793,8 +1269,18 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
     auth_blocked
   fi
   POST_IDS=$(list_page_ids after-open)
-  if ! LANDING_PAGE_ID=$(selected_page_id "$TMP_DIR/pages-after-open.txt"); then
-    blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/pages-after-open.err" "$TMP_DIR/pages-after-open.txt")"
+  if ! LANDING_PAGE_ID=$(landing_page_id "$LANDING_IDENTITY"); then
+    if ! mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/newpage-eval.out" 2> "$TMP_DIR/newpage-eval.err" ||
+       ! parse_eval_identity "$TMP_DIR/newpage-eval.out" "$LANDING_IDENTITY" 2> "$TMP_DIR/newpage-parse.err"; then
+      blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/newpage-eval.err" "$TMP_DIR/newpage-parse.err")"
+    fi
+    if is_auth_blocked "$(json_field "$LANDING_IDENTITY" href)" "$(json_field "$LANDING_IDENTITY" title)"; then
+      auth_blocked
+    fi
+    POST_IDS=$(list_page_ids after-open)
+    if ! LANDING_PAGE_ID=$(landing_page_id "$LANDING_IDENTITY"); then
+      blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/pages-after-open.err" "$TMP_DIR/pages-after-open.txt")"
+    fi
   fi
   AUTHORITATIVE_IDENTITY="$TMP_DIR/newpage-authoritative-identity.json"
   if ! probe_page "$LANDING_PAGE_ID" "$AUTHORITATIVE_IDENTITY"; then
