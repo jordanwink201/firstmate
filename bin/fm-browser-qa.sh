@@ -810,55 +810,109 @@ safe_page_id() {
   printf '%s' "$1" | LC_ALL=C tr -c '[:alnum:]_.-' '_'
 }
 
-page_inventory() {
-  axi run <<'NODE'
-import { realpathSync } from 'node:fs';
+mcp_call() {
+  FM_QA_MCP_TOOL=$1 FM_QA_MCP_ARGS=$2 FM_QA_MCP_PORT_FILE="$TMP_DIR/mcp-port.json" axi run <<'NODE'
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const cli = pathToFileURL(realpathSync(process.argv[1]));
-const { callTool } = await import(new URL('../src/client.js', cli));
-const raw = await callTool('list_pages');
-const pages = [];
-const ids = new Set();
-let inPages = false;
-for (const line of raw.split('\n')) {
-  if (line.startsWith('## ')) {
-    inPages = line === '## Pages' || line === '## Extension Pages';
-    continue;
-  }
-  if (!inPages || !line.trim()) continue;
-  const titled = line.match(/^(\d+): .* \(([A-Za-z][A-Za-z0-9+.-]*:.*?)\)( \[selected\])?(?: isolatedContext=.*)?$/);
-  const page = titled || line.match(/^(\d+): ([A-Za-z][A-Za-z0-9+.-]*:.*?)( \[selected\])?(?: isolatedContext=.*)?$/);
-  if (!page || ids.has(page[1])) throw new Error('could not parse an unambiguous MCP page inventory');
-  new URL(page[2]);
-  ids.add(page[1]);
-  pages.push({ id: page[1], url: page[2], selected: Boolean(page[3]) });
+const portFile = process.env.FM_QA_MCP_PORT_FILE;
+if (!existsSync(portFile)) {
+  const { ensureBridge } = await import(new URL('../src/client.js', cli));
+  writeFileSync(portFile, JSON.stringify(await ensureBridge()));
 }
-console.log(`pages[${pages.length}]{id,url,selected}:`);
-for (const page of pages) console.log(`  ${page.id},${page.url},${page.selected}`);
+const port = JSON.parse(readFileSync(portFile, 'utf8'));
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid AXI bridge port');
+const name = process.env.FM_QA_MCP_TOOL;
+const args = JSON.parse(process.env.FM_QA_MCP_ARGS);
+const response = await fetch(`http://127.0.0.1:${port}/call`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name, args }),
+  signal: AbortSignal.timeout(120000),
+});
+const result = await response.json();
+if (!response.ok || result.error || typeof result.result !== 'string') {
+  throw new Error(result.error || 'AXI bridge did not return an MCP result');
+}
+const raw = result.result;
+if (/^Note: the browser was restarted or reconnected since the last call\./m.test(raw) ||
+    /^Note: the previously selected page (?:was closed|is no longer listed)\./m.test(raw)) {
+  throw new Error('MCP browser context changed during page probe');
+}
+if (name === 'evaluate_script') {
+  const match = raw.match(/Script ran on page and returned:\n```json\n([\s\S]*?)\n```/);
+  if (!match) throw new Error(`could not evaluate browser page identity: ${raw}`);
+  console.log(`result: ${JSON.stringify(JSON.parse(match[1]))}`);
+} else {
+  const pages = [];
+  const ids = new Set();
+  let inPages = false;
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('## ')) {
+      inPages = line === '## Pages' || line === '## Extension Pages';
+      continue;
+    }
+    if (!inPages || !line.trim()) continue;
+    const page = line.match(/^(\d+): (.*)$/);
+    if (!page || ids.has(page[1])) throw new Error('could not parse an unambiguous MCP page inventory');
+    ids.add(page[1]);
+    pages.push({ id: page[1], label: page[2] });
+  }
+  if (name === 'select_page' && !ids.has(String(args.pageId))) {
+    throw new Error(`could not select browser page ${args.pageId}: ${raw}`);
+  }
+  if (name === 'new_page' && !pages.length) throw new Error(`could not open browser page: ${raw}`);
+  console.log(JSON.stringify(pages));
+}
+NODE
+}
+
+page_inventory() {
+  mcp_call list_pages '{}'
+}
+
+inventory_lookup() {
+  node - "$@" <<'NODE'
+const fs = require('fs');
+const [file, mode, value, wanted] = process.argv.slice(2);
+const pages = JSON.parse(fs.readFileSync(file, 'utf8'));
+const suffix = /^(?: \[selected\])?(?: isolatedContext=.*)?$/;
+let matches;
+if (mode === 'ids') {
+  matches = pages;
+} else if (mode === 'identity') {
+  const { href, title } = JSON.parse(fs.readFileSync(value, 'utf8'));
+  const shortTitle = title.length > 50 ? title.slice(0, 47) + '...' : title;
+  const label = shortTitle ? `${shortTitle} (${href})` : href;
+  matches = pages.filter(page => (!wanted || page.id === wanted) &&
+    page.label.startsWith(label) && suffix.test(page.label.slice(label.length)));
+} else if (mode === 'url') {
+  matches = pages.filter(page => {
+    if (page.id !== wanted) return false;
+    if (page.label.startsWith(value) && suffix.test(page.label.slice(value.length))) return true;
+    const end = page.label.lastIndexOf(` (${value})`);
+    return end >= 0 && suffix.test(page.label.slice(end + value.length + 3));
+  });
+} else {
+  throw new Error('unknown inventory lookup');
+}
+for (const page of matches) console.log(page.id);
 NODE
 }
 
 probe_page() {
-  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file selected_id attempts_left=2
+  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file attempts_left=2
   safe_id=$(safe_page_id "$page_id")
   err_file="$TMP_DIR/probe-$safe_id.err"
   evaluated_json="$TMP_DIR/probe-evaluated-$safe_id.json"
   pages_file="$TMP_DIR/probe-pages-$safe_id.out"
-  axi selectpage "$page_id" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
+  mcp_call select_page "{\"pageId\":$page_id}" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
   while [ "$attempts_left" -gt 0 ]; do
     attempts_left=$((attempts_left - 1))
-    axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
+    mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
     parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" 2> "$err_file" || return 1
     page_inventory > "$pages_file" 2> "$err_file" || return 1
-    if ! selected_id=$(selected_page_id "$pages_file"); then
-      echo "could not identify a unique selected browser page after evaluation" > "$err_file"
-      return 1
-    fi
-    if [ "$selected_id" != "$page_id" ]; then
-      echo "browser page mapping changed during probe: expected selected page $page_id got $selected_id" > "$err_file"
-      return 1
-    fi
-    if [ "$(page_inventory_url "$pages_file" "$selected_id")" = "$(json_field "$evaluated_json" href)" ]; then
+    if [ "$(inventory_lookup "$pages_file" identity "$evaluated_json" "$page_id")" = "$page_id" ]; then
       cp "$evaluated_json" "$out_json" 2> "$err_file" || return 1
       return 0
     fi
@@ -879,22 +933,14 @@ list_page_ids() {
   if ! page_inventory > "$TMP_DIR/pages-$label.txt" 2> "$TMP_DIR/pages-$label.err"; then
     blocked "could not enumerate browser pages: $(stream_detail "$TMP_DIR/pages-$label.err" "$TMP_DIR/pages-$label.txt")"
   fi
-  awk '/^[[:space:]]*[A-Za-z0-9_.-]+,/ { gsub(/^[[:space:]]*/, "", $0); sub(/,.*/, "", $0); print }' "$TMP_DIR/pages-$label.txt"
+  inventory_lookup "$TMP_DIR/pages-$label.txt" ids
 }
 
-selected_page_id() {
-  awk '
-    /^[[:space:]]*[A-Za-z0-9_.-]+,/ && /,true[[:space:]]*$/ {
-      gsub(/^[[:space:]]*/, "", $0)
-      sub(/,.*/, "", $0)
-      selected = $0
-      count++
-    }
-    END {
-      if (count != 1) exit 1
-      print selected
-    }
-  ' "$1"
+landing_page_id() {
+  local matches
+  matches=$(inventory_lookup "$TMP_DIR/pages-after-open.txt" identity "$1")
+  [ -n "$matches" ] && [ "$(printf '%s\n' "$matches" | wc -l | tr -d '[:space:]')" = 1 ] || return 1
+  printf '%s\n' "$matches"
 }
 
 scan_pages() {
@@ -916,23 +962,6 @@ scan_pages() {
       printf '%s\t%s\n' "$page_id" "$identity_json" >> "$scan_dir/matches.tsv"
     fi
   done
-}
-
-page_inventory_url() {
-  local pages_file=$1 wanted=$2
-  awk -v wanted="$wanted" '
-    /^[[:space:]]*[A-Za-z0-9_.-]+,/ {
-      line = $0
-      gsub(/^[[:space:]]*/, "", line)
-      id = line
-      sub(/,.*/, "", id)
-      if (id != wanted) next
-      sub(/^[^,]*,/, "", line)
-      sub(/,(true|false)[[:space:]]*$/, "", line)
-      print line
-      exit
-    }
-  ' "$pages_file"
 }
 
 verify_attached_session_binding() {
@@ -1028,18 +1057,13 @@ NODE
 }
 
 scan_attached_pages() {
-  local scan_dir=$1 ids=$2 pages_file=$3 page_id identity_json href inventory_href inventory_norm
+  local scan_dir=$1 ids=$2 pages_file=$3 page_id identity_json href
   mkdir -p "$scan_dir"
   : > "$scan_dir/matches.tsv"
   for page_id in $ids; do
     identity_json="$scan_dir/page-$(safe_page_id "$page_id").json"
     if ! probe_page "$page_id" "$identity_json"; then
-      inventory_href=$(page_inventory_url "$pages_file" "$page_id")
-      inventory_norm=
-      if [ -n "$inventory_href" ]; then
-        inventory_norm=$(normalize_url "$inventory_href")
-      fi
-      if [ "$inventory_norm" = "$NORM_TARGET_URL" ]; then
+      if [ "$(inventory_lookup "$pages_file" url "$NORM_TARGET_URL" "$page_id")" = "$page_id" ]; then
         blocked "could not prove attached browser page $page_id identity: $(probe_error "$page_id")"
       fi
       echo "warning: skipped browser page $page_id: could not probe it" >&2
@@ -1117,11 +1141,13 @@ NODE
 
 open_target_page() {
   local landing_identity=$1
-  if ! axi newpage "$TARGET_URL" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
+  local args
+  args=$(node -e 'console.log(JSON.stringify({url: process.argv[1]}))' "$TARGET_URL")
+  if ! mcp_call new_page "$args" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
     blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
-  if ! axi eval '({href: location.href, title: document.title})' > "$TMP_DIR/newpage-eval.out" 2> "$TMP_DIR/newpage-eval.err"; then
+  if ! mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/newpage-eval.out" 2> "$TMP_DIR/newpage-eval.err"; then
     blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/newpage-eval.err" "$TMP_DIR/newpage-eval.out")"
   fi
   if ! parse_eval_identity "$TMP_DIR/newpage-eval.out" "$landing_identity" 2> "$TMP_DIR/newpage-parse.err"; then
@@ -1159,8 +1185,18 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
     auth_blocked
   fi
   POST_IDS=$(list_page_ids after-open)
-  if ! LANDING_PAGE_ID=$(selected_page_id "$TMP_DIR/pages-after-open.txt"); then
-    blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/pages-after-open.err" "$TMP_DIR/pages-after-open.txt")"
+  if ! LANDING_PAGE_ID=$(landing_page_id "$LANDING_IDENTITY"); then
+    if ! mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/newpage-eval.out" 2> "$TMP_DIR/newpage-eval.err" ||
+       ! parse_eval_identity "$TMP_DIR/newpage-eval.out" "$LANDING_IDENTITY" 2> "$TMP_DIR/newpage-parse.err"; then
+      blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/newpage-eval.err" "$TMP_DIR/newpage-parse.err")"
+    fi
+    if is_auth_blocked "$(json_field "$LANDING_IDENTITY" href)" "$(json_field "$LANDING_IDENTITY" title)"; then
+      auth_blocked
+    fi
+    POST_IDS=$(list_page_ids after-open)
+    if ! LANDING_PAGE_ID=$(landing_page_id "$LANDING_IDENTITY"); then
+      blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/pages-after-open.err" "$TMP_DIR/pages-after-open.txt")"
+    fi
   fi
   AUTHORITATIVE_IDENTITY="$TMP_DIR/newpage-authoritative-identity.json"
   if ! probe_page "$LANDING_PAGE_ID" "$AUTHORITATIVE_IDENTITY"; then

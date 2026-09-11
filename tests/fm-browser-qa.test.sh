@@ -124,7 +124,7 @@ fs.mkdirSync(path.join(root, 'dist/src'), { recursive: true });
 fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ type: 'module' }));
 const source = JSON.stringify(pathToFileURL(fixture).href);
 fs.writeFileSync(path.join(root, 'dist/bin/chrome-devtools-axi.js'), `import { run } from ${source}; await run();\n`);
-fs.writeFileSync(path.join(root, 'dist/src/client.js'), `export { callTool } from ${source};\n`);
+fs.writeFileSync(path.join(root, 'dist/src/client.js'), `export { callTool, ensureBridge } from ${source};\n`);
 NODE
 
   cat > "$fakebin/chrome-devtools-axi" <<'SH'
@@ -134,7 +134,10 @@ set -eu
 dir=${FM_FAKE_BROWSER_DIR:?}
 cmd=${1:-}
 inventory_mode=$cmd
-[ "$cmd" != run ] || cmd=pages
+if [ "$cmd" = run ]; then
+  exec node "$dir/../axi-runtime/dist/bin/chrome-devtools-axi.js" run
+fi
+[ "$cmd" != raw-pages ] || cmd=pages
 shift || true
 mkdir -p "$dir"
 printf '%s\t%s\t%s\t%s\n' "$cmd" "${CHROME_DEVTOOLS_AXI_SESSION:-}" "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" "${CHROME_DEVTOOLS_AXI_MCP_PATH:-}" >> "$dir/axi.log"
@@ -180,6 +183,7 @@ if [ -f "$dir/reconnect_mcp_before" ]; then
       printf 'https://teachers.example.test/dashboard\tDashboard\n' > "$dir/page_7"
       printf '1\n' > "$dir/selected"
       : > "$dir/mcp_reconnected"
+      : > "$dir/mcp_reconnect_notice"
     fi
   fi
 fi
@@ -1515,8 +1519,10 @@ test_opaque_url_tabs_preserve_target_selection() {
     write_identity_json "$identity" 5 "$url" 'Classes'
     write_page "$dir/browser" 2 'data:text/plain,Hello world' ''
     write_page "$dir/browser" 3 'data:text/plain,Hello world (example)' 'Plain text'
+    write_page "$dir/browser" 4 'data:text/plain,Hello world [selected]' ''
+    write_page "$dir/browser" 5 'data:text/plain,Hello world [selected] isolatedContext=space' ''
     write_page "$dir/browser" 7 "$url" 'Classes'
-    printf '2\n' > "$dir/browser/selected"
+    printf '7\n' > "$dir/browser/selected"
 
     if [ "$mode" = attach ]; then
       out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" \
@@ -1538,7 +1544,7 @@ const identity = JSON.parse(fs.readFileSync(file, 'utf8'));
 if (identity.page_id !== '7' || identity.active_url !== url || identity.title !== 'Classes') process.exit(1);
 NODE
   done
-  pass "fm-browser-qa.sh: opaque URL tabs retain selection markers and allow healthy target QA and attachment"
+  pass "fm-browser-qa.sh: literal selection metadata in opaque URLs allows healthy target QA and attachment"
 }
 
 test_real_mcp_to_axi_inventory_conversion() {
@@ -1566,6 +1572,7 @@ NODE
     write_identity_json "$identity" 5 "https://teachers.example.test/classes" 'Classes'
     write_page "$dir/browser" 2 'data:text/plain,Hello world' ''
     write_page "$dir/browser" 3 'data:text/plain,Hello world (example)' 'Plain text'
+    write_page "$dir/browser" 4 'data:text/plain,Hello world [selected]' ''
     write_page "$dir/browser" 7 "https://teachers.example.test/classes" 'Classes'
     printf '7\n' > "$dir/browser/selected"
     out=$(env PATH="$fakebin:/usr/bin:/bin" FM_FAKE_BROWSER_DIR="$dir/browser" \
@@ -1574,12 +1581,12 @@ NODE
     assert_contains "$out" '2,data:text/plain,Hello,false' "real AXI conversion should reproduce truncation of an opaque URL containing spaces"
 
     if [ "$mode" = attach ]; then
-      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
+      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_BRIDGE="${axi_cli%/*}/bridge.js" run_qa "$fakebin" "$dir/browser" \
         --select-identity "$identity" --axi-session real-inventory --out "$dir/evidence") \
         || fail "attachment must accept titled pages emitted by real MCP despite AXI's lossy pages conversion"
       assert_present "$dir/evidence/attached-identity.json" "real MCP attachment should publish evidence"
     else
-      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" run_qa "$fakebin" "$dir/browser" \
+      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_BRIDGE="${axi_cli%/*}/bridge.js" run_qa "$fakebin" "$dir/browser" \
         --url "https://teachers.example.test/classes" --out "$dir/evidence") \
         || fail "existing-tab QA must accept titled pages emitted by real MCP"
       assert_present "$dir/evidence/identity.json" "real MCP QA should publish evidence"
@@ -1743,11 +1750,15 @@ test_attached_identity_preserves_final_selection_without_restart() {
   write_identity_json "$identity" 5 "https://teachers.example.test/classes" "Classes"
   write_page "$dir/browser" 7 "https://teachers.example.test/classes" "Classes"
   printf 'start 2\n' > "$dir/browser/replace_bridge_at"
+  : > "$dir/browser/reconnect_during_probe_health"
 
   out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-final --out "$dir/evidence")
 
   assert_contains "$out" "ok: selected attached browser QA page 7" "stable attachment should succeed"
   assert_absent "$dir/browser/bridge_replaced" "final binding verification must not restart the bridge"
+  assert_absent "$dir/browser/health_reconnected" "probe commands must not reconnect MCP through an intermediate health check"
+  [ "$(wc -l < "$dir/browser/bridge-health.log" | tr -d '[:space:]')" = 1 ] \
+    || fail "bridge readiness should be established only before discovery"
   [ "$(cat "$dir/browser/selected")" = 7 ] || fail "caller must retain the verified selected page"
   node - "$dir/evidence/attached-identity.json" "$dir/browser/selected" <<'NODE' || fail "published page ID must describe the caller's selected page"
 const fs = require('fs');
@@ -1780,7 +1791,7 @@ test_page_probes_reject_mcp_reconnection_with_unchanged_bridge() {
 
       assert_present "$dir/browser/mcp_reconnected" "test must reconnect MCP before $boundary in $mode mode"
       expect_code 1 "$status" "MCP reconnection during the final probe must invalidate the discovered page ID"
-      assert_contains "$out" "browser page mapping changed during probe: expected selected page 7 got 1" \
+      assert_contains "$out" "MCP browser context changed during page probe" \
         "MCP reconnection must be detected despite matching evaluated URL and title"
       assert_present "$dir/evidence/FAILED.md" "MCP reconnection should leave failure evidence"
       assert_absent "$dir/evidence/attached-identity.json" "MCP reconnection must not publish a stale attachment ID"
@@ -2057,12 +2068,18 @@ test_signal_cleans_up_axi_session() {
     "TMPDIR=$tmp_root" \
     bash "$ROOT/bin/fm-browser-qa.sh" --url "https://example.test/qa" --out "$dir/evidence" > "$dir/output.txt" 2>&1 &
   pid=$!
-  tries=20
+  tries=200
   while [ ! -e "$dir/browser/newpage_started" ] && [ "$tries" -gt 0 ]; do
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.05
     tries=$((tries - 1))
   done
-  [ -e "$dir/browser/newpage_started" ] || fail "signal cleanup test did not reach target-page settling"
+  if [ ! -e "$dir/browser/newpage_started" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    cat "$dir/output.txt" >&2
+    fail "signal cleanup test did not reach target-page settling"
+  fi
   kill -TERM "$pid"
   set +e
   wait "$pid"
@@ -2149,6 +2166,17 @@ NODE
   assert_tmp_root_empty "$tmp_root" "concurrent runs should remove their temporary files"
   pass "fm-browser-qa.sh: concurrent logical sessions use distinct AXI bridges"
 }
+
+if [ "$#" -gt 0 ]; then
+  for test_case in "$@"; do
+    case "$test_case" in
+      test_*) declare -F "$test_case" >/dev/null || fail "unknown browser-QA test: $test_case" ;;
+      *) fail "expected a browser-QA test function name" ;;
+    esac
+    "$test_case"
+  done
+  exit 0
+fi
 
 test_requires_url_and_out
 test_missing_chrome_devtools_axi_blocks
