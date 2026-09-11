@@ -323,6 +323,7 @@ It keeps that original bridge binding through discovery and selection, rejecting
 Each page probe also checks the current inventory after evaluation to confirm that the discovered page ID remains selected at the evaluated URL, including when MCP reconnects within the same bridge.
 The helper keeps page selection and JSON identity evaluation on the established AXI bridge, rejecting MCP reconnects or selection fallback before comparing the evaluated identity with the discovered page ID.
 Selection metadata is checked only after matching the complete evaluated URL/title label, preserving literal `[selected]` text within either field.
+The shared identity check also binds complete titles to Chrome's stable target IDs, so changes beyond MCP's shortened title remain visible and another tab's title cannot validate the selected page.
 Before publishing attachment evidence, the helper rechecks competing URL matches against the final inventory and refuses unresolved candidate changes or ambiguity.
 It refuses zero matches, indistinguishable duplicate URL/title matches, browser endpoint mismatches, and page drift before returning success.
 The selector leaves the named AXI session selected for immediate follow-up commands; use that same `CHROME_DEVTOOLS_AXI_SESSION` and the identity's `browser_url`, then stop that caller-owned session when QA is complete.

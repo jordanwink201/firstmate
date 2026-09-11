@@ -54,6 +54,16 @@ export async function callTool(name) {
 }
 
 export async function run() {
+  if (process.argv[2] === 'browser-targets') {
+    const dir = process.env.FM_FAKE_BROWSER_DIR;
+    const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    const targets = fs.readdirSync(dir).filter(file => /^page_\d+$/.test(file)).map(file => {
+      const [url, ...title] = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\n$/, '').split('\t');
+      return { id: `browser-${file}`, type: 'page', url, title: title.join('\t').replace(/[&<>"']/g, char => entities[char]) };
+    });
+    console.log(JSON.stringify(targets));
+    return;
+  }
   if (process.argv[2] === 'raw-pages') {
     console.log(await callTool('list_pages'));
     return;
@@ -81,7 +91,7 @@ export async function run() {
     try {
       const output = execFileSync(path.resolve(dir, '../fakebin/chrome-devtools-axi'), command, { encoding: 'utf8' });
       if (name === 'evaluate_script') {
-        const value = JSON.parse(JSON.parse(output.match(/^result: (.+)$/m)[1]));
+        const value = JSON.parse(JSON.parse(output.match(/^result: ([^\n]+)\n/)[1]));
         raw = `Script ran on page and returned:\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
       } else {
         raw = name === 'list_pages' ? output : await callTool('list_pages');

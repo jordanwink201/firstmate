@@ -733,18 +733,18 @@ NODE
 }
 
 parse_eval_identity() {
-  node - "$1" "$2" <<'NODE'
+  node - "$1" "$2" "${3:-}" <<'NODE'
 const fs = require('fs');
-const [input, output] = process.argv.slice(2);
+const [input, output, bindingFile] = process.argv.slice(2);
 const text = fs.readFileSync(input, 'utf8');
-const match = text.match(/^result:\s*(.+)$/m);
-if (!match) {
+const result = text.split('\n').find(line => line.startsWith('result:'))?.slice(7).trim();
+if (!result) {
   console.error('missing result line');
   process.exit(1);
 }
 let value;
 try {
-  value = JSON.parse(match[1].trim());
+  value = JSON.parse(result);
 } catch (error) {
   console.error(`invalid eval result JSON: ${error.message}`);
   process.exit(1);
@@ -762,7 +762,8 @@ if (!value || typeof value !== 'object' || typeof value.href !== 'string') {
 }
 fs.writeFileSync(output, JSON.stringify({
   href: value.href,
-  title: typeof value.title === 'string' ? value.title : ''
+  title: typeof value.title === 'string' ? value.title : '',
+  ...(bindingFile && fs.existsSync(bindingFile) ? { browser_target_ids: JSON.parse(fs.readFileSync(bindingFile, 'utf8')) } : {}),
 }, null, 2) + '\n');
 NODE
 }
@@ -853,10 +854,10 @@ if (name === 'evaluate_script') {
       continue;
     }
     if (!inPages || !line.trim()) continue;
-    const page = line.match(/^(\d+): (.*)$/);
+    const page = line.match(/^(\d+): /);
     if (!page || ids.has(page[1])) throw new Error('could not parse an unambiguous MCP page inventory');
     ids.add(page[1]);
-    pages.push({ id: page[1], label: page[2] });
+    pages.push({ id: page[1], label: line.slice(page[0].length) });
   }
   if (name === 'select_page' && !ids.has(String(args.pageId))) {
     throw new Error(`could not select browser page ${args.pageId}: ${raw}`);
@@ -868,24 +869,52 @@ NODE
 }
 
 page_inventory() {
-  mcp_call list_pages '{}'
+  mcp_call list_pages '{}' > "$TMP_DIR/mcp-inventory.json" || return 1
+  curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
+  node - "$TMP_DIR/mcp-inventory.json" "$TMP_DIR/browser-inventory.json" <<'NODE'
+const fs = require('fs');
+const [pagesFile, targetsFile] = process.argv.slice(2);
+const pages = JSON.parse(fs.readFileSync(pagesFile, 'utf8'));
+const targets = JSON.parse(fs.readFileSync(targetsFile, 'utf8'));
+if (!Array.isArray(targets)) throw new Error('browser did not return a full-title inventory');
+const entities = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+const ids = new Set();
+const identities = targets.filter(target => target.type === 'page').map(target => {
+  if (typeof target.id !== 'string' || !target.id || ids.has(target.id) ||
+      typeof target.url !== 'string' || typeof target.title !== 'string') {
+    throw new Error('browser returned an invalid full-title inventory');
+  }
+  ids.add(target.id);
+  return { id: target.id, href: target.url, title: target.title.replace(/&(?:amp|lt|gt|quot|#39);/g, entity => entities[entity]) };
+});
+console.log(JSON.stringify({ pages, identities }));
+NODE
 }
 
 inventory_lookup() {
   node - "$@" <<'NODE'
 const fs = require('fs');
 const [file, mode, value, wanted] = process.argv.slice(2);
-const pages = JSON.parse(fs.readFileSync(file, 'utf8'));
+const { pages, identities } = JSON.parse(fs.readFileSync(file, 'utf8'));
 const suffix = /^(?: \[selected\])?(?: isolatedContext=.*)?$/;
 let matches;
 if (mode === 'ids') {
   matches = pages;
-} else if (mode === 'identity' || mode === 'selected-identity') {
-  const { href, title } = JSON.parse(fs.readFileSync(value, 'utf8'));
+} else if (mode === 'identity' || mode === 'selected-identity' || mode === 'identity-count') {
+  const { href, title, browser_target_ids: boundIds } = JSON.parse(fs.readFileSync(value, 'utf8'));
+  const current = identities.filter(identity => identity.href === href && identity.title === title);
+  if (mode === 'identity-count') {
+    console.log(current.length);
+    process.exit(0);
+  }
   const shortTitle = title.length > 50 ? title.slice(0, 47) + '...' : title;
   const label = shortTitle ? `${shortTitle} (${href})` : href;
   const metadata = mode === 'selected-identity' ? /^ \[selected\](?: isolatedContext=.*)?$/ : suffix;
-  matches = pages.filter(page => (!wanted || page.id === wanted) &&
+  const hasIdentity = boundIds
+    ? (mode === 'identity' ? boundIds.every(id => current.some(identity => identity.id === id))
+      : current.some(identity => boundIds.includes(identity.id)))
+    : current.length > 0;
+  matches = pages.filter(page => hasIdentity && (!wanted || page.id === wanted) &&
     page.label.startsWith(label) && metadata.test(page.label.slice(label.length)));
 } else if (mode === 'url') {
   matches = pages.filter(page => {
@@ -902,18 +931,31 @@ NODE
 }
 
 probe_page() {
-  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file attempts_left=2
+  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file binding_file attempts_left=2
   safe_id=$(safe_page_id "$page_id")
   err_file="$TMP_DIR/probe-$safe_id.err"
   evaluated_json="$TMP_DIR/probe-evaluated-$safe_id.json"
   pages_file="$TMP_DIR/probe-pages-$safe_id.out"
+  binding_file="$TMP_DIR/probe-targets-$safe_id.json"
   mcp_call select_page "{\"pageId\":$page_id}" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
   while [ "$attempts_left" -gt 0 ]; do
     attempts_left=$((attempts_left - 1))
     mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
-    parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" 2> "$err_file" || return 1
+    parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" "$binding_file" 2> "$err_file" || return 1
     page_inventory > "$pages_file" 2> "$err_file" || return 1
     if [ "$(inventory_lookup "$pages_file" selected-identity "$evaluated_json" "$page_id")" = "$page_id" ]; then
+      node - "$evaluated_json" "$pages_file" "$binding_file" <<'NODE' 2> "$err_file" || return 1
+const fs = require('fs');
+const [identityFile, pagesFile, bindingFile] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+const { identities } = JSON.parse(fs.readFileSync(pagesFile, 'utf8'));
+const boundIds = identity.browser_target_ids;
+identity.browser_target_ids = identities.filter(current => current.href === identity.href && current.title === identity.title &&
+  (!boundIds || boundIds.includes(current.id))).map(current => current.id);
+if (!identity.browser_target_ids.length) throw new Error('browser target identity changed during page probe');
+fs.writeFileSync(bindingFile, JSON.stringify(identity.browser_target_ids));
+fs.writeFileSync(identityFile, JSON.stringify(identity) + '\n');
+NODE
       cp "$evaluated_json" "$out_json" 2> "$err_file" || return 1
       return 0
     fi
@@ -1157,7 +1199,12 @@ NODE
         blocked "multiple tabs match attached browser QA identity URL and title; cannot choose a unique page: $NORM_TARGET_URL"
       fi
     done
-    [ -n "$pending_ids" ] || break
+    if [ -z "$pending_ids" ]; then
+      if [ "$(inventory_lookup "$pages_file" identity-count "$final_identity")" -ne 1 ]; then
+        blocked "multiple tabs match attached browser QA identity URL and title; cannot choose a unique page: $NORM_TARGET_URL"
+      fi
+      break
+    fi
     [ "$attempts_left" -gt 0 ] || blocked "attached browser page candidates kept changing; cannot prove a unique page: $NORM_TARGET_URL"
     attempts_left=$((attempts_left - 1))
     STAGE=attach-page-scan

@@ -50,6 +50,14 @@ if [ -e "$FM_FAKE_BROWSER_DIR/curl.log" ]; then
   printf '%s\n' "$url" >> "$FM_FAKE_BROWSER_DIR/curl.log"
 fi
 case "$url" in
+  */json/list)
+    [ ! -e "$FM_FAKE_BROWSER_DIR/full_inventory_down" ] || exit 7
+    if [ -e "$FM_FAKE_BROWSER_DIR/full_inventory_invalid" ]; then
+      printf '{"unexpected":true}\n'
+      exit 0
+    fi
+    exec node "$FM_FAKE_BROWSER_DIR/../axi-runtime/dist/bin/chrome-devtools-axi.js" browser-targets
+    ;;
   */json/version)
     [ ! -e "$FM_FAKE_BROWSER_DIR/browser_down" ] || exit 7
     ;;
@@ -260,12 +268,13 @@ NODE
       fi
     fi
     if [ -f "$dir/mutate_page_after_eval_$id" ]; then
-      IFS='	' read -r mutate_count mutate_id mutate_href mutate_title < "$dir/mutate_page_after_eval_$id"
-      if [ "$mutate_count" = repeat ] || [ "$count" = "$mutate_count" ]; then
-        [ "$mutate_count" != repeat ] || mutate_title="$mutate_title $count"
-        printf '%s\t%s\n' "$mutate_href" "$mutate_title" > "$(page_file "$mutate_id")"
-        printf '%s\t%s\t%s\n' "$id" "$count" "$mutate_id" >> "$dir/candidate_changes.log"
-      fi
+      while IFS='	' read -r mutate_count mutate_id mutate_href mutate_title; do
+        if [ "$mutate_count" = repeat ] || [ "$count" = "$mutate_count" ]; then
+          [ "$mutate_count" != repeat ] || mutate_title="$mutate_title $count"
+          printf '%s\t%s\n' "$mutate_href" "$mutate_title" > "$(page_file "$mutate_id")"
+          printf '%s\t%s\t%s\n' "$id" "$count" "$mutate_id" >> "$dir/candidate_changes.log"
+        fi
+      done < "$dir/mutate_page_after_eval_$id"
     fi
     ;;
   newpage)
@@ -979,7 +988,7 @@ test_http_error_target_blocks_before_opening_browser_tab() {
 }
 
 test_curl_timeout_override_preserves_finite_values() {
-  local dir fakebin expected
+  local dir fakebin expected url
   dir="$TMP_ROOT/bounded-curl-timeout"
   fakebin=$(make_fake_browser_tools "$dir")
   write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
@@ -987,19 +996,25 @@ test_curl_timeout_override_preserves_finite_values() {
 
   for expected in 10 2.92 999; do
     : > "$dir/browser/curl_timeout.log"
+    : > "$dir/browser/curl.log"
     FM_BROWSER_QA_CURL_TIMEOUT=$expected \
       run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-$expected" >/dev/null
-    awk -v expected="$expected" '$0 != expected { exit 1 } END { if (NR != 2) exit 1 }' \
+    awk -v expected="$expected" '$0 != expected { exit 1 } END { if (NR == 0) exit 1 }' \
       "$dir/browser/curl_timeout.log" \
       || fail "finite curl timeout $expected should be preserved for target and browser checks"
+    for url in 'https://example.test/qa' 'http://127.0.0.1:9222/json/version' 'http://127.0.0.1:9222/json/list'; do
+      assert_grep "$url" "$dir/browser/curl.log" "timeout coverage must exercise $url"
+    done
   done
 
   for expected in 0 0.0009 invalid 1e16 1e9999; do
     : > "$dir/browser/curl_timeout.log"
+    : > "$dir/browser/curl.log"
     FM_BROWSER_QA_CURL_TIMEOUT=$expected \
       run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence-invalid-$expected" >/dev/null
-    awk '$0 != "2" { exit 1 } END { if (NR != 2) exit 1 }' "$dir/browser/curl_timeout.log" \
+    awk '$0 != "2" { exit 1 } END { if (NR == 0) exit 1 }' "$dir/browser/curl_timeout.log" \
       || fail "invalid or unbounded curl timeout $expected should use the bounded default"
+    assert_grep 'http://127.0.0.1:9222/json/list' "$dir/browser/curl.log" "default timeout coverage must exercise the full-title inventory"
   done
 
   pass "fm-browser-qa.sh: curl timeout override preserves finite values"
@@ -1539,9 +1554,152 @@ test_attached_identity_uses_title_to_select_unique_duplicate_url() {
   pass "fm-browser-qa.sh: attached identity uses literal titles to select a unique duplicate URL"
 }
 
+test_attached_identity_rejects_long_title_convergence() {
+  local dir fakebin identity out status
+  local target_url='https://teachers.example.test/classes'
+  local title_prefix='A classroom page title that exceeds the inventory title limit: '
+  dir="$TMP_ROOT/attach-long-title-convergence"
+  fakebin=$(make_fake_browser_tools "$dir")
+  identity="$dir/wrapper/identity.json"
+  write_identity_json "$identity" 5 "$target_url" "${title_prefix}Classes"
+  write_page "$dir/browser" 1 "$target_url" "${title_prefix}Loading"
+  write_page "$dir/browser" 7 "$target_url" "${title_prefix}Classes"
+  printf '3\t1\t%s\t%s\n' "$target_url" "${title_prefix}Classes" > "$dir/browser/mutate_page_after_eval_7"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session long-title-convergence --out "$dir/evidence")
+  status=$?
+  set -e
+
+  assert_present "$dir/browser/candidate_changes.log" "the title must converge after its reconciliation probe"
+  [ "$(cat "$dir/browser/eval_count_1")" -ge 2 ] || fail "the competing long title must have been re-probed before convergence"
+  expect_code 1 "$status" "long-title convergence after reconciliation must prevent attachment"
+  assert_contains "$out" 'multiple tabs match attached browser QA identity URL and title; cannot choose a unique page' \
+    "indistinguishable full titles must block even when their abbreviated labels never change"
+  assert_present "$dir/evidence/FAILED.md" "long-title convergence must leave failure evidence"
+  assert_absent "$dir/evidence/attached-identity.json" "long-title convergence must not publish successful identity"
+  assert_absent "$dir/evidence/attached-report.md" "long-title convergence must not publish a success report"
+  pass "fm-browser-qa.sh: attachment rejects long-title convergence after reconciliation"
+}
+
+test_full_titles_remain_bound_to_browser_targets() {
+  local dir fakebin identity out status mode trigger_count
+  local target_url='https://teachers.example.test/classes'
+  local title_prefix='A classroom page title that exceeds the inventory title limit: '
+  for mode in attach qa; do
+    dir="$TMP_ROOT/full-title-target-binding-$mode"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    write_identity_json "$identity" 5 "$target_url" "${title_prefix}Classes"
+    write_page "$dir/browser" 7 "$target_url" "${title_prefix}Classes"
+    if [ "$mode" = attach ]; then
+      trigger_count=3
+      write_page "$dir/browser" 1 "$target_url" "${title_prefix}Loading"
+    else
+      trigger_count=2
+      write_page "$dir/browser" 1 'https://teachers.example.test/dashboard' 'Dashboard'
+    fi
+    printf '%s\t1\t%s\t%s\n%s\t7\t%s\t%s\n' \
+      "$trigger_count" "$target_url" "${title_prefix}Classes" \
+      "$trigger_count" "$target_url" "${title_prefix}Loading" > "$dir/browser/mutate_page_after_eval_7"
+
+    set +e
+    if [ "$mode" = attach ]; then
+      out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session full-title-target --out "$dir/evidence")
+    else
+      out=$(run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+    fi
+    status=$?
+    set -e
+    assert_present "$dir/browser/candidate_changes.log" "the fixture must exchange the pages' full identities"
+    [ "$(cat "$dir/browser/eval_count_7")" -gt "$trigger_count" ] || fail "the selected page must be re-evaluated after its full title changes"
+    if [ "$mode" = attach ]; then
+      expect_code 1 "$status" "another tab's matching full title must not validate attachment"
+      assert_contains "$out" 'attached browser page title mismatch after selection' "the selected browser target must retain its own title evidence"
+      assert_absent "$dir/evidence/attached-identity.json" "a title match on another target must not publish attached identity"
+    else
+      expect_code 0 "$status" "QA should publish the current title once the selected target is re-evaluated"
+      node - "$dir/evidence/identity.json" "${title_prefix}Loading" <<'NODE' || fail "QA evidence must contain the selected target's current full title"
+const fs = require('fs');
+const [file, title] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (identity.page_id !== '7' || identity.title !== title) process.exit(1);
+NODE
+    fi
+  done
+  pass "fm-browser-qa.sh: full-title evidence remains bound to the selected browser target"
+}
+
+test_unicode_title_separators_preserve_target_selection() {
+  local dir fakebin identity out status mode separator title evidence index=0
+  local target_url='https://teachers.example.test/classes'
+  for separator in $'\342\200\250' $'\342\200\251'; do
+    for mode in qa attach; do
+      index=$((index + 1))
+      dir="$TMP_ROOT/inventory-unicode-$index"
+      fakebin=$(make_fake_browser_tools "$dir")
+      identity="$dir/wrapper/identity.json"
+      title="Classes${separator}Ready"
+      write_identity_json "$identity" 5 "$target_url" "$title"
+      write_page "$dir/browser" 1 'https://teachers.example.test/notes' "Notes${separator}Draft"
+      write_page "$dir/browser" 4 'data:text/plain,Hello world [selected]' ''
+      write_page "$dir/browser" 7 "$target_url" "$title"
+      set +e
+      if [ "$mode" = attach ]; then
+        out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session unicode-inventory --out "$dir/evidence")
+        status=$?
+        evidence="$dir/evidence/attached-identity.json"
+      else
+        out=$(run_qa "$fakebin" "$dir/browser" --url "$target_url" --out "$dir/evidence")
+        status=$?
+        evidence="$dir/evidence/identity.json"
+      fi
+      set -e
+      expect_code 0 "$status" "Unicode title separators must preserve successful target selection: $mode"
+      assert_not_contains "$out" 'skipped browser page' "Unicode title separators must remain probeable"
+      [ "$(cat "$dir/browser/selected")" = 7 ] || fail "Unicode inventory must leave the intended page selected"
+      node - "$evidence" "$title" <<'NODE' || fail "Unicode titles must remain intact in public identity evidence"
+const fs = require('fs');
+const [file, title] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (identity.page_id !== '7' || identity.title !== title) process.exit(1);
+NODE
+    done
+  done
+  pass "fm-browser-qa.sh: Unicode title separators preserve mixed-inventory QA and attachment"
+}
+
+test_full_title_inventory_is_required() {
+  local dir fakebin identity out status mode failure
+  for mode in qa attach; do
+    for failure in down invalid; do
+      dir="$TMP_ROOT/full-title-inventory-$mode-$failure"
+      fakebin=$(make_fake_browser_tools "$dir")
+      identity="$dir/wrapper/identity.json"
+      write_identity_json "$identity" 5 'https://teachers.example.test/classes' 'Classes'
+      write_page "$dir/browser" 7 'https://teachers.example.test/classes' 'Classes'
+      : > "$dir/browser/full_inventory_$failure"
+      set +e
+      if [ "$mode" = attach ]; then
+        out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session full-title-inventory --out "$dir/evidence")
+      else
+        out=$(run_qa "$fakebin" "$dir/browser" --url 'https://teachers.example.test/classes' --out "$dir/evidence")
+      fi
+      status=$?
+      set -e
+      expect_code 1 "$status" "missing full-title evidence must block: $mode $failure"
+      assert_contains "$out" 'could not enumerate browser pages' "full-title inventory failures must be reported"
+      assert_present "$dir/evidence/FAILED.md" "missing full-title evidence must leave a failure marker"
+      assert_absent "$dir/evidence/identity.json" "missing full-title evidence must not publish QA identity"
+      assert_absent "$dir/evidence/attached-identity.json" "missing full-title evidence must not publish attached identity"
+    done
+  done
+  pass "fm-browser-qa.sh: incomplete full-title inventories block successful identity publication"
+}
+
 test_page_inventory_preserves_titled_urls_and_selection() {
   local dir fakebin identity title index=0 url='https://teachers.example.test/qa(a,b)?filter=(x,y)'
-  for title in '' 'Classes' 'Classes [selected] (Review), café' 'A long classroom page title with more than fifty characters in its full title'; do
+  for title in '' 'Classes' 'Classes [selected] (Review), café' 'A long classroom page title with more than fifty characters in its full title' $'Classes <&> " \' &amp;'; do
     index=$((index + 1))
     dir="$TMP_ROOT/inventory-titles-$index"
     fakebin=$(make_fake_browser_tools "$dir")
@@ -1622,6 +1780,7 @@ NODE
     write_page "$dir/browser" 2 'data:text/plain,Hello world' ''
     write_page "$dir/browser" 3 'data:text/plain,Hello world (example)' 'Plain text'
     write_page "$dir/browser" 4 'data:text/plain,Hello world [selected]' ''
+    write_page "$dir/browser" 6 'https://teachers.example.test/notes' $'Notes\342\200\250Draft\342\200\251Review'
     write_page "$dir/browser" 7 "https://teachers.example.test/classes" 'Classes'
     printf '7\n' > "$dir/browser/selected"
     out=$(env PATH="$fakebin:/usr/bin:/bin" FM_FAKE_BROWSER_DIR="$dir/browser" \
@@ -2391,6 +2550,10 @@ test_sign_in_substring_title_is_not_auth
 test_trailing_slash_url_is_normalized
 test_attached_identity_rediscovers_page_when_fresh_session_ids_differ
 test_attached_identity_uses_title_to_select_unique_duplicate_url
+test_attached_identity_rejects_long_title_convergence
+test_full_titles_remain_bound_to_browser_targets
+test_unicode_title_separators_preserve_target_selection
+test_full_title_inventory_is_required
 test_page_inventory_preserves_titled_urls_and_selection
 test_opaque_url_tabs_preserve_target_selection
 test_real_mcp_to_axi_inventory_conversion
