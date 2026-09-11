@@ -880,15 +880,16 @@ const suffix = /^(?: \[selected\])?(?: isolatedContext=.*)?$/;
 let matches;
 if (mode === 'ids') {
   matches = pages;
-} else if (mode === 'selected-identity') {
+} else if (mode === 'identity' || mode === 'selected-identity') {
   const { href, title } = JSON.parse(fs.readFileSync(value, 'utf8'));
   const shortTitle = title.length > 50 ? title.slice(0, 47) + '...' : title;
   const label = shortTitle ? `${shortTitle} (${href})` : href;
+  const metadata = mode === 'selected-identity' ? /^ \[selected\](?: isolatedContext=.*)?$/ : suffix;
   matches = pages.filter(page => (!wanted || page.id === wanted) &&
-    page.label.startsWith(label) && /^ \[selected\](?: isolatedContext=.*)?$/.test(page.label.slice(label.length)));
+    page.label.startsWith(label) && metadata.test(page.label.slice(label.length)));
 } else if (mode === 'url') {
   matches = pages.filter(page => {
-    if (page.id !== wanted) return false;
+    if (wanted && page.id !== wanted) return false;
     if (page.label.startsWith(value) && suffix.test(page.label.slice(value.length))) return true;
     const end = page.label.lastIndexOf(` (${value})`);
     return end >= 0 && suffix.test(page.label.slice(end + value.length + 3));
@@ -1080,6 +1081,7 @@ scan_attached_pages() {
 select_attached_identity_page() {
   local ids scan_dir matches url_count title_matches title_count match_line page_id
   local final_identity final_href final_title
+  local candidate_dir candidate_id candidate_identity candidate_href pending_ids pages_file attempts_left=3
   STAGE=attach-page-scan
   scan_dir="$TMP_DIR/attach-scan"
   ids=$(list_page_ids attach)
@@ -1110,26 +1112,62 @@ NODE
     matches=$title_matches
   fi
 
-  STAGE=attach-identity
   match_line=$(sed -n '1p' "$matches")
   page_id=$(printf '%s\n' "$match_line" | cut -f1)
   final_identity="$TMP_DIR/attached-final-identity.json"
-  if ! probe_page "$page_id" "$final_identity"; then
-    blocked "could not prove attached browser page $page_id identity after selection: $(probe_error "$page_id")"
-  fi
-  final_href=$(json_field "$final_identity" href)
-  final_title=$(json_field "$final_identity" title)
-  if [ "$final_href" != "$NORM_TARGET_URL" ]; then
-    blocked "attached browser page drifted after selection: expected $NORM_TARGET_URL got $final_href"
-  fi
-  if ! node - "$IDENTITY_INPUT" "$final_identity" <<'NODE'
+  candidate_dir="$TMP_DIR/attach-reconciled"
+  mkdir -p "$candidate_dir"
+  pages_file="$TMP_DIR/probe-pages-$(safe_page_id "$page_id").out"
+  while :; do
+    STAGE=attach-identity
+    if ! probe_page "$page_id" "$final_identity"; then
+      blocked "could not prove attached browser page $page_id identity after selection: $(probe_error "$page_id")"
+    fi
+    final_href=$(json_field "$final_identity" href)
+    final_title=$(json_field "$final_identity" title)
+    if [ "$final_href" != "$NORM_TARGET_URL" ]; then
+      blocked "attached browser page drifted after selection: expected $NORM_TARGET_URL got $final_href"
+    fi
+    if ! node - "$IDENTITY_INPUT" "$final_identity" <<'NODE'
 const fs = require('fs');
 const [sourceFile, identityFile] = process.argv.slice(2);
 process.exit(JSON.parse(fs.readFileSync(sourceFile, 'utf8')).title === JSON.parse(fs.readFileSync(identityFile, 'utf8')).title ? 0 : 1);
 NODE
-  then
-    blocked "attached browser page title mismatch after selection: expected $ATTACH_EXPECTED_TITLE got $final_title"
-  fi
+    then
+      blocked "attached browser page title mismatch after selection: expected $ATTACH_EXPECTED_TITLE got $final_title"
+    fi
+
+    pending_ids=
+    ids=$(inventory_lookup "$pages_file" url "$NORM_TARGET_URL")
+    for candidate_id in $ids; do
+      [ "$candidate_id" != "$page_id" ] || continue
+      candidate_identity="$candidate_dir/page-$(safe_page_id "$candidate_id").json"
+      if [ ! -f "$candidate_identity" ] ||
+         [ "$(inventory_lookup "$pages_file" identity "$candidate_identity" "$candidate_id")" != "$candidate_id" ]; then
+        pending_ids="$pending_ids $candidate_id"
+        continue
+      fi
+      candidate_href=$(json_field "$candidate_identity" href)
+      if [ "$candidate_href" = "$NORM_TARGET_URL" ] && node - "$IDENTITY_INPUT" "$candidate_identity" <<'NODE'
+const fs = require('fs');
+const [sourceFile, identityFile] = process.argv.slice(2);
+process.exit(JSON.parse(fs.readFileSync(sourceFile, 'utf8')).title === JSON.parse(fs.readFileSync(identityFile, 'utf8')).title ? 0 : 1);
+NODE
+      then
+        blocked "multiple tabs match attached browser QA identity URL and title; cannot choose a unique page: $NORM_TARGET_URL"
+      fi
+    done
+    [ -n "$pending_ids" ] || break
+    [ "$attempts_left" -gt 0 ] || blocked "attached browser page candidates kept changing; cannot prove a unique page: $NORM_TARGET_URL"
+    attempts_left=$((attempts_left - 1))
+    STAGE=attach-page-scan
+    for candidate_id in $pending_ids; do
+      candidate_identity="$candidate_dir/page-$(safe_page_id "$candidate_id").json"
+      if ! probe_page "$candidate_id" "$candidate_identity"; then
+        blocked "could not prove attached browser page $candidate_id identity during candidate reconciliation: $(probe_error "$candidate_id")"
+      fi
+    done
+  done
   verify_attached_session_binding
   STAGE=attach-evidence
   write_attached_identity "$final_identity" "$page_id" || blocked "could not publish attached browser QA evidence"

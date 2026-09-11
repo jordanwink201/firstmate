@@ -259,6 +259,14 @@ NODE
         : > "$dir/selection_switched"
       fi
     fi
+    if [ -f "$dir/mutate_page_after_eval_$id" ]; then
+      IFS='	' read -r mutate_count mutate_id mutate_href mutate_title < "$dir/mutate_page_after_eval_$id"
+      if [ "$mutate_count" = repeat ] || [ "$count" = "$mutate_count" ]; then
+        [ "$mutate_count" != repeat ] || mutate_title="$mutate_title $count"
+        printf '%s\t%s\n' "$mutate_href" "$mutate_title" > "$(page_file "$mutate_id")"
+        printf '%s\t%s\t%s\n' "$id" "$count" "$mutate_id" >> "$dir/candidate_changes.log"
+      fi
+    fi
     ;;
   newpage)
     url=${1:?}
@@ -1996,6 +2004,93 @@ test_attached_identity_post_selection_drift_refused() {
   pass "fm-browser-qa.sh: attached identity refuses post-selection page drift"
 }
 
+test_attached_identity_reconciles_current_candidates() {
+  local dir fakebin identity out status scenario changed_id trigger_id trigger_count changed_title expected_title
+  local target_url='https://teachers.example.test/classes'
+  for scenario in title-during-scan title-during-final navigation new-tab new-during-reprobe changed-during-reprobe distinct-title unprobeable changing; do
+    dir="$TMP_ROOT/attach-reconcile-$scenario"
+    fakebin=$(make_fake_browser_tools "$dir")
+    identity="$dir/wrapper/identity.json"
+    expected_title='Classes'
+    changed_title=$expected_title
+    changed_id=1
+    trigger_id=7
+    trigger_count=2
+    write_page "$dir/browser" 1 "$target_url" 'Loading'
+    write_page "$dir/browser" 4 'data:text/plain,Hello world [selected]' ''
+    case "$scenario" in
+      title-during-scan) trigger_count=1 ;;
+      navigation) write_page "$dir/browser" 1 'https://teachers.example.test/dashboard' 'Dashboard' ;;
+      new-tab|unprobeable) changed_id=9 ;;
+      new-during-reprobe)
+        changed_id=9
+        trigger_id=1
+        ;;
+      changed-during-reprobe)
+        write_page "$dir/browser" 3 "$target_url" 'Other page'
+        trigger_id=3
+        ;;
+      distinct-title)
+        expected_title='A classroom page title that exceeds the inventory title limit: Classes'
+        changed_title='A classroom page title that exceeds the inventory title limit: Loading'
+        ;;
+      changing)
+        trigger_count=repeat
+        changed_title='Loading'
+        ;;
+    esac
+    write_identity_json "$identity" 5 "$target_url" "$expected_title"
+    write_page "$dir/browser" 7 "$target_url" "$expected_title"
+    printf '%s\t%s\t%s\t%s\n' "$trigger_count" "$changed_id" "$target_url" "$changed_title" \
+      > "$dir/browser/mutate_page_after_eval_$trigger_id"
+    [ "$scenario" != unprobeable ] || : > "$dir/browser/unprobeable_9"
+
+    set +e
+    out=$(run_qa "$fakebin" "$dir/browser" --select-identity "$identity" --axi-session followup-reconcile --out "$dir/evidence")
+    status=$?
+    set -e
+
+    assert_present "$dir/browser/candidate_changes.log" "the fixture must change a candidate during attachment: $scenario"
+    if [ "$scenario" = distinct-title ]; then
+      expect_code 0 "$status" "distinct full titles must remain selectable after candidate reconciliation"
+      [ "$(cat "$dir/browser/selected")" = 7 ] || fail "reconciliation must restore the uniquely matching page"
+      [ "$(cat "$dir/browser/eval_count_1")" -ge 2 ] || fail "a changed nonmatching title must be re-probed"
+      node - "$dir/evidence/attached-identity.json" "$expected_title" <<'NODE' || fail "reconciliation must publish the verified full title and selected ID"
+const fs = require('fs');
+const [file, title] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (identity.page_id !== '7' || identity.title !== title) process.exit(1);
+NODE
+      assert_absent "$dir/evidence/FAILED.md" "a unique reconciled candidate should succeed"
+      continue
+    fi
+
+    expect_code 1 "$status" "unresolved current candidates must prevent attachment: $scenario"
+    case "$scenario" in
+      unprobeable)
+        assert_contains "$out" 'could not prove attached browser page 9 identity during candidate reconciliation' \
+          "a new candidate whose identity cannot be evaluated must block"
+        ;;
+      changing)
+        assert_contains "$out" 'attached browser page candidates kept changing; cannot prove a unique page' \
+          "continuing candidate changes must stop reconciliation"
+        ;;
+      *)
+        assert_contains "$out" 'multiple tabs match attached browser QA identity URL and title; cannot choose a unique page' \
+          "current indistinguishable candidates must be refused: $scenario"
+        assert_present "$dir/browser/eval_count_$changed_id" "the changed or newly possible candidate must be evaluated"
+        if [ "$changed_id" = 1 ]; then
+          [ "$(cat "$dir/browser/eval_count_1")" -ge 2 ] || fail "cached candidate identity must be refreshed"
+        fi
+        ;;
+    esac
+    assert_present "$dir/evidence/FAILED.md" "unresolved candidates must leave failure evidence"
+    assert_absent "$dir/evidence/attached-identity.json" "unresolved candidates must not publish successful identity"
+    assert_absent "$dir/evidence/attached-report.md" "unresolved candidates must not publish a success report"
+  done
+  pass "fm-browser-qa.sh: attachment reconciles changed and newly possible candidates before publication"
+}
+
 test_successful_evidence_cleans_up_axi_session() {
   local dir fakebin evidence tmp_root
   dir="$TMP_ROOT/cleanup-success"
@@ -2311,6 +2406,7 @@ test_attached_identity_successful_retry_clears_failure_marker
 test_attached_identity_zero_exact_matches_refused
 test_attached_identity_indistinguishable_matches_refused
 test_attached_identity_post_selection_drift_refused
+test_attached_identity_reconciles_current_candidates
 test_successful_evidence_cleans_up_axi_session
 test_cleanup_error_preserves_original_status
 test_snapshot_failure_blocks
