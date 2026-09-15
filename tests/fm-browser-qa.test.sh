@@ -6,7 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-browser-qa)
-REAL_NODE=$(command -v node || true)
+REAL_NODE=$(node -p 'process.execPath' 2>/dev/null || true)
 REAL_CURL=$(command -v curl || true)
 REAL_AXI_BIN=$(command -v chrome-devtools-axi || true)
 REAL_MCP_RESPONSE=${FM_TEST_REAL_MCP_RESPONSE:-${HOME:-}/.local/share/fm-browser-qa/chrome-devtools-mcp-1.7.0/node_modules/chrome-devtools-mcp/build/src/McpResponse.js}
@@ -62,6 +62,9 @@ case "$url" in
     [ ! -e "$FM_FAKE_BROWSER_DIR/browser_down" ] || exit 7
     ;;
   *)
+    if [ -e "$FM_FAKE_BROWSER_DIR/real_target_curl" ]; then
+      exec "$FM_REAL_CURL" --noproxy '*' "$@"
+    fi
     [ ! -e "$FM_FAKE_BROWSER_DIR/target_down" ] || exit 7
     if [ -e "$FM_FAKE_BROWSER_DIR/target_http_error" ] && [ "$fail_http" -eq 1 ]; then
       exit 22
@@ -1006,6 +1009,77 @@ test_http_error_target_blocks_before_opening_browser_tab() {
   assert_absent "$dir/browser/newpage_started" "HTTP error target should not open a browser tab"
   assert_absent "$dir/browser/axi.log" "HTTP error target should not start an AXI bridge"
   pass "fm-browser-qa.sh: HTTP error target blocks before opening a browser tab"
+}
+
+test_target_preflight_preserves_literal_query_strings() {
+  local dir fakebin
+  dir="$TMP_ROOT/literal-target-query"
+  fakebin=$(make_fake_browser_tools "$dir")
+  mkdir -p "$dir/browser"
+  : > "$dir/browser/real_target_curl"
+
+  node - "$ROOT/bin/fm-browser-qa.sh" "$fakebin" "$dir" <<'NODE' || fail "target reachability must preserve literal query strings"
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const http = require('node:http');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const { once } = require('node:events');
+const [wrapper, fakebin, dir] = process.argv.slice(2);
+const browserDir = path.join(dir, 'browser');
+const requests = [];
+const server = http.createServer((request, response) => {
+  requests.push(request.url);
+  response.end('ok');
+});
+(async () => {
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const queries = ['filter[status]=active', 'page=[1-2]', 'status={active,inactive}'];
+    for (const [index, query] of queries.entries()) {
+      const requestPath = `/qa?${query}`;
+      const target = `http://127.0.0.1:${server.address().port}${requestPath}`;
+      const evidence = path.join(dir, `evidence-${index}`);
+      requests.length = 0;
+      fs.writeFileSync(path.join(browserDir, 'page_7'), `${target}\tQA Page\n`);
+      const result = await new Promise((resolve, reject) => {
+        const child = spawn('bash', [wrapper, '--url', target, '--out', evidence], {
+          env: {
+            ...process.env,
+            PATH: `${fakebin}:/usr/bin:/bin`,
+            HOME: path.join(dir, 'home'),
+            FM_FAKE_BROWSER_DIR: browserDir,
+            FM_BROWSER_QA_LEDGER: path.join(dir, 'runs.jsonl'),
+            FM_BROWSER_QA_OPEN_SETTLE: '0',
+            CHROME_DEVTOOLS_AXI_MCP_PATH: '/operator/chrome-devtools-mcp.js',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let output = '';
+        child.stdout.on('data', chunk => { output += chunk; });
+        child.stderr.on('data', chunk => { output += chunk; });
+        child.once('error', reject);
+        child.once('close', code => resolve({ code, output }));
+      });
+      assert.equal(result.code, 0, `wrapper rejected ${query}: ${result.output}`);
+      assert.deepEqual(requests, [requestPath], 'preflight must make one request for the literal target');
+      const identity = JSON.parse(fs.readFileSync(path.join(evidence, 'identity.json'), 'utf8'));
+      assert.equal(identity.requested_url, target);
+      assert.equal(identity.active_url, target);
+      assert.equal(identity.page_id, '7');
+      assert.equal(fs.readFileSync(path.join(browserDir, 'selected'), 'utf8').trim(), '7');
+      assert.equal(fs.existsSync(path.join(evidence, 'FAILED.md')), false);
+    }
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+NODE
+  pass "fm-browser-qa.sh: real curl preserves literal bracket and brace query strings"
 }
 
 test_curl_timeout_override_preserves_finite_values() {
@@ -2693,6 +2767,7 @@ test_explicit_mcp_path_bypasses_compatibility_cache
 test_explicit_mcp_path_works_without_home
 test_unreachable_target_blocks_before_opening_browser_tab
 test_http_error_target_blocks_before_opening_browser_tab
+test_target_preflight_preserves_literal_query_strings
 test_curl_timeout_override_preserves_finite_values
 test_browser_unreachable_without_start_blocks
 test_start_if_needed_uses_persistent_visible_profile

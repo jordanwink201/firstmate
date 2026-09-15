@@ -391,7 +391,7 @@ if [ "$MODE" = select ]; then
 fi
 
 target_reachable() {
-  curl --fail -sS --max-time "$CURL_TIMEOUT" --output /dev/null "$TARGET_URL" >/dev/null 2>&1
+  curl --globoff --fail -sS --max-time "$CURL_TIMEOUT" --output /dev/null "$TARGET_URL" >/dev/null 2>&1
 }
 
 if [ "$MODE" = qa ]; then
