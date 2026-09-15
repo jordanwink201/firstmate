@@ -8,6 +8,9 @@
 # An explicit CHROME_DEVTOOLS_AXI_MCP_PATH bypasses the cache without modifying
 # the global chrome-devtools-axi installation.
 # Installing or repairing the compatibility cache requires npm and perl.
+# FM_BROWSER_QA_CURL_TIMEOUT bounds target reachability, browser reachability,
+# and full-title inventory requests in seconds (default: 2).
+# Finite curl-supported numeric values >= 0.001 are honored; other values use 2.
 # Diagnostics: blocked runs leave FAILED.md after the evidence directory exists,
 # and every exit best-effort appends JSONL to FM_BROWSER_QA_LEDGER or the default
 # $HOME/.local/share/fm-browser-qa/runs.jsonl when either path is available.
@@ -869,6 +872,9 @@ if (name === 'evaluate_script') {
     pages.push({ id: page[1], label: line.slice(page[0].length) });
   }
   if (pagesFile) {
+    // AXI's formatted rows can replace a titled URL with its first title token.
+    // Use their IDs only; raw MCP labels retain the URL and selection marker.
+    // See test_real_mcp_to_axi_inventory_conversion in tests/fm-browser-qa.test.sh.
     const lines = readFileSync(pagesFile, 'utf8').trim().split('\n');
     const empty = lines[0] === 'pages: 0 pages open';
     const header = lines[0].match(/^pages\[(\d+)\]\{id,url,selected\}:$/);

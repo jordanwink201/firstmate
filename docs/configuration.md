@@ -311,10 +311,12 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 Browser QA also needs an authenticated Chrome remote-debugging endpoint, defaulting to `http://127.0.0.1:9222`.
 Use `bin/fm-browser-qa.sh --url <exact-url> --out <evidence-dir>` for preview QA.
 Pass the exact intended QA URL: the helper matches only the browser-normalized form of that URL (for example `https://host` matches the `https://host/` Chrome reports) with no fuzzy matching, host aliases, or query rewriting.
-Before preparing the MCP transport or touching the browser, the helper makes a bounded curl request to the exact target URL.
+For URL-based QA, the helper makes a bounded curl request to the exact target URL before preparing the MCP transport or touching the browser.
 Network failures, timeouts, and HTTP errors block as a likely torn-down feature host, while HTTP redirects proceed so Cloudflare Access can receive the authentication classification.
-`FM_BROWSER_QA_CURL_TIMEOUT` controls both target and browser reachability requests; it defaults to 2 seconds, honors positive finite values accepted by curl, and resets invalid or unbounded values to 2.
+The [script header](../bin/fm-browser-qa.sh) owns the shared curl timeout override and its accepted values.
 The helper attaches to that browser by default, opens the exact URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
+If the AXI page-inventory call fails with no stdout or stderr, the helper automatically attempts recovery through AXI while preserving the same page-identity checks.
+Failures that emit output do not use this recovery path; [the browser QA helper tests](../tests/fm-browser-qa.test.sh) cover both silent recovery and the healthy normal path.
 `identity.json.page_id` is scoped only to the helper's AXI bridge session and must not be reused in a separate AXI session.
 Before follow-up `chrome-devtools-axi` work in a separate AXI session, run `bin/fm-browser-qa.sh --select-identity <evidence-dir>/identity.json --axi-session <session> --out <evidence-dir>/attach`.
 The attached-session selector uses the identity's browser endpoint and browser-normalized URL, reprobes current tabs for the verified URL and title, selects the current session-local page ID, and verifies URL and title again after selection.
