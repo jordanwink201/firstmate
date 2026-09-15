@@ -142,10 +142,21 @@ set -eu
 dir=${FM_FAKE_BROWSER_DIR:?}
 cmd=${1:-}
 inventory_mode=$cmd
+raw_pages=0
 if [ "$cmd" = run ]; then
+  if [ -e "$dir/run_no_output_once" ]; then
+    rm -f "$dir/run_no_output_once"
+    exit 1
+  fi
+  if [ -e "$dir/run_no_output" ]; then
+    exit 1
+  fi
   exec node "$dir/../axi-runtime/dist/bin/chrome-devtools-axi.js" run
 fi
-[ "$cmd" != raw-pages ] || cmd=pages
+if [ "$cmd" = raw-pages ]; then
+  raw_pages=1
+  cmd=pages
+fi
 shift || true
 mkdir -p "$dir"
 printf '%s\t%s\t%s\t%s\n' "$cmd" "${CHROME_DEVTOOLS_AXI_SESSION:-}" "${CHROME_DEVTOOLS_AXI_BROWSER_URL:-}" "${CHROME_DEVTOOLS_AXI_MCP_PATH:-}" >> "$dir/axi.log"
@@ -211,6 +222,21 @@ case "$cmd" in
     printf 'status: ready\nport: 9666\n'
     ;;
   pages)
+    if [ "$raw_pages" -eq 0 ] && [ -z "${FM_TEST_AXI_CLI:-}" ]; then
+      : > "$dir/pages_cli_started"
+      printf 'pages[%s]{id,url,selected}:\n' "$(find "$dir" -maxdepth 1 -type f -name 'page_*' | wc -l | tr -d '[:space:]')"
+      for file in "$dir"/page_*; do
+        [ -e "$file" ] || continue
+        id=${file##*/page_}
+        href=$(page_href "$id")
+        selected=false
+        if [ -f "$dir/selected" ] && [ "$(cat "$dir/selected")" = "$id" ]; then
+          selected=true
+        fi
+        printf '  %s,%s,%s\n' "$id" "$href" "$selected"
+      done
+      exit 0
+    fi
     node "$dir/../axi-runtime/dist/bin/chrome-devtools-axi.js" "$inventory_mode"
     ;;
   selectpage)
@@ -1126,6 +1152,67 @@ test_exact_tab_selected_and_evidence_written() {
   assert_present "$evidence/report.md" "report evidence missing"
   assert_grep "Exact URL: https://example.test/qa" "$evidence/report.md" "report missing exact URL"
   pass "fm-browser-qa.sh: exact tab is selected and evidence is written"
+}
+
+test_silent_mcp_inventory_failure_falls_back_to_axi_pages() {
+  local dir fakebin evidence
+  dir="$TMP_ROOT/silent-mcp-inventory"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  printf '%s\n' 1 > "$dir/browser/selected"
+  : > "$dir/browser/run_no_output_once"
+  evidence="$dir/evidence"
+
+  run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" >/dev/null
+
+  assert_present "$dir/browser/pages_cli_started" \
+    "silent MCP inventory failure should fall back to AXI pages"
+  assert_present "$evidence/identity.json" \
+    "silent MCP inventory fallback should still publish identity evidence"
+  assert_absent "$evidence/FAILED.md" \
+    "silent MCP inventory fallback should not leave a failed-run marker"
+  pass "fm-browser-qa.sh: silent MCP inventory failure falls back to AXI pages"
+}
+
+test_normal_inventory_path_keeps_mcp_primary() {
+  local dir fakebin evidence
+  dir="$TMP_ROOT/normal-mcp-inventory"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
+  printf '%s\n' 1 > "$dir/browser/selected"
+  evidence="$dir/evidence"
+
+  run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" >/dev/null
+
+  assert_absent "$dir/browser/pages_cli_started" \
+    "healthy MCP inventory should not call the AXI pages fallback"
+  assert_present "$evidence/identity.json" \
+    "healthy MCP inventory should publish identity evidence"
+  pass "fm-browser-qa.sh: healthy MCP inventory remains primary"
+}
+
+test_silent_mcp_inventory_fallback_refuses_ambiguous_full_titles() {
+  local dir fakebin out status
+  dir="$TMP_ROOT/silent-mcp-ambiguous-title"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 1 "https://example.test/qa" "QA One"
+  write_page "$dir/browser" 2 "https://example.test/qa" "QA Two"
+  printf '%s\n' 1 > "$dir/browser/selected"
+  : > "$dir/browser/run_no_output_once"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "ambiguous fallback inventory should exit 1"
+  assert_contains "$out" "blocked: could not enumerate browser pages: could not map AXI page inventory to a unique full-title browser target" \
+    "ambiguous fallback inventory should fail closed before identity publication"
+  assert_present "$dir/browser/pages_cli_started" \
+    "ambiguous fallback inventory should exercise the AXI pages fallback"
+  assert_absent "$dir/evidence/identity.json" \
+    "ambiguous fallback inventory must not publish identity evidence"
+  pass "fm-browser-qa.sh: AXI pages fallback refuses ambiguous full-title mapping"
 }
 
 test_no_exact_tab_opens_new_page_then_verifies() {
@@ -2532,6 +2619,9 @@ test_start_if_needed_uses_persistent_visible_profile
 test_start_if_needed_refuses_existing_temporary_profile
 test_start_if_needed_allows_existing_operator_profile
 test_exact_tab_selected_and_evidence_written
+test_silent_mcp_inventory_failure_falls_back_to_axi_pages
+test_normal_inventory_path_keeps_mcp_primary
+test_silent_mcp_inventory_fallback_refuses_ambiguous_full_titles
 test_no_exact_tab_opens_new_page_then_verifies
 test_multiple_exact_tabs_refused
 test_selected_url_mismatch_refused

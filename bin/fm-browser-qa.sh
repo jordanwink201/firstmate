@@ -868,9 +868,77 @@ if (name === 'evaluate_script') {
 NODE
 }
 
+axi_pages_inventory() {
+  node - "$1" "$2" <<'NODE'
+const fs = require('fs');
+const [pagesFile, targetsFile] = process.argv.slice(2);
+try {
+  const pageLines = fs.readFileSync(pagesFile, 'utf8').split('\n');
+  const targets = JSON.parse(fs.readFileSync(targetsFile, 'utf8'));
+  if (!Array.isArray(targets)) throw new Error('browser did not return a full-title inventory');
+
+  const identities = [];
+  const targetIds = new Set();
+  for (const target of targets) {
+    if (target.type !== 'page') continue;
+    if (typeof target.id !== 'string' || !target.id || targetIds.has(target.id) ||
+        typeof target.url !== 'string' || typeof target.title !== 'string') {
+      throw new Error('browser returned an invalid full-title inventory');
+    }
+    targetIds.add(target.id);
+    identities.push({ id: target.id, href: target.url, title: target.title });
+  }
+
+  const pages = [];
+  const pageIds = new Set();
+  for (const line of pageLines) {
+    if (!line.trim() || line.startsWith('pages[')) continue;
+    const match = line.match(/^\s*([^,]+),([\s\S]*),(true|false)\s*$/);
+    if (!match) throw new Error('could not parse an unambiguous AXI page inventory');
+    const id = match[1].trim();
+    const href = match[2];
+    const selected = match[3] === 'true';
+    if (!id || pageIds.has(id)) throw new Error('could not parse an unambiguous AXI page inventory');
+    pageIds.add(id);
+
+    const matchedTargets = identities.filter(identity => identity.href === href);
+    const titles = [...new Set(matchedTargets.map(identity => identity.title))];
+    if (titles.length !== 1) {
+      throw new Error('could not map AXI page inventory to a unique full-title browser target');
+    }
+    const title = titles[0];
+    const shortTitle = title.length > 50 ? title.slice(0, 47) + '...' : title;
+    const label = shortTitle ? `${shortTitle} (${href})` : href;
+    pages.push({ id, label: `${label}${selected ? ' [selected]' : ''}` });
+  }
+  console.log(JSON.stringify(pages));
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
+NODE
+}
+
 page_inventory() {
-  mcp_call list_pages '{}' > "$TMP_DIR/mcp-inventory.json" || return 1
-  curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
+  local browser_inventory_ready=0
+  if ! mcp_call list_pages '{}' > "$TMP_DIR/mcp-inventory.json" 2> "$TMP_DIR/mcp-inventory.err"; then
+    if [ -s "$TMP_DIR/mcp-inventory.json" ] || [ -s "$TMP_DIR/mcp-inventory.err" ]; then
+      cat "$TMP_DIR/mcp-inventory.err" >&2
+      cat "$TMP_DIR/mcp-inventory.json" >&2
+      return 1
+    fi
+    if ! axi pages > "$TMP_DIR/axi-pages-fallback.txt" 2> "$TMP_DIR/axi-pages-fallback.err"; then
+      cat "$TMP_DIR/axi-pages-fallback.err" >&2
+      cat "$TMP_DIR/axi-pages-fallback.txt" >&2
+      return 1
+    fi
+    curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
+    browser_inventory_ready=1
+    axi_pages_inventory "$TMP_DIR/axi-pages-fallback.txt" "$TMP_DIR/browser-inventory.json" > "$TMP_DIR/mcp-inventory.json" || return 1
+  fi
+  if [ "$browser_inventory_ready" -eq 0 ]; then
+    curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
+  fi
   node - "$TMP_DIR/mcp-inventory.json" "$TMP_DIR/browser-inventory.json" <<'NODE'
 const fs = require('fs');
 const [pagesFile, targetsFile] = process.argv.slice(2);
