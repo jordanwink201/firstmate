@@ -68,10 +68,30 @@ export async function run() {
     return;
   }
   if (process.argv[2] === 'pages') {
-    const { parsePagesList } = await import(pathToFileURL(process.env.FM_TEST_AXI_CLI));
-    const pages = parsePagesList(await callTool('list_pages'));
-    console.log(`pages[${pages.length}]{id,url,selected}:`);
+    const raw = await callTool('list_pages');
+    let pages;
+    if (process.env.FM_TEST_AXI_CLI) {
+      const { parsePagesList } = await import(pathToFileURL(process.env.FM_TEST_AXI_CLI));
+      pages = parsePagesList(raw);
+    } else {
+      pages = [...raw.matchAll(/^(\d+):\s+(\S+)(\s+\[selected\])?/gm)].map(match => ({
+        id: Number(match[1]), url: match[2], selected: Boolean(match[3]),
+      }));
+    }
+    const shapeFile = path.join(process.env.FM_FAKE_BROWSER_DIR, 'pages_shape');
+    const shape = fs.existsSync(shapeFile) ? fs.readFileSync(shapeFile, 'utf8').trim() : '';
+    if (!pages.length) {
+      console.log('pages: 0 pages open');
+      return;
+    }
+    const count = pages.length + (shape === 'missing-row' || shape === 'duplicate-id' ? 1 : 0);
+    console.log(`pages[${count}]{id,url,selected}:`);
+    if (shape === 'extra-row' || shape === 'duplicate-id') pages.push(pages[0]);
+    if (shape === 'wrong-id') pages[0].id += 100;
     for (const page of pages) console.log(`  ${page.id},${page.url},${page.selected}`);
+    console.log('help[2]:');
+    console.log('  Run `chrome-devtools-axi selectpage <id>` to switch tabs');
+    console.log('  Run `chrome-devtools-axi newpage <url>` to open a new tab');
     return;
   }
   globalThis.fetch = async (url, options) => {

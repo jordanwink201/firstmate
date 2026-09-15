@@ -812,30 +812,39 @@ safe_page_id() {
 }
 
 mcp_call() {
-  FM_QA_MCP_TOOL=$1 FM_QA_MCP_ARGS=$2 FM_QA_MCP_PORT_FILE="$TMP_DIR/mcp-port.json" axi run <<'NODE'
+  FM_QA_MCP_TOOL=$1 FM_QA_MCP_ARGS=$2 FM_QA_MCP_PORT_FILE="$TMP_DIR/mcp-port.json" \
+    FM_QA_AXI_PAGES_FILE="${3:-}" axi run <<'NODE'
 import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const cli = pathToFileURL(realpathSync(process.argv[1]));
 const portFile = process.env.FM_QA_MCP_PORT_FILE;
-if (!existsSync(portFile)) {
-  const { ensureBridge } = await import(new URL('../src/client.js', cli));
-  writeFileSync(portFile, JSON.stringify(await ensureBridge()));
-}
-const port = JSON.parse(readFileSync(portFile, 'utf8'));
-if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid AXI bridge port');
+const pagesFile = process.env.FM_QA_AXI_PAGES_FILE;
 const name = process.env.FM_QA_MCP_TOOL;
 const args = JSON.parse(process.env.FM_QA_MCP_ARGS);
-const response = await fetch(`http://127.0.0.1:${port}/call`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ name, args }),
-  signal: AbortSignal.timeout(120000),
-});
-const result = await response.json();
-if (!response.ok || result.error || typeof result.result !== 'string') {
-  throw new Error(result.error || 'AXI bridge did not return an MCP result');
+let raw;
+if (pagesFile) {
+  const { callTool } = await import(new URL('../src/client.js', cli));
+  raw = await callTool(name, args);
+} else {
+  if (!existsSync(portFile)) {
+    const { ensureBridge } = await import(new URL('../src/client.js', cli));
+    writeFileSync(portFile, JSON.stringify(await ensureBridge()));
+  }
+  const port = JSON.parse(readFileSync(portFile, 'utf8'));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid AXI bridge port');
+  const response = await fetch(`http://127.0.0.1:${port}/call`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, args }),
+    signal: AbortSignal.timeout(120000),
+  });
+  const result = await response.json();
+  if (!response.ok || result.error || typeof result.result !== 'string') {
+    throw new Error(result.error || 'AXI bridge did not return an MCP result');
+  }
+  raw = result.result;
 }
-const raw = result.result;
+if (typeof raw !== 'string') throw new Error('AXI bridge did not return an MCP result');
 if (/^Note: the browser was restarted or reconnected since the last call\./m.test(raw) ||
     /^Note: the previously selected page (?:was closed|is no longer listed)\./m.test(raw)) {
   throw new Error('MCP browser context changed during page probe');
@@ -859,6 +868,26 @@ if (name === 'evaluate_script') {
     ids.add(page[1]);
     pages.push({ id: page[1], label: line.slice(page[0].length) });
   }
+  if (pagesFile) {
+    const lines = readFileSync(pagesFile, 'utf8').trim().split('\n');
+    const empty = lines[0] === 'pages: 0 pages open';
+    const header = lines[0].match(/^pages\[(\d+)\]\{id,url,selected\}:$/);
+    if (!empty && !header) throw new Error('could not parse an unambiguous AXI page inventory');
+    const count = empty ? 0 : Number(header[1]);
+    const pageIds = new Set();
+    for (const line of lines.slice(1, count + 1)) {
+      const row = line.match(/^  (\d+),.*,(?:true|false)$/);
+      if (!row || pageIds.has(row[1])) throw new Error('could not parse an unambiguous AXI page inventory');
+      pageIds.add(row[1]);
+    }
+    const tail = lines.slice(count + 1).filter(line => line.trim());
+    if (pageIds.size !== count || (tail.length && !/^help\[\d+\]:$/.test(tail[0]))) {
+      throw new Error('could not parse an unambiguous AXI page inventory');
+    }
+    if (ids.size !== pageIds.size || [...ids].some(id => !pageIds.has(id))) {
+      throw new Error('AXI page inventory changed during recovery');
+    }
+  }
   if (name === 'select_page' && !ids.has(String(args.pageId))) {
     throw new Error(`could not select browser page ${args.pageId}: ${raw}`);
   }
@@ -868,59 +897,7 @@ if (name === 'evaluate_script') {
 NODE
 }
 
-axi_pages_inventory() {
-  node - "$1" "$2" <<'NODE'
-const fs = require('fs');
-const [pagesFile, targetsFile] = process.argv.slice(2);
-try {
-  const pageLines = fs.readFileSync(pagesFile, 'utf8').split('\n');
-  const targets = JSON.parse(fs.readFileSync(targetsFile, 'utf8'));
-  if (!Array.isArray(targets)) throw new Error('browser did not return a full-title inventory');
-
-  const identities = [];
-  const targetIds = new Set();
-  for (const target of targets) {
-    if (target.type !== 'page') continue;
-    if (typeof target.id !== 'string' || !target.id || targetIds.has(target.id) ||
-        typeof target.url !== 'string' || typeof target.title !== 'string') {
-      throw new Error('browser returned an invalid full-title inventory');
-    }
-    targetIds.add(target.id);
-    identities.push({ id: target.id, href: target.url, title: target.title });
-  }
-
-  const pages = [];
-  const pageIds = new Set();
-  for (const line of pageLines) {
-    if (!line.trim() || line.startsWith('pages[')) continue;
-    const match = line.match(/^\s*([^,]+),([\s\S]*),(true|false)\s*$/);
-    if (!match) throw new Error('could not parse an unambiguous AXI page inventory');
-    const id = match[1].trim();
-    const href = match[2];
-    const selected = match[3] === 'true';
-    if (!id || pageIds.has(id)) throw new Error('could not parse an unambiguous AXI page inventory');
-    pageIds.add(id);
-
-    const matchedTargets = identities.filter(identity => identity.href === href);
-    const titles = [...new Set(matchedTargets.map(identity => identity.title))];
-    if (titles.length !== 1) {
-      throw new Error('could not map AXI page inventory to a unique full-title browser target');
-    }
-    const title = titles[0];
-    const shortTitle = title.length > 50 ? title.slice(0, 47) + '...' : title;
-    const label = shortTitle ? `${shortTitle} (${href})` : href;
-    pages.push({ id, label: `${label}${selected ? ' [selected]' : ''}` });
-  }
-  console.log(JSON.stringify(pages));
-} catch (error) {
-  console.error(error.message);
-  process.exit(1);
-}
-NODE
-}
-
 page_inventory() {
-  local browser_inventory_ready=0
   if ! mcp_call list_pages '{}' > "$TMP_DIR/mcp-inventory.json" 2> "$TMP_DIR/mcp-inventory.err"; then
     if [ -s "$TMP_DIR/mcp-inventory.json" ] || [ -s "$TMP_DIR/mcp-inventory.err" ]; then
       cat "$TMP_DIR/mcp-inventory.err" >&2
@@ -932,13 +909,9 @@ page_inventory() {
       cat "$TMP_DIR/axi-pages-fallback.txt" >&2
       return 1
     fi
-    curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
-    browser_inventory_ready=1
-    axi_pages_inventory "$TMP_DIR/axi-pages-fallback.txt" "$TMP_DIR/browser-inventory.json" > "$TMP_DIR/mcp-inventory.json" || return 1
+    mcp_call list_pages '{}' "$TMP_DIR/axi-pages-fallback.txt" > "$TMP_DIR/mcp-inventory.json" || return 1
   fi
-  if [ "$browser_inventory_ready" -eq 0 ]; then
-    curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
-  fi
+  curl --fail -sS --max-time "$CURL_TIMEOUT" "$BROWSER_URL/json/list" > "$TMP_DIR/browser-inventory.json" || return 1
   node - "$TMP_DIR/mcp-inventory.json" "$TMP_DIR/browser-inventory.json" <<'NODE'
 const fs = require('fs');
 const [pagesFile, targetsFile] = process.argv.slice(2);

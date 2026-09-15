@@ -144,6 +144,13 @@ cmd=${1:-}
 inventory_mode=$cmd
 raw_pages=0
 if [ "$cmd" = run ]; then
+  if [ -e "$dir/run_error" ]; then
+    cat "$dir/run_error" >&2
+    exit 1
+  fi
+  if [ -e "$dir/silent_inventory" ] && [ "${FM_QA_MCP_TOOL:-}" = list_pages ] && [ -z "${FM_QA_AXI_PAGES_FILE:-}" ]; then
+    exit 1
+  fi
   if [ -e "$dir/run_no_output_once" ]; then
     rm -f "$dir/run_no_output_once"
     exit 1
@@ -222,20 +229,8 @@ case "$cmd" in
     printf 'status: ready\nport: 9666\n'
     ;;
   pages)
-    if [ "$raw_pages" -eq 0 ] && [ -z "${FM_TEST_AXI_CLI:-}" ]; then
+    if [ "$raw_pages" -eq 0 ]; then
       : > "$dir/pages_cli_started"
-      printf 'pages[%s]{id,url,selected}:\n' "$(find "$dir" -maxdepth 1 -type f -name 'page_*' | wc -l | tr -d '[:space:]')"
-      for file in "$dir"/page_*; do
-        [ -e "$file" ] || continue
-        id=${file##*/page_}
-        href=$(page_href "$id")
-        selected=false
-        if [ -f "$dir/selected" ] && [ "$(cat "$dir/selected")" = "$id" ]; then
-          selected=true
-        fi
-        printf '  %s,%s,%s\n' "$id" "$href" "$selected"
-      done
-      exit 0
     fi
     node "$dir/../axi-runtime/dist/bin/chrome-devtools-axi.js" "$inventory_mode"
     ;;
@@ -1155,23 +1150,71 @@ test_exact_tab_selected_and_evidence_written() {
 }
 
 test_silent_mcp_inventory_failure_falls_back_to_axi_pages() {
-  local dir fakebin evidence
-  dir="$TMP_ROOT/silent-mcp-inventory"
+  local dir fakebin evidence title index=0
+  for title in 'Classes' '' 'A classroom page title that exceeds the inventory title limit: Classes'; do
+    index=$((index + 1))
+    dir="$TMP_ROOT/silent-mcp-inventory-$index"
+    fakebin=$(make_fake_browser_tools "$dir")
+    write_page "$dir/browser" 1 'data:text/plain,Hello world [selected]' ''
+    write_page "$dir/browser" 7 "https://teachers.typing.com/login" "$title"
+    printf '%s\n' 7 > "$dir/browser/selected"
+    : > "$dir/browser/run_no_output_once"
+    evidence="$dir/evidence"
+
+    run_qa "$fakebin" "$dir/browser" --url "https://teachers.typing.com/login" --out "$evidence" >/dev/null \
+      || fail "silent inventory recovery should accept titled and untitled pages"
+
+    assert_present "$dir/browser/pages_cli_started" \
+      "silent MCP inventory failure should fall back to AXI pages"
+    assert_absent "$dir/browser/newpage.log" "silent inventory recovery must reuse the exact page"
+    node - "$evidence/identity.json" "$title" <<'NODE' || fail "silent recovery must preserve the exact page identity"
+const fs = require('fs');
+const identity = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (identity.page_id !== '7' || identity.active_url !== 'https://teachers.typing.com/login' ||
+    identity.title !== process.argv[3]) process.exit(1);
+NODE
+    [ "$(cat "$dir/browser/selected")" = 7 ] || fail "silent recovery must leave the exact page selected"
+    assert_absent "$evidence/FAILED.md" \
+      "silent MCP inventory fallback should not leave a failed-run marker"
+  done
+  pass "fm-browser-qa.sh: silent MCP inventory failure recovers full URLs, titles, and selection"
+}
+
+test_silent_mcp_inventory_fallback_handles_empty_pages() {
+  local dir fakebin
+  dir="$TMP_ROOT/silent-mcp-empty"
   fakebin=$(make_fake_browser_tools "$dir")
-  write_page "$dir/browser" 1 "https://example.test/qa" "QA Page"
-  printf '%s\n' 1 > "$dir/browser/selected"
+  mkdir -p "$dir/browser"
   : > "$dir/browser/run_no_output_once"
-  evidence="$dir/evidence"
 
-  run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$evidence" >/dev/null
+  run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence" >/dev/null \
+    || fail "an empty AXI inventory should allow opening the exact target"
 
-  assert_present "$dir/browser/pages_cli_started" \
-    "silent MCP inventory failure should fall back to AXI pages"
-  assert_present "$evidence/identity.json" \
-    "silent MCP inventory fallback should still publish identity evidence"
-  assert_absent "$evidence/FAILED.md" \
-    "silent MCP inventory fallback should not leave a failed-run marker"
-  pass "fm-browser-qa.sh: silent MCP inventory failure falls back to AXI pages"
+  assert_present "$dir/browser/pages_cli_started" "empty inventory must exercise AXI fallback"
+  assert_grep 'https://example.test/qa' "$dir/browser/newpage.log" "empty inventory should open the target"
+  assert_present "$dir/evidence/identity.json" "empty inventory recovery should publish verified identity"
+  pass "fm-browser-qa.sh: silent inventory recovery accepts AXI's empty-inventory output"
+}
+
+test_silent_mcp_inventory_fallback_rejects_invalid_pages() {
+  local dir fakebin shape out status
+  for shape in missing-row extra-row duplicate-id wrong-id; do
+    dir="$TMP_ROOT/silent-mcp-invalid-$shape"
+    fakebin=$(make_fake_browser_tools "$dir")
+    write_page "$dir/browser" 7 "https://example.test/qa" 'Classes'
+    : > "$dir/browser/run_no_output_once"
+    printf '%s\n' "$shape" > "$dir/browser/pages_shape"
+
+    set +e
+    out=$(run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "invalid AXI inventory must fail closed"
+    assert_contains "$out" 'blocked: could not enumerate browser pages' "invalid recovery should block enumeration"
+    assert_absent "$dir/evidence/identity.json" "invalid recovery must not publish identity evidence"
+  done
+  pass "fm-browser-qa.sh: silent recovery rejects malformed or changed AXI inventories"
 }
 
 test_normal_inventory_path_keeps_mcp_primary() {
@@ -1191,6 +1234,25 @@ test_normal_inventory_path_keeps_mcp_primary() {
   pass "fm-browser-qa.sh: healthy MCP inventory remains primary"
 }
 
+test_inventory_error_does_not_use_silent_fallback() {
+  local dir fakebin out status
+  dir="$TMP_ROOT/mcp-inventory-error"
+  fakebin=$(make_fake_browser_tools "$dir")
+  write_page "$dir/browser" 7 "https://example.test/qa" 'Classes'
+  printf '%s\n' 'browser connection failed' > "$dir/browser/run_error"
+
+  set +e
+  out=$(run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "a reported inventory error must still block"
+  assert_contains "$out" 'browser connection failed' "reported inventory errors must retain their reason"
+  assert_absent "$dir/browser/pages_cli_started" "non-silent errors must not use the fallback"
+  assert_absent "$dir/evidence/identity.json" "failed inventory must not publish identity evidence"
+  pass "fm-browser-qa.sh: non-silent inventory errors retain the existing failure path"
+}
+
 test_silent_mcp_inventory_fallback_refuses_ambiguous_full_titles() {
   local dir fakebin out status
   dir="$TMP_ROOT/silent-mcp-ambiguous-title"
@@ -1206,8 +1268,8 @@ test_silent_mcp_inventory_fallback_refuses_ambiguous_full_titles() {
   set -e
 
   expect_code 1 "$status" "ambiguous fallback inventory should exit 1"
-  assert_contains "$out" "blocked: could not enumerate browser pages: could not map AXI page inventory to a unique full-title browser target" \
-    "ambiguous fallback inventory should fail closed before identity publication"
+  assert_contains "$out" "blocked: multiple tabs match the exact QA URL" \
+    "duplicate exact URLs must remain ambiguous after raw inventory recovery"
   assert_present "$dir/browser/pages_cli_started" \
     "ambiguous fallback inventory should exercise the AXI pages fallback"
   assert_absent "$dir/evidence/identity.json" \
@@ -1842,7 +1904,7 @@ NODE
 }
 
 test_real_mcp_to_axi_inventory_conversion() {
-  local dir fakebin identity axi_cli out mode
+  local dir fakebin identity axi_cli out mode recovery title
   if [ -z "$REAL_AXI_BIN" ] || [ ! -f "$REAL_MCP_RESPONSE" ]; then
     pass "fm-browser-qa.sh: real MCP/AXI inventory conversion (skip: installed dependencies unavailable)"
     return
@@ -1860,35 +1922,53 @@ NODE
     return
   fi
   for mode in qa attach; do
-    dir="$TMP_ROOT/real-inventory-$mode"
-    fakebin=$(make_fake_browser_tools "$dir")
-    identity="$dir/wrapper/identity.json"
-    write_identity_json "$identity" 5 "https://teachers.example.test/classes" 'Classes'
-    write_page "$dir/browser" 2 'data:text/plain,Hello world' ''
-    write_page "$dir/browser" 3 'data:text/plain,Hello world (example)' 'Plain text'
-    write_page "$dir/browser" 4 'data:text/plain,Hello world [selected]' ''
-    write_page "$dir/browser" 6 'https://teachers.example.test/notes' $'Notes\342\200\250Draft\342\200\251Review'
-    write_page "$dir/browser" 7 "https://teachers.example.test/classes" 'Classes'
-    printf '7\n' > "$dir/browser/selected"
-    out=$(env PATH="$fakebin:/usr/bin:/bin" FM_FAKE_BROWSER_DIR="$dir/browser" \
-      FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_CLI="$axi_cli" chrome-devtools-axi pages)
-    assert_contains "$out" '7,Classes,false' "real AXI conversion must reproduce loss of the titled URL and selected marker"
-    assert_contains "$out" '2,data:text/plain,Hello,false' "real AXI conversion should reproduce truncation of an opaque URL containing spaces"
+    for recovery in normal silent; do
+      for title in 'Classes' ''; do
+        dir="$TMP_ROOT/real-inventory-$mode-$recovery-${title:-untitled}"
+        fakebin=$(make_fake_browser_tools "$dir")
+        identity="$dir/wrapper/identity.json"
+        write_identity_json "$identity" 5 "https://teachers.example.test/classes" "$title"
+        write_page "$dir/browser" 2 'data:text/plain,Hello world' ''
+        write_page "$dir/browser" 3 'data:text/plain,Hello world (example)' 'Plain text'
+        write_page "$dir/browser" 4 'data:text/plain,Hello world [selected]' ''
+        write_page "$dir/browser" 6 'https://teachers.example.test/notes' $'Notes\342\200\250Draft\342\200\251Review'
+        write_page "$dir/browser" 7 "https://teachers.example.test/classes" "$title"
+        printf '7\n' > "$dir/browser/selected"
+        out=$(env PATH="$fakebin:/usr/bin:/bin" FM_FAKE_BROWSER_DIR="$dir/browser" \
+          FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_CLI="$axi_cli" chrome-devtools-axi pages)
+        if [ -n "$title" ]; then
+          assert_contains "$out" '7,Classes,false' "real AXI conversion must reproduce loss of the titled URL and selected marker"
+        else
+          assert_contains "$out" '7,https://teachers.example.test/classes,true' "real AXI conversion must retain untitled URLs"
+        fi
+        assert_contains "$out" 'help[2]:' "real AXI inventory fixture must include the help footer"
+        assert_contains "$out" '2,data:text/plain,Hello,false' "real AXI conversion should reproduce truncation of an opaque URL containing spaces"
 
-    if [ "$mode" = attach ]; then
-      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_BRIDGE="${axi_cli%/*}/bridge.js" run_qa "$fakebin" "$dir/browser" \
-        --select-identity "$identity" --axi-session real-inventory --out "$dir/evidence") \
-        || fail "attachment must accept titled pages emitted by real MCP despite AXI's lossy pages conversion"
-      assert_present "$dir/evidence/attached-identity.json" "real MCP attachment should publish evidence"
-    else
-      out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_BRIDGE="${axi_cli%/*}/bridge.js" run_qa "$fakebin" "$dir/browser" \
-        --url "https://teachers.example.test/classes" --out "$dir/evidence") \
-        || fail "existing-tab QA must accept titled pages emitted by real MCP"
-      assert_present "$dir/evidence/identity.json" "real MCP QA should publish evidence"
-      assert_absent "$dir/browser/newpage.log" "real MCP QA must reuse the existing exact page"
-    fi
-    assert_not_contains "$out" 'skipped browser page' "real MCP opaque URLs should remain probeable when selected"
-    [ "$(cat "$dir/browser/selected")" = 7 ] || fail "real MCP inventory must retain the verified selected ID"
+        rm -f "$dir/browser/pages_cli_started"
+        if [ "$recovery" = silent ]; then
+          : > "$dir/browser/silent_inventory"
+        fi
+        if [ "$mode" = attach ]; then
+          out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_CLI="$axi_cli" FM_TEST_AXI_BRIDGE="${axi_cli%/*}/bridge.js" run_qa "$fakebin" "$dir/browser" \
+            --select-identity "$identity" --axi-session real-inventory --out "$dir/evidence") \
+            || fail "attachment must accept titled pages emitted by real MCP despite AXI's lossy pages conversion"
+          assert_present "$dir/evidence/attached-identity.json" "real MCP attachment should publish evidence"
+        else
+          out=$(FM_TEST_MCP_RESPONSE="$REAL_MCP_RESPONSE" FM_TEST_AXI_CLI="$axi_cli" FM_TEST_AXI_BRIDGE="${axi_cli%/*}/bridge.js" run_qa "$fakebin" "$dir/browser" \
+            --url "https://teachers.example.test/classes" --out "$dir/evidence") \
+            || fail "existing-tab QA must accept titled pages emitted by real MCP"
+          assert_present "$dir/evidence/identity.json" "real MCP QA should publish evidence"
+          assert_absent "$dir/browser/newpage.log" "real MCP QA must reuse the existing exact page"
+        fi
+        assert_not_contains "$out" 'skipped browser page' "real MCP opaque URLs should remain probeable when selected"
+        [ "$(cat "$dir/browser/selected")" = 7 ] || fail "real MCP inventory must retain the verified selected ID"
+        if [ "$recovery" = silent ]; then
+          assert_present "$dir/browser/pages_cli_started" "real AXI conversion must be exercised during silent recovery"
+        else
+          assert_absent "$dir/browser/pages_cli_started" "healthy real MCP inventory must remain primary"
+        fi
+      done
+    done
   done
   pass "fm-browser-qa.sh: real MCP-to-AXI conversion preserves successful titled-page QA through the raw inventory path"
 }
@@ -2620,7 +2700,10 @@ test_start_if_needed_refuses_existing_temporary_profile
 test_start_if_needed_allows_existing_operator_profile
 test_exact_tab_selected_and_evidence_written
 test_silent_mcp_inventory_failure_falls_back_to_axi_pages
+test_silent_mcp_inventory_fallback_handles_empty_pages
+test_silent_mcp_inventory_fallback_rejects_invalid_pages
 test_normal_inventory_path_keeps_mcp_primary
+test_inventory_error_does_not_use_silent_fallback
 test_silent_mcp_inventory_fallback_refuses_ambiguous_full_titles
 test_no_exact_tab_opens_new_page_then_verifies
 test_multiple_exact_tabs_refused
