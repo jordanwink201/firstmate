@@ -11,6 +11,9 @@
 # Diagnostics: blocked runs leave FAILED.md after the evidence directory exists,
 # and every exit best-effort appends JSONL to FM_BROWSER_QA_LEDGER or the default
 # $HOME/.local/share/fm-browser-qa/runs.jsonl when either path is available.
+# Auth: a teacher-portal login redirect is auto-resolved once with teaching-verify
+# credentials (FM_BROWSER_QA_LOGIN_HELPER overrides the helper script); only
+# Cloudflare Access still requires a human sign-in.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 set -eu
@@ -46,6 +49,9 @@ JSON_RESULT=
 # chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
 # Remove this pin after AXI sends pageId or supports disabling page-id routing.
 MCP_COMPAT_VERSION=1.7.0
+# App login pages (teacher portal) are auto-resolved with teaching-verify
+# credentials through this helper; only Cloudflare Access needs a human.
+LOGIN_HELPER=${FM_BROWSER_QA_LOGIN_HELPER:-"${HOME:-}/Documents/GitHub/teaching-verify/scripts/qa-chrome-login.mjs"}
 
 usage() {
   cat >&2 <<'EOF'
@@ -88,6 +94,14 @@ write_failure_marker() {
     echo "- Logical evidence session: ${LOGICAL_SESSION_NAME:-<unset>}"
     echo "- AXI bridge session: ${AXI_SESSION_NAME:-<unset>}"
     echo "- Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    # Landed-page identities outlive the temp dir here so a navigation that
+    # ended somewhere unexpected (login redirect, error page) is self-diagnosing.
+    if [ -n "${LANDED_PAGES_FILE:-}" ] && [ -s "${LANDED_PAGES_FILE:-}" ]; then
+      echo
+      echo "## Pages the navigation landed on"
+      echo
+      cat "$LANDED_PAGES_FILE"
+    fi
   } > "$OUT_DIR/FAILED.md" 2>/dev/null || true
 }
 
@@ -272,6 +286,8 @@ fi
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
+LANDED_PAGES_FILE="$TMP_DIR/landed-pages.txt"
+: > "$LANDED_PAGES_FILE"
 
 mcp_compat_package_json() {
   printf '%s/node_modules/chrome-devtools-mcp/package.json\n' "$1"
@@ -720,6 +736,9 @@ scan_pages() {
       continue
     fi
     href=$(json_field "$identity_json" href)
+    if [ "$mode" = strict ]; then
+      printf -- '- page %s: %s — %s\n' "$page_id" "$href" "$(json_field "$identity_json" title)" >> "$LANDED_PAGES_FILE"
+    fi
     if [ "$href" = "$NORM_TARGET_URL" ]; then
       printf '%s\t%s\n' "$page_id" "$identity_json" >> "$scan_dir/matches.tsv"
     fi
@@ -733,6 +752,107 @@ open_target_page() {
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
 }
 
+# Diff page ids against KNOWN_IDS, probe only the pages the navigation produced,
+# and leave the results in SCAN_DIR/MATCHES/MATCH_COUNT for the caller.
+scan_new_pages() {
+  local label=$1 post_ids page_id known known_id
+  post_ids=$(list_page_ids "$label")
+  NEW_IDS=
+  for page_id in $post_ids; do
+    known=0
+    for known_id in $KNOWN_IDS; do
+      if [ "$page_id" = "$known_id" ]; then
+        known=1
+        break
+      fi
+    done
+    if [ "$known" -eq 0 ]; then
+      NEW_IDS="$NEW_IDS $page_id"
+    fi
+  done
+  KNOWN_IDS=$post_ids
+  SCAN_DIR="$TMP_DIR/scan-$label"
+  scan_pages "$SCAN_DIR" "$NEW_IDS" strict
+  MATCHES="$SCAN_DIR/matches.tsv"
+  MATCH_COUNT=$(count_lines "$MATCHES")
+}
+
+scan_found_cloudflare() {
+  local page_id identity_json
+  for page_id in $NEW_IDS; do
+    identity_json="$SCAN_DIR/page-$(safe_page_id "$page_id").json"
+    [ -f "$identity_json" ] || continue
+    if is_auth_blocked "$(json_field "$identity_json" href)" "$(json_field "$identity_json" title)"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# App login page on the target's own host — resolvable with stored credentials,
+# unlike Cloudflare Access which always needs a human.
+is_app_login_page() {
+  node - "$1" "$NORM_TARGET_URL" <<'NODE'
+const [href, target] = process.argv.slice(2);
+try {
+  const landed = new URL(href);
+  const wanted = new URL(target);
+  if (landed.host !== wanted.host) process.exit(1);
+  process.exit(landed.pathname === '/login' || landed.pathname.startsWith('/login/') ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+scan_found_app_login() {
+  local page_id identity_json
+  for page_id in $NEW_IDS; do
+    identity_json="$SCAN_DIR/page-$(safe_page_id "$page_id").json"
+    [ -f "$identity_json" ] || continue
+    if is_app_login_page "$(json_field "$identity_json" href)"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Auto-login is scoped to the teacher portal; other portals' login pages still
+# report the plain navigation failure until their flows are added.
+target_supports_auto_login() {
+  node - "$NORM_TARGET_URL" <<'NODE'
+const [target] = process.argv.slice(2);
+try {
+  const { hostname } = new URL(target);
+  process.exit(/^teachers[.-]/.test(hostname) && /\.typing\.com$/.test(hostname) ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+run_login_helper() {
+  local login_url helper_status=0
+  [ -f "$LOGIN_HELPER" ] \
+    || blocked "app login page detected but the auto-login helper is missing: $LOGIN_HELPER"
+  login_url=$(node -e 'process.stdout.write(new URL(process.argv[1]).origin + "/login")' "$NORM_TARGET_URL") \
+    || blocked "could not derive a login URL from: $NORM_TARGET_URL"
+  echo "app login page detected; logging in with teaching-verify credentials" >&2
+  node "$LOGIN_HELPER" --browser-url "$BROWSER_URL" --login-url "$login_url" \
+    > "$TMP_DIR/login-helper.out" 2> "$TMP_DIR/login-helper.err" || helper_status=$?
+  case "$helper_status" in
+    0)
+      append_warning "auto-logged in to $login_url with teaching-verify credentials"
+      ;;
+    3)
+      auth_blocked
+      ;;
+    *)
+      blocked "teacher portal auto-login failed (exit $helper_status): $(stream_detail "$TMP_DIR/login-helper.err" "$TMP_DIR/login-helper.out")"
+      ;;
+  esac
+}
+
 NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
 
 STAGE=page-scan
@@ -743,34 +863,28 @@ MATCHES="$SCAN_DIR/matches.tsv"
 MATCH_COUNT=$(count_lines "$MATCHES")
 
 if [ "$MATCH_COUNT" -eq 0 ]; then
+  KNOWN_IDS=$INITIAL_IDS
   open_target_page
-  POST_IDS=$(list_page_ids after-open)
-  NEW_IDS=
-  for page_id in $POST_IDS; do
-    known=0
-    for known_id in $INITIAL_IDS; do
-      if [ "$page_id" = "$known_id" ]; then
-        known=1
-        break
-      fi
-    done
-    if [ "$known" -eq 0 ]; then
-      NEW_IDS="$NEW_IDS $page_id"
-    fi
-  done
-  SCAN_DIR="$TMP_DIR/scan-after-open"
-  scan_pages "$SCAN_DIR" "$NEW_IDS" strict
-  MATCHES="$SCAN_DIR/matches.tsv"
-  MATCH_COUNT=$(count_lines "$MATCHES")
+  scan_new_pages after-open
   if [ "$MATCH_COUNT" -eq 0 ]; then
-    for page_id in $NEW_IDS; do
-      identity_json="$SCAN_DIR/page-$(safe_page_id "$page_id").json"
-      [ -f "$identity_json" ] || continue
-      if is_auth_blocked "$(json_field "$identity_json" href)" "$(json_field "$identity_json" title)"; then
-        auth_blocked
+    if scan_found_cloudflare; then
+      auth_blocked
+    fi
+    if scan_found_app_login && target_supports_auto_login; then
+      STAGE=auto-login
+      run_login_helper
+      STAGE=page-scan
+      open_target_page
+      scan_new_pages after-login
+      if [ "$MATCH_COUNT" -eq 0 ]; then
+        if scan_found_cloudflare; then
+          auth_blocked
+        fi
+        blocked "exact QA URL is not open after teacher portal auto-login: $TARGET_URL"
       fi
-    done
-    blocked "exact QA URL is not open after navigation: $TARGET_URL"
+    else
+      blocked "exact QA URL is not open after navigation: $TARGET_URL"
+    fi
   fi
 fi
 

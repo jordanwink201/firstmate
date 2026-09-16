@@ -262,7 +262,36 @@ run_qa() {
   if [ "${FM_BROWSER_QA_PROFILE_DIR+x}" = x ]; then
     env_args+=("FM_BROWSER_QA_PROFILE_DIR=$FM_BROWSER_QA_PROFILE_DIR")
   fi
+  if [ "${FM_BROWSER_QA_LOGIN_HELPER+x}" = x ]; then
+    env_args+=("FM_BROWSER_QA_LOGIN_HELPER=$FM_BROWSER_QA_LOGIN_HELPER")
+  fi
   env "${env_args[@]}" bash "$ROOT/bin/fm-browser-qa.sh" "$@" 2>&1
+}
+
+# Stand-in for teaching-verify's qa-chrome-login.mjs: records its arguments and,
+# unless told otherwise, clears the login redirect so the retry lands on target.
+make_fake_login_helper() {
+  local dir=$1 helper="$1/login-helper.mjs"
+  mkdir -p "$dir"
+  cat > "$helper" <<'JS'
+import fs from 'fs';
+import path from 'path';
+const dir = process.env.FM_FAKE_BROWSER_DIR;
+fs.appendFileSync(path.join(dir, 'login-helper.log'), process.argv.slice(2).join(' ') + '\n');
+if (fs.existsSync(path.join(dir, 'login_cf'))) {
+  console.error('Cloudflare Access is blocking the login page; human sign-in required');
+  process.exit(3);
+}
+if (fs.existsSync(path.join(dir, 'login_fail'))) {
+  console.error('still on login page after submit as fake@user');
+  process.exit(1);
+}
+if (!fs.existsSync(path.join(dir, 'login_keep_redirect'))) {
+  fs.rmSync(path.join(dir, 'newpage_redirect'), { force: true });
+}
+console.log('logged in as fake@user');
+JS
+  printf '%s\n' "$helper"
 }
 
 assert_axi_cleanup() {
@@ -967,6 +996,126 @@ test_sign_in_substring_title_is_not_auth() {
   pass "fm-browser-qa.sh: 'sign in' substring inside a word is not an auth verdict"
 }
 
+test_teacher_login_redirect_auto_logs_in() {
+  local dir fakebin helper evidence target
+  dir="$TMP_ROOT/auto-login"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  target="https://teachers.typing.com/students/177288903/activity"
+  mkdir -p "$dir/browser"
+  printf '%s\t%s\n' "https://teachers.typing.com/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+  evidence="$dir/evidence"
+
+  FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+    run_qa "$fakebin" "$dir/browser" --url "$target" --out "$evidence" >/dev/null
+
+  assert_grep "--login-url https://teachers.typing.com/login" "$dir/browser/login-helper.log" \
+    "auto-login helper was not called with the derived login URL"
+  [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "auto-login helper should run exactly once"
+  assert_present "$evidence/report.md" "auto-login run should complete the evidence report"
+  assert_grep "auto-logged in to https://teachers.typing.com/login" "$evidence/report.md" \
+    "report should record the auto-login warning"
+  assert_grep "\"active_url\": \"$target\"" "$evidence/identity.json" \
+    "identity evidence should prove the post-login target page"
+  pass "fm-browser-qa.sh: teacher portal login redirect auto-logs-in and completes evidence"
+}
+
+test_teacher_login_helper_cloudflare_reports_auth() {
+  local dir fakebin helper out status
+  dir="$TMP_ROOT/auto-login-cf"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  mkdir -p "$dir/browser"
+  printf '%s\t%s\n' "https://teachers.typing.com/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+  : > "$dir/browser/login_cf"
+
+  set +e
+  out=$(FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+    run_qa "$fakebin" "$dir/browser" --url "https://teachers.typing.com/students" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "Cloudflare helper exit should block"
+  assert_contains "$out" "blocked: authenticated browser session expired" \
+    "Cloudflare helper exit should report the human sign-in path"
+  assert_grep "Google Chrome" "$dir/browser/osascript.log" \
+    "Cloudflare helper exit should foreground the QA Chrome window"
+  pass "fm-browser-qa.sh: Cloudflare block during auto-login defers to a human"
+}
+
+test_teacher_login_helper_failure_blocks_with_reason() {
+  local dir fakebin helper out status
+  dir="$TMP_ROOT/auto-login-fail"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  mkdir -p "$dir/browser"
+  printf '%s\t%s\n' "https://teachers.typing.com/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+  : > "$dir/browser/login_fail"
+
+  set +e
+  out=$(FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+    run_qa "$fakebin" "$dir/browser" --url "https://teachers.typing.com/students" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "failed auto-login should block"
+  assert_contains "$out" "blocked: teacher portal auto-login failed (exit 1)" \
+    "failed auto-login should name the helper failure"
+  assert_contains "$out" "still on login page after submit" \
+    "failed auto-login should surface the helper diagnostics"
+  pass "fm-browser-qa.sh: failed auto-login blocks with the helper's reason"
+}
+
+test_login_still_shown_after_auto_login_blocks_once() {
+  local dir fakebin helper out status
+  dir="$TMP_ROOT/auto-login-persist"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  mkdir -p "$dir/browser"
+  printf '%s\t%s\n' "https://teachers.typing.com/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+  : > "$dir/browser/login_keep_redirect"
+
+  set +e
+  out=$(FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+    run_qa "$fakebin" "$dir/browser" --url "https://teachers.typing.com/students" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "persistent login page should block"
+  assert_contains "$out" "blocked: exact QA URL is not open after teacher portal auto-login" \
+    "persistent login page should report the post-login navigation failure"
+  [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "auto-login should be attempted exactly once"
+  pass "fm-browser-qa.sh: login page persisting after auto-login blocks without retry loops"
+}
+
+test_non_teacher_login_redirect_reports_landed_pages() {
+  local dir fakebin helper out status
+  dir="$TMP_ROOT/login-out-of-scope"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  mkdir -p "$dir/browser"
+  printf '%s\t%s\n' "https://example.test/login" "Login" > "$dir/browser/newpage_redirect"
+
+  set +e
+  out=$(FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+    run_qa "$fakebin" "$dir/browser" --url "https://example.test/qa" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "out-of-scope login redirect should block"
+  assert_contains "$out" "blocked: exact QA URL is not open after navigation" \
+    "out-of-scope login redirect should keep the plain navigation failure"
+  assert_absent "$dir/browser/login-helper.log" \
+    "out-of-scope login redirect should not invoke the auto-login helper"
+  assert_grep "Pages the navigation landed on" "$dir/evidence/FAILED.md" \
+    "FAILED.md should record where the navigation landed"
+  assert_grep "https://example.test/login" "$dir/evidence/FAILED.md" \
+    "FAILED.md should name the landed login URL"
+  pass "fm-browser-qa.sh: out-of-scope login redirect reports landed pages without auto-login"
+}
+
 test_trailing_slash_url_is_normalized() {
   local dir fakebin evidence
   dir="$TMP_ROOT/normalize"
@@ -1251,6 +1400,11 @@ test_auth_blocked_reported
 test_unprobeable_unrelated_tab_is_skipped
 test_unrelated_sign_in_tab_does_not_report_auth_expired
 test_sign_in_substring_title_is_not_auth
+test_teacher_login_redirect_auto_logs_in
+test_teacher_login_helper_cloudflare_reports_auth
+test_teacher_login_helper_failure_blocks_with_reason
+test_login_still_shown_after_auto_login_blocks_once
+test_non_teacher_login_redirect_reports_landed_pages
 test_trailing_slash_url_is_normalized
 test_successful_evidence_cleans_up_axi_session
 test_cleanup_error_preserves_original_status
