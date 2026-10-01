@@ -454,7 +454,7 @@ test_teacher_root_failures_retain_observed_urls() {
   local dir fakebin helper requested resolved observed scenario out status
   requested="https://teachers.dev.typing.com"
   resolved="$requested/dashboard"
-  for scenario in persistent-login wrong-host after-login-wrong-host after-login-wrong-route after-login-sign-in after-login-cloudflare final-mismatch after-login-final-mismatch; do
+  for scenario in persistent-login wrong-host after-login-wrong-host after-login-wrong-route after-login-sign-in after-login-sign-in-dashboard after-login-cloudflare final-mismatch after-login-final-mismatch; do
     dir="$TMP_ROOT/teacher-root-fail-$scenario"
     fakebin=$(make_fake_browser_tools "$dir")
     helper=$(make_fake_login_helper "$dir/browser")
@@ -468,10 +468,11 @@ test_teacher_root_failures_retain_observed_urls() {
         observed="https://teachers.typing.com/dashboard"
         printf '%s\t%s\n' "$observed" "Dashboard" > "$dir/browser/newpage_redirect"
         ;;
-      after-login-wrong-host|after-login-wrong-route|after-login-sign-in|after-login-cloudflare)
+      after-login-wrong-host|after-login-wrong-route|after-login-sign-in|after-login-sign-in-dashboard|after-login-cloudflare)
         observed="https://teachers.typing.com/dashboard"
         [ "$scenario" != after-login-wrong-route ] || observed="$requested/classes"
         [ "$scenario" != after-login-sign-in ] || observed="$requested/login"
+        [ "$scenario" != after-login-sign-in-dashboard ] || observed="$resolved"
         [ "$scenario" != after-login-cloudflare ] || observed="https://example.cloudflareaccess.com/cdn-cgi/access/login"
         printf '%s\t%s\n' "$requested/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
         printf '%s\t%s\n' "$observed" "Sign In" > "$dir/browser/after_login_redirect"
@@ -493,7 +494,7 @@ test_teacher_root_failures_retain_observed_urls() {
     status=$?
     set -e
 
-    expect_code 1 "$status" "dashboard identity mismatch should fail"
+    expect_code 1 "$status" "dashboard verification failure should block"
     assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "$requested" "$resolved" "$observed" 1
     assert_grep "Requested URL: $requested" "$dir/evidence/FAILED.md" "failure should retain the requested root"
     assert_grep "Resolved URL: $resolved" "$dir/evidence/FAILED.md" "failure should name the expected dashboard"

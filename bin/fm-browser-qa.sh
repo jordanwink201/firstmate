@@ -740,7 +740,7 @@ NODE
 }
 
 is_auth_blocked() {
-  node - "$1" "$2" "$AUTH_CHECK_MODE" <<'NODE'
+  node - "$1" "$2" "${3:-$AUTH_CHECK_MODE}" <<'NODE'
 const [href, title, mode] = process.argv.slice(2);
 const h = String(href || '').toLowerCase();
 const t = String(title || '').toLowerCase();
@@ -960,6 +960,10 @@ write_identity "$FINAL_IDENTITY" "$PAGE_ID"
 
 if is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE"; then
   auth_blocked
+fi
+
+if [ "$AUTH_CHECK_MODE" = cloudflare-only ] && is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE" all; then
+  blocked "login helper returned success, but the selected page still requires sign-in; navigation verification failed: $FINAL_HREF"
 fi
 
 if [ "$FINAL_HREF" != "$RESOLVED_URL" ]; then
