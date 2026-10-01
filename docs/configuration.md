@@ -329,8 +329,8 @@ The shared identity check also binds complete titles to Chrome's stable target I
 Before publishing attachment evidence, the helper rechecks competing URL matches against the final inventory and refuses unresolved candidate changes or ambiguity.
 It refuses zero matches, indistinguishable duplicate URL/title matches, browser endpoint mismatches, and page drift before returning success.
 The selector leaves the named AXI session selected for immediate follow-up commands; use that same `CHROME_DEVTOOLS_AXI_SESSION` and the identity's `browser_url`, then stop that caller-owned session when QA is complete.
-Teacher-portal app login redirects are resolved once through the existing login helper; Cloudflare Access still requires human sign-in.
-The script header and help own URL resolution, evidence fields, and the distinction between login-helper success and subsequent navigation failure.
+Eligible teacher-portal app login redirects can trigger one automatic login attempt; see the [script header](../bin/fm-browser-qa.sh) for authentication and post-login verification behavior.
+The script header owns URL resolution and evidence fields; its help summarizes URL selection and attachment compatibility.
 Other authoritative sign-in landings retain the authenticated-browser-session-expired blocker.
 If neither that landing nor the tolerant broader tab scan finds the exact URL, the helper uses the exact-QA-URL blocker without letting an unrelated unprobeable tab replace that classification.
 It also writes best-effort `console.txt` and `network.txt`, recording capture failures as warnings.

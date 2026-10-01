@@ -14,16 +14,26 @@
 # Diagnostics: blocked runs leave FAILED.md after the evidence directory exists,
 # and every exit best-effort appends JSONL to FM_BROWSER_QA_LEDGER or the default
 # $HOME/.local/share/fm-browser-qa/runs.jsonl when either path is available.
-# Auth: a teacher-portal login redirect is auto-resolved once with teaching-verify
-# credentials (FM_BROWSER_QA_LOGIN_HELPER overrides the helper script); only
-# Cloudflare Access still requires a human sign-in.
+# Auth: URL-based QA makes at most one teaching-verify login attempt for a
+# same-host /login or /login/* landing on a recognized teacher host when no
+# exact target tab exists (FM_BROWSER_QA_LOGIN_HELPER overrides the helper).
+# Helper success does not prove navigation success: a remaining Sign In page
+# or a different final URL blocks verification without diagnosing expired
+# credentials. Cloudflare Access retains its human-sign-in authentication blocker.
 # Target URLs: HTTP(S) teachers[.-]*.typing.com roots, with or without a trailing
 # slash and without any query or fragment delimiter, select the same origin's
 # /dashboard. Explicit routes, localized paths, queries, fragments, and other
 # hosts keep their target. All targets use browser-equivalent URL normalization.
+# Resolution precedes browser startup, tab selection, and navigation; initial
+# and post-login navigation verify the same resolved target.
+# Attachment instead verifies the receipt's saved active_url and title without
+# root resolution, including older receipts that have no resolved_url field.
 # Evidence: identity.json keeps requested_url (original input), resolved_url
 # (canonical target), and active_url (observed page, which must exactly match the
-# resolved target for success). The run ledger keeps url plus resolved_url.
+# resolved target for success). A failure identity records the observed page,
+# not completion; check the run outcome and FAILED.md before accepting evidence.
+# The run ledger keeps url plus resolved_url. Reports and failure diagnostics
+# distinguish requested, resolved, and observed URLs and announce root resolution.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 #   fm-browser-qa.sh --select-identity <identity.json> --axi-session <session> [--out <dir>]
@@ -73,8 +83,6 @@ ATTACH_BINDING_READY=0
 # chrome-devtools-mcp 1.8.0 requires pageId while AXI still relies on selected-page state.
 # Remove this pin after AXI sends pageId or supports disabling page-id routing.
 MCP_COMPAT_VERSION=1.7.0
-# App login pages (teacher portal) are auto-resolved with teaching-verify
-# credentials through this helper; only Cloudflare Access needs a human.
 LOGIN_HELPER=${FM_BROWSER_QA_LOGIN_HELPER:-"${HOME:-}/Documents/GitHub/teaching-verify/scripts/qa-chrome-login.mjs"}
 
 usage() {
