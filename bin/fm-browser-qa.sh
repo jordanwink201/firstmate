@@ -14,6 +14,13 @@
 # Auth: a teacher-portal login redirect is auto-resolved once with teaching-verify
 # credentials (FM_BROWSER_QA_LOGIN_HELPER overrides the helper script); only
 # Cloudflare Access still requires a human sign-in.
+# Target URLs: HTTP(S) teachers[.-]*.typing.com roots, with or without a trailing
+# slash and without any query or fragment delimiter, select the same origin's
+# /dashboard. Explicit routes, localized paths, queries, fragments, and other
+# hosts keep their target. All targets use browser-equivalent URL normalization.
+# Evidence: identity.json keeps requested_url (original input), resolved_url
+# (canonical target), and active_url (observed page, which must exactly match the
+# resolved target for success). The run ledger keeps url plus resolved_url.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 set -eu
@@ -32,6 +39,10 @@ else
   LEDGER_FILE=
 fi
 TARGET_URL=
+RESOLVED_URL=
+OBSERVED_URL=
+ROOT_RESOLVED=0
+AUTH_CHECK_MODE=
 OUT_DIR=
 BROWSER_URL=http://127.0.0.1:9222
 SESSION_INPUT=
@@ -56,6 +67,14 @@ LOGIN_HELPER=${FM_BROWSER_QA_LOGIN_HELPER:-"${HOME:-}/Documents/GitHub/teaching-
 usage() {
   cat >&2 <<'EOF'
 usage: bin/fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
+
+Bare HTTP(S) teachers[.-]*.typing.com roots select /dashboard on the same origin.
+Both trailing-slash forms are accepted; query and fragment delimiters (even
+empty ones), explicit routes, localized paths, and other hosts are unchanged.
+URLs use browser-equivalent normalization. Prefer the exact class/student/report
+route when known. Navigation and identity verification use the resolved target;
+evidence preserves requested_url, resolved_url, and observed active_url, and the
+ledger preserves url plus resolved_url. Success requires exact active_url match.
 EOF
 }
 
@@ -89,7 +108,12 @@ write_failure_marker() {
     echo
     echo "- Stage: $STAGE"
     echo "- Reason: $BLOCK_REASON"
-    echo "- Exact URL: ${TARGET_URL:-<unset>}"
+    echo "- Requested URL: ${TARGET_URL:-<unset>}"
+    echo "- Resolved URL: ${RESOLVED_URL:-<unresolved>}"
+    echo "- Observed URL: ${OBSERVED_URL:-<unobserved>}"
+    if [ "$ROOT_RESOLVED" -eq 1 ]; then
+      echo "- Resolution: teacher portal root resolved to /dashboard"
+    fi
     echo "- Browser endpoint: ${BROWSER_URL:-<unset>}"
     echo "- Logical evidence session: ${LOGICAL_SESSION_NAME:-<unset>}"
     echo "- AXI bridge session: ${AXI_SESSION_NAME:-<unset>}"
@@ -108,6 +132,7 @@ write_failure_marker() {
 blocked() {
   BLOCK_REASON=$1
   echo "blocked: $1" >&2
+  echo "URLs: requested=${TARGET_URL:-<unset>} resolved=${RESOLVED_URL:-<unresolved>} observed=${OBSERVED_URL:-<unobserved>}" >&2
   write_failure_marker
   exit 1
 }
@@ -117,6 +142,53 @@ sanitize_token() {
   token=$(printf '%s' "$raw" | LC_ALL=C tr -c '[:alnum:]_.-' '-' | sed 's/^-*//; s/-*$//')
   [ -n "$token" ] || token=default
   printf '%s\n' "$token"
+}
+
+normalize_url() {
+  node - "$1" <<'NODE'
+const [raw] = process.argv.slice(2);
+try {
+  process.stdout.write(new URL(raw).href);
+} catch {
+  process.stdout.write(raw);
+}
+NODE
+}
+
+# This host matcher also scopes root resolution; keep teacher-host recognition
+# in one place so login and URL selection cannot drift.
+target_supports_auto_login() {
+  node - "$1" <<'NODE'
+const [target] = process.argv.slice(2);
+try {
+  const { hostname } = new URL(target);
+  process.exit(/^teachers[.-]/.test(hostname) && /\.typing\.com$/.test(hostname) ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
+}
+
+resolve_target_url() {
+  local normalized
+  normalized=$(normalize_url "$TARGET_URL")
+  RESOLVED_URL=$normalized
+  if target_supports_auto_login "$normalized"; then
+    RESOLVED_URL=$(node - "$normalized" <<'NODE'
+const [target] = process.argv.slice(2);
+const url = new URL(target);
+// href preserves even empty query/fragment delimiters, unlike search and hash.
+if (/^https?:$/.test(url.protocol) && url.pathname === '/' && !url.href.includes('?') && !url.href.includes('#')) {
+  url.pathname = '/dashboard';
+}
+process.stdout.write(url.href);
+NODE
+    )
+    if [ "$RESOLVED_URL" != "$normalized" ]; then
+      ROOT_RESOLVED=1
+      echo "teacher portal root resolved to /dashboard: $TARGET_URL -> $RESOLVED_URL" >&2
+    fi
+  fi
 }
 
 axi() (
@@ -162,7 +234,7 @@ json_nullable() {
 }
 
 append_ledger() {
-  local LC_ALL=C status=$1 dir ts_json stage_json reason_json url_json out_json session_json axi_json
+  local LC_ALL=C status=$1 dir ts_json stage_json reason_json url_json resolved_json out_json session_json axi_json
   [ -n "$LEDGER_FILE" ] || return 0
   dir=$(dirname "$LEDGER_FILE")
   mkdir -p "$dir" >/dev/null 2>&1 || return 0
@@ -170,11 +242,12 @@ append_ledger() {
   json_quote "$STAGE"; stage_json=$JSON_RESULT
   json_nullable "$BLOCK_REASON"; reason_json=$JSON_RESULT
   json_nullable "$TARGET_URL"; url_json=$JSON_RESULT
+  json_nullable "$RESOLVED_URL"; resolved_json=$JSON_RESULT
   json_nullable "$OUT_DIR"; out_json=$JSON_RESULT
   json_nullable "$LOGICAL_SESSION_NAME"; session_json=$JSON_RESULT
   json_nullable "$AXI_SESSION_NAME"; axi_json=$JSON_RESULT
-  printf '{"ts":%s,"status":%s,"stage":%s,"reason":%s,"url":%s,"out_dir":%s,"session":%s,"axi_session":%s}\n' \
-    "$ts_json" "$status" "$stage_json" "$reason_json" "$url_json" "$out_json" "$session_json" "$axi_json" \
+  printf '{"ts":%s,"status":%s,"stage":%s,"reason":%s,"url":%s,"resolved_url":%s,"out_dir":%s,"session":%s,"axi_session":%s}\n' \
+    "$ts_json" "$status" "$stage_json" "$reason_json" "$url_json" "$resolved_json" "$out_json" "$session_json" "$axi_json" \
     >> "$LEDGER_FILE" 2>/dev/null || true
 }
 
@@ -276,6 +349,7 @@ command -v node >/dev/null 2>&1 || blocked "node is not installed or not on PATH
 
 BROWSER_URL=${BROWSER_URL%/}
 mkdir -p "$OUT_DIR" || blocked "could not create evidence directory: $OUT_DIR"
+resolve_target_url
 
 if [ -n "$SESSION_INPUT" ]; then
   LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$SESSION_INPUT")"
@@ -286,6 +360,9 @@ fi
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-browser-qa.XXXXXX")
 WARNINGS_FILE="$TMP_DIR/warnings.txt"
 : > "$WARNINGS_FILE"
+if [ "$ROOT_RESOLVED" -eq 1 ]; then
+  printf '%s\n' "- teacher portal root resolved to /dashboard: $TARGET_URL -> $RESOLVED_URL" >> "$WARNINGS_FILE"
+fi
 LANDED_PAGES_FILE="$TMP_DIR/landed-pages.txt"
 : > "$LANDED_PAGES_FILE"
 
@@ -573,7 +650,7 @@ start_browser() {
     "--remote-debugging-port=$port" \
     "--user-data-dir=$profile_dir" \
     "--new-window" \
-    "$TARGET_URL" >/dev/null 2>&1 \
+    "$RESOLVED_URL" >/dev/null 2>&1 \
     || blocked "could not start Google Chrome with --remote-debugging-port=$port"
   focus_browser_window
 }
@@ -605,17 +682,6 @@ const fs = require('fs');
 const [file, field] = process.argv.slice(2);
 const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
 process.stdout.write(String(obj[field] ?? ''));
-NODE
-}
-
-normalize_url() {
-  node - "$1" <<'NODE'
-const [raw] = process.argv.slice(2);
-try {
-  process.stdout.write(new URL(raw).href);
-} catch {
-  process.stdout.write(raw);
-}
 NODE
 }
 
@@ -655,13 +721,14 @@ NODE
 }
 
 write_identity() {
-  node - "$1" "$2" "$BROWSER_URL" "$LOGICAL_SESSION_NAME" "$AXI_SESSION_NAME" "$TARGET_URL" "$OUT_DIR/identity.json" <<'NODE'
+  node - "$1" "$2" "$BROWSER_URL" "$LOGICAL_SESSION_NAME" "$AXI_SESSION_NAME" "$TARGET_URL" "$RESOLVED_URL" "$OUT_DIR/identity.json" <<'NODE'
 const fs = require('fs');
-const [identityFile, pageId, browserUrl, logicalSessionName, axiSessionName, requestedUrl, output] = process.argv.slice(2);
+const [identityFile, pageId, browserUrl, logicalSessionName, axiSessionName, requestedUrl, resolvedUrl, output] = process.argv.slice(2);
 const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
 fs.writeFileSync(output, JSON.stringify({
   page_id: pageId,
   requested_url: requestedUrl,
+  resolved_url: resolvedUrl,
   active_url: identity.href,
   title: identity.title,
   browser_url: browserUrl,
@@ -673,11 +740,11 @@ NODE
 }
 
 is_auth_blocked() {
-  node - "$1" "$2" <<'NODE'
-const [href, title] = process.argv.slice(2);
+  node - "$1" "$2" "$AUTH_CHECK_MODE" <<'NODE'
+const [href, title, mode] = process.argv.slice(2);
 const h = String(href || '').toLowerCase();
 const t = String(title || '').toLowerCase();
-if (h.includes('/cdn-cgi/access/login') || t.includes('cloudflare access') || /\bsign[ -]?in\b/.test(t)) {
+if (h.includes('/cdn-cgi/access/login') || t.includes('cloudflare access') || (mode !== 'cloudflare-only' && /\bsign[ -]?in\b/.test(t))) {
   process.exit(0);
 }
 process.exit(1);
@@ -737,16 +804,18 @@ scan_pages() {
     fi
     href=$(json_field "$identity_json" href)
     if [ "$mode" = strict ]; then
+      OBSERVED_URL=$href
+      write_identity "$identity_json" "$page_id"
       printf -- '- page %s: %s — %s\n' "$page_id" "$href" "$(json_field "$identity_json" title)" >> "$LANDED_PAGES_FILE"
     fi
-    if [ "$href" = "$NORM_TARGET_URL" ]; then
+    if [ "$href" = "$RESOLVED_URL" ]; then
       printf '%s\t%s\n' "$page_id" "$identity_json" >> "$scan_dir/matches.tsv"
     fi
   done
 }
 
 open_target_page() {
-  if ! axi newpage "$TARGET_URL" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
+  if ! axi newpage "$RESOLVED_URL" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
     blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
@@ -792,7 +861,7 @@ scan_found_cloudflare() {
 # App login page on the target's own host — resolvable with stored credentials,
 # unlike Cloudflare Access which always needs a human.
 is_app_login_page() {
-  node - "$1" "$NORM_TARGET_URL" <<'NODE'
+  node - "$1" "$RESOLVED_URL" <<'NODE'
 const [href, target] = process.argv.slice(2);
 try {
   const landed = new URL(href);
@@ -817,31 +886,18 @@ scan_found_app_login() {
   return 1
 }
 
-# Auto-login is scoped to the teacher portal; other portals' login pages still
-# report the plain navigation failure until their flows are added.
-target_supports_auto_login() {
-  node - "$NORM_TARGET_URL" <<'NODE'
-const [target] = process.argv.slice(2);
-try {
-  const { hostname } = new URL(target);
-  process.exit(/^teachers[.-]/.test(hostname) && /\.typing\.com$/.test(hostname) ? 0 : 1);
-} catch {
-  process.exit(1);
-}
-NODE
-}
-
 run_login_helper() {
   local login_url helper_status=0
   [ -f "$LOGIN_HELPER" ] \
     || blocked "app login page detected but the auto-login helper is missing: $LOGIN_HELPER"
-  login_url=$(node -e 'process.stdout.write(new URL(process.argv[1]).origin + "/login")' "$NORM_TARGET_URL") \
-    || blocked "could not derive a login URL from: $NORM_TARGET_URL"
+  login_url=$(node -e 'process.stdout.write(new URL(process.argv[1]).origin + "/login")' "$RESOLVED_URL") \
+    || blocked "could not derive a login URL from: $RESOLVED_URL"
   echo "app login page detected; logging in with teaching-verify credentials" >&2
   node "$LOGIN_HELPER" --browser-url "$BROWSER_URL" --login-url "$login_url" \
     > "$TMP_DIR/login-helper.out" 2> "$TMP_DIR/login-helper.err" || helper_status=$?
   case "$helper_status" in
     0)
+      AUTH_CHECK_MODE=cloudflare-only
       append_warning "auto-logged in to $login_url with teaching-verify credentials"
       ;;
     3)
@@ -852,8 +908,6 @@ run_login_helper() {
       ;;
   esac
 }
-
-NORM_TARGET_URL=$(normalize_url "$TARGET_URL")
 
 STAGE=page-scan
 SCAN_DIR="$TMP_DIR/scan-initial"
@@ -870,7 +924,7 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
     if scan_found_cloudflare; then
       auth_blocked
     fi
-    if scan_found_app_login && target_supports_auto_login; then
+    if scan_found_app_login && target_supports_auto_login "$RESOLVED_URL"; then
       STAGE=auto-login
       run_login_helper
       STAGE=page-scan
@@ -880,16 +934,16 @@ if [ "$MATCH_COUNT" -eq 0 ]; then
         if scan_found_cloudflare; then
           auth_blocked
         fi
-        blocked "exact QA URL is not open after teacher portal auto-login: $TARGET_URL"
+        blocked "exact QA URL is not open after teacher portal auto-login; login helper returned success, but navigation verification failed: $RESOLVED_URL"
       fi
     else
-      blocked "exact QA URL is not open after navigation: $TARGET_URL"
+      blocked "exact QA URL is not open after navigation: $RESOLVED_URL"
     fi
   fi
 fi
 
 if [ "$MATCH_COUNT" -gt 1 ]; then
-  blocked "multiple tabs match the exact QA URL; close duplicates and retry: $TARGET_URL"
+  blocked "multiple tabs match the exact QA URL; close duplicates and retry: $RESOLVED_URL"
 fi
 
 STAGE=identity
@@ -901,16 +955,19 @@ if ! probe_page "$PAGE_ID" "$FINAL_IDENTITY"; then
 fi
 FINAL_HREF=$(json_field "$FINAL_IDENTITY" href)
 FINAL_TITLE=$(json_field "$FINAL_IDENTITY" title)
+OBSERVED_URL=$FINAL_HREF
+write_identity "$FINAL_IDENTITY" "$PAGE_ID"
 
 if is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE"; then
   auth_blocked
 fi
 
-if [ "$FINAL_HREF" != "$NORM_TARGET_URL" ]; then
-  blocked "selected browser tab URL mismatch: expected $NORM_TARGET_URL got $FINAL_HREF"
+if [ "$FINAL_HREF" != "$RESOLVED_URL" ]; then
+  if [ "$AUTH_CHECK_MODE" = cloudflare-only ]; then
+    blocked "selected browser tab URL mismatch; login helper returned success, but navigation verification failed: expected $RESOLVED_URL got $FINAL_HREF"
+  fi
+  blocked "selected browser tab URL mismatch: expected $RESOLVED_URL got $FINAL_HREF"
 fi
-
-write_identity "$FINAL_IDENTITY" "$PAGE_ID"
 
 STAGE=snapshot
 if ! axi snapshot > "$OUT_DIR/snapshot.txt" 2> "$TMP_DIR/snapshot.err"; then
@@ -962,7 +1019,8 @@ rm -f "$OUT_DIR/FAILED.md"
 {
   echo "# Browser QA Report"
   echo
-  echo "- Exact URL: $TARGET_URL"
+  echo "- Requested URL: $TARGET_URL"
+  echo "- Resolved URL: $RESOLVED_URL"
   echo "- Active URL: $FINAL_HREF"
   echo "- Title: $FINAL_TITLE"
   echo "- Page ID: $PAGE_ID"

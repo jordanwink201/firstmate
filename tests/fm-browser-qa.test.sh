@@ -155,7 +155,10 @@ NODE
   newpage)
     url=${1:?}
     : > "$dir/newpage_started"
-    if [ -e "$dir/newpage_redirect" ]; then
+    if [ -e "$dir/root_login_redirect" ] && node -e 'process.exit(new URL(process.argv[1]).pathname === "/" ? 0 : 1)' "$url"; then
+      href="${url%/}/login"
+      title="Login | Typing.com Teacher Portal"
+    elif [ -e "$dir/newpage_redirect" ]; then
       IFS='	' read -r href title < "$dir/newpage_redirect"
     else
       href=$url
@@ -289,6 +292,9 @@ if (fs.existsSync(path.join(dir, 'login_fail'))) {
 if (!fs.existsSync(path.join(dir, 'login_keep_redirect'))) {
   fs.rmSync(path.join(dir, 'newpage_redirect'), { force: true });
 }
+if (fs.existsSync(path.join(dir, 'after_login_redirect'))) {
+  fs.renameSync(path.join(dir, 'after_login_redirect'), path.join(dir, 'newpage_redirect'));
+}
 console.log('logged in as fake@user');
 JS
   printf '%s\n' "$helper"
@@ -313,6 +319,203 @@ NODE
 assert_tmp_root_empty() {
   local dir=$1 label=$2
   [ -z "$(find "$dir" -mindepth 1 -maxdepth 1 -print -quit)" ] || fail "$label"
+}
+
+assert_url_evidence() {
+  local evidence=$1 ledger=$2 requested=$3 resolved=$4 active=$5 status=$6
+  node - "$evidence/identity.json" "$ledger" "$requested" "$resolved" "$active" "$status" <<'NODE' || fail "requested, resolved, and active URL evidence did not match"
+const fs = require('fs');
+const [identityFile, ledgerFile, requested, resolved, active, status] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
+if (identity.requested_url !== requested || identity.resolved_url !== resolved || identity.active_url !== active) process.exit(1);
+const rows = fs.readFileSync(ledgerFile, 'utf8').trim().split('\n').map(JSON.parse);
+if (rows.length !== 1 || rows[0].url !== requested || rows[0].resolved_url !== resolved || rows[0].status !== Number(status)) process.exit(1);
+NODE
+}
+
+test_teacher_roots_resolve_before_navigation() {
+  local dir fakebin requested resolved index=0 out
+  for requested in \
+    "https://teachers.typing.com" "https://teachers.typing.com/" \
+    "https://teachers.dev.typing.com" "https://teachers.dev.typing.com/" \
+    "https://teachers.feature.typing.com" "https://teachers.feature.typing.com/" \
+    "https://teachers-dev.typing.com" "https://teachers-dev.typing.com/" \
+    "https://teachers-feature-student-nav-order.typing.com" "https://teachers-feature-student-nav-order.typing.com/" \
+    "http://teachers.dev.typing.com:8080" "http://teachers.dev.typing.com:8080/" \
+    "https://teachers-written-prompt-rich-text-report.dev.typing.com"; do
+    index=$((index + 1))
+    dir="$TMP_ROOT/teacher-root-$index"
+    fakebin=$(make_fake_browser_tools "$dir")
+    resolved="${requested%/}/dashboard"
+
+    out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+      run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence") \
+      || fail "teacher root should resolve to dashboard: $out"
+
+    assert_grep "$resolved" "$dir/browser/newpage.log" "teacher root should navigate to dashboard"
+    assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "$requested" "$resolved" "$resolved" 0
+    assert_contains "$out" "teacher portal root resolved to /dashboard" "root resolution should be announced"
+    assert_grep "Requested URL: $requested" "$dir/evidence/report.md" "report should retain the original root"
+    assert_grep "Resolved URL: $resolved" "$dir/evidence/report.md" "report should name the resolved dashboard"
+    assert_grep "Active URL: $resolved" "$dir/evidence/report.md" "report should name the observed dashboard"
+    assert_grep "teacher portal root resolved to /dashboard" "$dir/evidence/report.md" "report should explain root resolution"
+  done
+  pass "fm-browser-qa.sh: production, dev, and feature roots resolve before navigation"
+}
+
+test_teacher_root_reuses_authenticated_dashboard() {
+  local dir fakebin helper requested resolved
+  dir="$TMP_ROOT/teacher-root-reuse"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  requested="https://teachers.typing.com/"
+  resolved="https://teachers.typing.com/dashboard"
+  write_page "$dir/browser" 1 "$resolved" "Dashboard | Typing.com Teacher Portal"
+
+  FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+    run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence" >/dev/null
+
+  assert_absent "$dir/browser/newpage.log" "authenticated dashboard should be reused"
+  assert_absent "$dir/browser/login-helper.log" "authenticated dashboard should not require login"
+  assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "$requested" "$resolved" "$resolved" 0
+  pass "fm-browser-qa.sh: bare teacher root reuses an authenticated dashboard"
+}
+
+test_teacher_root_startup_uses_dashboard() {
+  local dir fakebin requested resolved
+  dir="$TMP_ROOT/teacher-root-startup"
+  fakebin=$(make_fake_browser_tools "$dir")
+  requested="https://teachers.dev.typing.com"
+  resolved="$requested/dashboard"
+  write_page "$dir/browser" 1 "$resolved" "Dashboard"
+  : > "$dir/browser/browser_down"
+
+  FM_BROWSER_QA_PROFILE_DIR="$dir/profile" \
+    run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence" --start-if-needed >/dev/null
+
+  assert_grep "--new-window $resolved" "$dir/browser/open.log" "browser startup should use the resolved dashboard"
+  assert_absent "$dir/browser/newpage.log" "startup dashboard should already match the requested target"
+  pass "fm-browser-qa.sh: teacher root resolves before Chrome startup"
+}
+
+test_teacher_root_login_retries_only_dashboard() {
+  local dir fakebin helper requested resolved
+  dir="$TMP_ROOT/teacher-root-login"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  requested="https://teachers-written-prompt-rich-text-report.dev.typing.com/"
+  resolved="${requested%/}/dashboard"
+  printf '%s\t%s\n' "${requested%/}/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+  : > "$dir/browser/root_login_redirect"
+
+  FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+    run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence" >/dev/null
+
+  node - "$dir/browser/newpage.log" "$resolved" <<'NODE' || fail "initial and post-login navigation should both use dashboard"
+const fs = require('fs');
+const [file, resolved] = process.argv.slice(2);
+const urls = fs.readFileSync(file, 'utf8').trim().split('\n');
+if (urls.length !== 2 || urls.some((url) => url !== resolved)) process.exit(1);
+NODE
+  [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "root navigation should auto-login exactly once"
+  assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "$requested" "$resolved" "$resolved" 0
+  pass "fm-browser-qa.sh: teacher root retries dashboard after a single login"
+}
+
+test_explicit_and_non_teacher_urls_are_unchanged() {
+  local dir fakebin requested resolved index=0
+  for requested in \
+    "https://teachers.typing.com/dashboard" "https://teachers.dev.typing.com/classes/17/students/29" \
+    "https://teachers.feature.typing.com/reports/written-prompt" "https://teachers.typing.com/en/" \
+    "https://teachers.typing.com/?tab=classes" "https://teachers.typing.com/#classes" \
+    "https://teachers.typing.com/?" "https://teachers.typing.com/#" \
+    "https://teachers.typing.com?" "https://teachers.typing.com#" \
+    "https://example.test/" "https://students.typing.com/" \
+    "https://teachers.typing.com.example.test/" "https://teachers-other.example.test/" \
+    "ftp://teachers.typing.com/"; do
+    index=$((index + 1))
+    dir="$TMP_ROOT/unchanged-target-$index"
+    fakebin=$(make_fake_browser_tools "$dir")
+    # Browser-equivalent normalization adds only the missing root slash.
+    resolved=$("$REAL_NODE" -e 'process.stdout.write(new URL(process.argv[1]).href)' "$requested")
+    write_page "$dir/browser" 1 "$resolved" "Explicit target"
+
+    FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
+      run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence" >/dev/null
+
+    assert_absent "$dir/browser/newpage.log" "explicit and non-teacher routes should retain their target"
+    assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "$requested" "$resolved" "$resolved" 0
+  done
+  pass "fm-browser-qa.sh: explicit, query, fragment, localized, and non-teacher targets stay unchanged"
+}
+
+test_teacher_root_failures_retain_observed_urls() {
+  local dir fakebin helper requested resolved observed scenario out status
+  requested="https://teachers.dev.typing.com"
+  resolved="$requested/dashboard"
+  for scenario in persistent-login wrong-host after-login-wrong-host after-login-wrong-route after-login-sign-in after-login-cloudflare final-mismatch after-login-final-mismatch; do
+    dir="$TMP_ROOT/teacher-root-fail-$scenario"
+    fakebin=$(make_fake_browser_tools "$dir")
+    helper=$(make_fake_login_helper "$dir/browser")
+    case "$scenario" in
+      persistent-login)
+        observed="$requested/login"
+        printf '%s\t%s\n' "$observed" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+        : > "$dir/browser/login_keep_redirect"
+        ;;
+      wrong-host)
+        observed="https://teachers.typing.com/dashboard"
+        printf '%s\t%s\n' "$observed" "Dashboard" > "$dir/browser/newpage_redirect"
+        ;;
+      after-login-wrong-host|after-login-wrong-route|after-login-sign-in|after-login-cloudflare)
+        observed="https://teachers.typing.com/dashboard"
+        [ "$scenario" != after-login-wrong-route ] || observed="$requested/classes"
+        [ "$scenario" != after-login-sign-in ] || observed="$requested/login"
+        [ "$scenario" != after-login-cloudflare ] || observed="https://example.cloudflareaccess.com/cdn-cgi/access/login"
+        printf '%s\t%s\n' "$requested/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+        printf '%s\t%s\n' "$observed" "Sign In" > "$dir/browser/after_login_redirect"
+        ;;
+      final-mismatch|after-login-final-mismatch)
+        observed="https://example.test/wrong"
+        if [ "$scenario" = final-mismatch ]; then
+          write_page "$dir/browser" 1 "$resolved" "Dashboard"
+        else
+          printf '%s\t%s\n' "$requested/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
+        fi
+        : > "$dir/browser/mismatch_on_final"
+        ;;
+    esac
+
+    set +e
+    out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" FM_BROWSER_QA_LOGIN_HELPER="$helper" \
+      run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "dashboard identity mismatch should fail"
+    assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "$requested" "$resolved" "$observed" 1
+    assert_grep "Requested URL: $requested" "$dir/evidence/FAILED.md" "failure should retain the requested root"
+    assert_grep "Resolved URL: $resolved" "$dir/evidence/FAILED.md" "failure should name the expected dashboard"
+    assert_grep "Observed URL: $observed" "$dir/evidence/FAILED.md" "failure should retain the observed URL"
+    assert_contains "$out" "$requested" "failure diagnostics should include the original input"
+    assert_contains "$out" "$resolved" "failure diagnostics should include the resolved target"
+    assert_contains "$out" "$observed" "failure diagnostics should include the observed URL"
+    assert_absent "$dir/evidence/report.md" "failed identity should not produce a success report"
+    if [ "$scenario" = persistent-login ] || [[ "$scenario" = after-login-* ]]; then
+      if [ "$scenario" = after-login-cloudflare ]; then
+        assert_contains "$out" "authenticated browser session expired" "actual Cloudflare should still request human sign-in"
+      else
+        assert_contains "$out" "login helper returned success" "navigation failure should distinguish helper success"
+        [[ "$out" != *"authenticated browser session expired"* ]] || fail "successful helper should not imply expired credentials"
+      fi
+      [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] \
+        || fail "failed post-login navigation should not repeat login"
+    else
+      assert_absent "$dir/browser/login-helper.log" "non-login mismatch should not invoke credentials"
+    fi
+  done
+  pass "fm-browser-qa.sh: root failures retain observed URLs and strict dashboard identity"
 }
 
 test_requires_url_and_out() {
@@ -875,7 +1078,8 @@ test_exact_tab_selected_and_evidence_written() {
   assert_present "$evidence/snapshot.txt" "snapshot evidence missing"
   assert_present "$evidence/screenshot.png" "screenshot evidence missing"
   assert_present "$evidence/report.md" "report evidence missing"
-  assert_grep "Exact URL: https://example.test/qa" "$evidence/report.md" "report missing exact URL"
+  assert_grep "Requested URL: https://example.test/qa" "$evidence/report.md" "report missing requested URL"
+  assert_grep "Resolved URL: https://example.test/qa" "$evidence/report.md" "report missing resolved URL"
   pass "fm-browser-qa.sh: exact tab is selected and evidence is written"
 }
 
@@ -1392,6 +1596,12 @@ test_browser_unreachable_without_start_blocks
 test_start_if_needed_uses_persistent_visible_profile
 test_start_if_needed_refuses_existing_temporary_profile
 test_start_if_needed_allows_existing_operator_profile
+test_teacher_roots_resolve_before_navigation
+test_teacher_root_reuses_authenticated_dashboard
+test_teacher_root_startup_uses_dashboard
+test_teacher_root_login_retries_only_dashboard
+test_explicit_and_non_teacher_urls_are_unchanged
+test_teacher_root_failures_retain_observed_urls
 test_exact_tab_selected_and_evidence_written
 test_no_exact_tab_opens_new_page_then_verifies
 test_multiple_exact_tabs_refused
