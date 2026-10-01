@@ -397,6 +397,12 @@ test_ship_and_scout_briefs_include_browser_qa_rules() {
       "brief missing improvised browser stack prohibition"
     assert_grep "identity.json" "$brief" \
       "brief missing required browser evidence list"
+    assert_grep "bin/fm-browser-qa.sh --select-identity <evidence-dir>/identity.json --axi-session <session>" "$brief" \
+      "brief missing attached-session browser QA selection instruction"
+    assert_grep "identity's \`browser_url\`" "$brief" \
+      "brief missing attached-session browser endpoint instruction"
+    assert_grep "never reuse \`identity.json.page_id\` directly across sessions" "$brief" \
+      "brief missing browser page id scope warning"
     assert_grep "blocked:" "$brief" \
       "brief missing blocked browser QA failure rule"
   done
