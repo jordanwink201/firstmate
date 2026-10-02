@@ -8,11 +8,15 @@ set -u
 
 WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
 MARKER='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+# Serialized PR-body protocol captured from the failed compliance event.
+# PR/CI are still in progress and head_sha is the submitted pipeline head.
+ATTESTATION='<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"16ef7b08a4d00f61932c6d31a1cfcff1c058cf57","steps":[{"step":"intent","status":"completed"},{"step":"rebase","status":"skipped"},{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"},{"step":"lint","status":"completed"},{"step":"push","status":"completed"},{"step":"pr","status":"running"},{"step":"ci","status":"pending"}]} -->'
 
 extract_signature_script() {
   awk '
     /^        run: \|$/ { capture=1; next }
     capture && /^          / { sub(/^          /, ""); print; next }
+    capture && /^$/ { print; next }
     capture { exit }
   ' "$WORKFLOW"
 }
@@ -20,6 +24,7 @@ extract_signature_script() {
 signature_result() {
   local body=$1 script
   script=$(extract_signature_script)
+  [ -n "$script" ] || fail "workflow signature script is missing"
   PR_NUMBER=418 PR_AUTHOR=synthetic-fork-contributor PR_BODY="$body" bash -c "$script" >/dev/null 2>&1
 }
 
@@ -43,6 +48,46 @@ test_signature_sequence_at_fixed_head() {
   fi
   signature_result "Synthetic signed edit\n$MARKER" || fail "signed edited event must succeed"
   pass "fixed-head signed opened, unsigned edited, signed edited yields 0/1/0"
+}
+
+test_attestation_sequence_at_fixed_head() {
+  signature_result "Summary with no visible pipeline footer
+
+$ATTESTATION" || fail "current pipeline attestation must succeed while PR/CI are in progress"
+  if signature_result 'Summary after attestation removal'; then
+    fail "removing the attestation must fail"
+  fi
+  signature_result "$ATTESTATION" || fail "restoring the attestation must succeed"
+  signature_result "$ATTESTATION
+$MARKER" || fail "legacy and current signatures may coexist"
+  pass "current attestation accepted; removal rejected; restoration and legacy coexistence accepted"
+}
+
+test_invalid_attestations_fail() {
+  local payload body
+  for payload in \
+    'not-json' '{}' 'null' '[]' \
+    '{"head_sha":"short","steps":[{"step":"test","status":"completed"}]}' \
+    '{"head_sha":123,"steps":[{"step":"test","status":"completed"}]}' \
+    '{"head_sha":"16ef7b08a4d00f61932c6d31a1cfcff1c058cf57","steps":[]}' \
+    '{"head_sha":"16ef7b08a4d00f61932c6d31a1cfcff1c058cf57","steps":{}}' \
+    '{"head_sha":"16ef7b08a4d00f61932c6d31a1cfcff1c058cf57","steps":[null]}' \
+    '{"head_sha":"16ef7b08a4d00f61932c6d31a1cfcff1c058cf57","steps":[{"step":"test"}]}' \
+    '{"head_sha":"16ef7b08a4d00f61932c6d31a1cfcff1c058cf57","steps":[{"step":"","status":"completed"}]}' \
+    '{"head_sha":"16ef7b08a4d00f61932c6d31a1cfcff1c058cf57","steps":[{"step":"test","status":true}]}'
+  do
+    if signature_result "<!-- no-mistakes-pipeline-attestation:v1 $payload -->"; then
+      fail "malformed attestation accepted: $payload"
+    fi
+  done
+  for body in '' 'no-mistakes-pipeline-attestation:v1' \
+    "${ATTESTATION/v1/v2}" "${ATTESTATION/ -->/}" "${ATTESTATION/<!-- /}"
+  do
+    if signature_result "$body"; then
+      fail "missing, unsupported, or incomplete attestation accepted: $body"
+    fi
+  done
+  pass "missing, malformed, unsupported, and incomplete attestations are rejected"
 }
 
 test_event_identity_contract() {
@@ -91,6 +136,8 @@ test_security_and_signature_contract_is_preserved() {
 }
 
 test_signature_sequence_at_fixed_head
+test_attestation_sequence_at_fixed_head
+test_invalid_attestations_fail
 test_event_identity_contract
 test_run_names_are_ordered_and_unique
 test_security_and_signature_contract_is_preserved
