@@ -310,16 +310,16 @@ Skipped items, such as a destination checkout that does not yet gitignore the it
 `chrome-devtools-axi` being installed only proves the browser driver is available.
 Browser QA also needs an authenticated Chrome remote-debugging endpoint, defaulting to `http://127.0.0.1:9222`.
 Use `bin/fm-browser-qa.sh --url <exact-url> --out <evidence-dir>` for preview QA.
-Pass the exact intended QA URL: the helper matches only the browser-normalized form of that URL (for example `https://host` matches the `https://host/` Chrome reports) with no fuzzy matching, host aliases, or query rewriting.
-For URL-based QA, the helper makes a bounded curl request to the exact target URL before preparing the MCP transport or touching the browser.
+Prefer the actual class, student, or report route when known; a bare teacher host selects `/dashboard`, with exact URL handling owned by the script header and help.
+For URL-based QA, the helper makes a bounded curl request to the resolved target URL before preparing the MCP transport or touching the browser.
 Network failures, timeouts, and HTTP errors block as a likely torn-down feature host, while HTTP redirects proceed so Cloudflare Access can receive the authentication classification.
 The [script header](../bin/fm-browser-qa.sh) owns the shared curl timeout override and its accepted values.
-The helper attaches to that browser by default, opens the exact URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
+The helper attaches to that browser by default, opens the resolved URL if no exact tab exists, proves the selected tab's `location.href` and `document.title`, and writes `identity.json`, `snapshot.txt`, `screenshot.png`, and `report.md`.
 If the AXI page-inventory call fails with no stdout or stderr, the helper automatically attempts recovery through AXI while preserving the same page-identity checks.
 Failures that emit output do not use this recovery path; [the browser QA helper tests](../tests/fm-browser-qa.test.sh) cover both silent recovery and the healthy normal path.
 `identity.json.page_id` is scoped only to the helper's AXI bridge session and must not be reused in a separate AXI session.
 Before follow-up `chrome-devtools-axi` work in a separate AXI session, run `bin/fm-browser-qa.sh --select-identity <evidence-dir>/identity.json --axi-session <session> --out <evidence-dir>/attach`.
-The attached-session selector uses the identity's browser endpoint and browser-normalized URL, reprobes current tabs for the verified URL and title, selects the current session-local page ID, and verifies URL and title again after selection.
+The attached-session selector uses the identity's browser endpoint and browser-normalized active URL, reprobes current tabs for the verified URL and title, selects the current session-local page ID, and verifies URL and title again after selection.
 Before enumerating tabs, it verifies the named AXI session's running bridge and its connection settings; an existing session bound elsewhere or an unverifiable binding blocks attachment.
 It keeps that original bridge binding through discovery and selection, rejecting a replacement even at the same browser endpoint.
 Each page probe also checks the current inventory after evaluation to confirm that the discovered page ID remains selected at the evaluated URL, including when MCP reconnects within the same bridge.
@@ -329,7 +329,9 @@ The shared identity check also binds complete titles to Chrome's stable target I
 Before publishing attachment evidence, the helper rechecks competing URL matches against the final inventory and refuses unresolved candidate changes or ambiguity.
 It refuses zero matches, indistinguishable duplicate URL/title matches, browser endpoint mismatches, and page drift before returning success.
 The selector leaves the named AXI session selected for immediate follow-up commands; use that same `CHROME_DEVTOOLS_AXI_SESSION` and the identity's `browser_url`, then stop that caller-owned session when QA is complete.
-After navigation, an authoritative landing on Cloudflare Access or a sign-in page uses the authenticated-browser-session-expired blocker.
+Eligible teacher-portal app login redirects can trigger one automatic login attempt; see the [script header](../bin/fm-browser-qa.sh) for authentication and post-login verification behavior.
+The script header owns URL resolution and evidence fields; its help summarizes URL selection and attachment compatibility.
+Other authoritative sign-in landings retain the authenticated-browser-session-expired blocker.
 If neither that landing nor the tolerant broader tab scan finds the exact URL, the helper uses the exact-QA-URL blocker without letting an unrelated unprobeable tab replace that classification.
 It also writes best-effort `console.txt` and `network.txt`, recording capture failures as warnings.
 Until `chrome-devtools-axi` supports current MCP page-id routing, the helper uses a validated, cached compatible MCP transport without modifying the global AXI installation.
