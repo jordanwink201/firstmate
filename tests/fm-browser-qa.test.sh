@@ -125,6 +125,66 @@ exec /bin/ps "$@"
 SH
   chmod +x "$fakebin/ps"
 
+  # Run the production async probe with browser-like state rather than returning
+  # a pre-certified session boolean. The same context supports protocol tests.
+  cat > "$dir/teacher-context.mjs" <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+export async function evaluate(expr, href, title, dir, id = '1') {
+  const configFile = path.join(dir, 'teacher-session.json');
+  const cfg = fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, 'utf8')) : {};
+  const location = new URL(href);
+  const apiHost = location.hostname === 'teachers.typing.com' ? 'api.typing.com'
+    : location.hostname === 'teachers-dev.typing.com' ? 'api-dev.typing.com'
+      : /^teachers-[a-z0-9-]+\.typing\.com$/.test(location.hostname)
+        ? location.hostname.replace(/^teachers-/, 'teachers-api-') : '';
+  const visible = (value = '') => ({ textContent: typeof value === 'object' ? value?.text ?? '' : value,
+    // Hidden descendants can contribute textContent without rendered text.
+    // Preserve an explicitly empty innerText instead of falling back to them.
+    innerText: value && typeof value === 'object' && Object.hasOwn(value, 'innerText')
+      ? value.innerText : typeof value === 'object' ? value?.text ?? '' : value,
+    getClientRects: () => cfg.hidden || value?.hidden ? [] : [{}] });
+  const header = visible(cfg.header ?? 'Teacher');
+  const document = {
+    title,
+    querySelector: selector => cfg.shell === false || cfg.missing?.includes(selector) ? null
+      : selector === '#root-layout header' ? header : ['#root-layout', '#root-layout-main'].includes(selector) ? visible() : null,
+    querySelectorAll: selector => selector.split(',').every(part => ['[data-modal-panel] h2', '[role="dialog"] h2'].includes(part.trim()))
+      ? (cfg.dialogs ?? []).map(visible) : [],
+  };
+  const getComputedStyle = () => ({ visibility: cfg.cssHidden ? 'hidden' : 'visible', display: 'block' });
+  const localStorage = { getItem: key => key === 'teacher_jwt_token' ? (cfg.token === null ? null : cfg.token ?? 'TEST-JWT-DO-NOT-PERSIST')
+    : key === 'tc:language' ? cfg.language ?? null : null };
+  const window = { FTWGLOBALS_BE_API: Object.hasOwn(cfg, 'globals') ? cfg.globals
+    : { languages: { en: {}, 'en-gb': {}, es: {}, br: {} }, defaultLanguage: 'en' } };
+  const performance = { getEntriesByType: () => (cfg.resources ?? (apiHost ? [`https://${apiHost}/teachers/account/self`] : []))
+    .map(name => ({ name })) };
+  const setTimeout = cfg.timeout ? callback => globalThis.setTimeout(callback, 0) : globalThis.setTimeout;
+  const clearTimeout = globalThis.clearTimeout;
+  const fetch = async (url, options) => {
+    fs.appendFileSync(path.join(dir, 'teacher-fetch.jsonl'), JSON.stringify({ url, ...options, signal: undefined }) + '\n');
+    if (cfg.drift) {
+      location.href = cfg.drift;
+      fs.writeFileSync(path.join(dir, `page_${id}`), `${cfg.drift}\t${title}\n`);
+    }
+    if (cfg.fetchError) throw new Error('TEST-JWT-DO-NOT-PERSIST error detail');
+    if (cfg.timeout) {
+      return await new Promise((_, reject) => options.signal.addEventListener('abort', () => {
+        const error = new Error('timed out'); error.name = 'AbortError'; reject(error);
+      }));
+    }
+    return {
+      status: cfg.status ?? 200,
+      json: async () => {
+        if (cfg.malformed) throw new Error('bad JSON');
+        return cfg.body ?? { data: { teacher_id: 42, role: 'teacher', active: 1, name: '', classes: [], sso_token: 'SSO-DO-NOT-PERSIST' } };
+      },
+    };
+  };
+  return await eval(expr);
+}
+NODE
+
   "$REAL_NODE" - "$dir/axi-runtime" "$ROOT/tests/fixtures/fm-browser-qa-axi.mjs" <<'NODE'
 const fs = require('fs');
 const path = require('path');
@@ -267,11 +327,11 @@ case "$cmd" in
       printf '%s\t%s\n' "$href" "$title" > "$(page_file "$id")"
     fi
     expr=${1:?}
-    node - "$href" "$title" "$expr" <<'NODE'
-const [href, title, expr] = process.argv.slice(2);
-const location = { href };
-const document = { title };
-const value = eval(expr);
+    node --input-type=module - "$href" "$title" "$expr" "$dir" "$id" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [href, title, expr, dir, id] = process.argv.slice(2);
+const { evaluate } = await import(pathToFileURL(`${dir}/../teacher-context.mjs`));
+const value = await evaluate(expr, href, title, dir, id);
 // Match real chrome-devtools-axi output: the eval value is stringified twice.
 process.stdout.write(`result: ${JSON.stringify(JSON.stringify(value))}\n`);
 NODE
@@ -500,6 +560,9 @@ if (fs.existsSync(path.join(dir, 'after_login_redirect'))) {
 if (fs.existsSync(path.join(dir, 'login_mismatch_on_final'))) {
   fs.writeFileSync(path.join(dir, 'mismatch_on_final'), '');
 }
+if (fs.existsSync(path.join(dir, 'after-login-session.json'))) {
+  fs.copyFileSync(path.join(dir, 'after-login-session.json'), path.join(dir, 'teacher-session.json'));
+}
 console.log('logged in as fake@user');
 JS
   printf '%s\n' "$helper"
@@ -538,16 +601,280 @@ if (rows.length !== 1 || rows[0].url !== requested || rows[0].resolved_url !== r
 NODE
 }
 
+test_teacher_dashboard_unauthenticated_shell_blocks() {
+  local dir fakebin helper out status
+  dir="$TMP_ROOT/teacher-unauthenticated-shell"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  write_page "$dir/browser" 1 "https://teachers-feature-student-nav-order.typing.com/dashboard" "Dashboard | Typing.com Teacher Portal"
+  printf '%s\n' '{"status":401,"header":"shared.roles.undefined"}' > "$dir/browser/teacher-session.json"
+  mkdir -p "$dir/evidence"
+  printf '%s\n' '# Previous successful report' > "$dir/evidence/report.md"
+  set +e
+  out=$(FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
+    --url "https://teachers-feature-student-nav-order.typing.com" --out "$dir/evidence")
+  status=$?
+  set -e
+  expect_code 1 "$status" "normal dashboard with unauthenticated API and unresolved role must block"
+  assert_contains "$out" "login helper returned success" "persistent 401 must distinguish helper success"
+  assert_grep "teacher-session" "$dir/evidence/FAILED.md" "failure should identify the session stage"
+  assert_absent "$dir/evidence/report.md" "failure must invalidate a previous report"
+  [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] || fail "unauthenticated dashboard should attempt login only once"
+  pass "fm-browser-qa.sh: unauthenticated dashboard shell cannot produce success"
+}
+
+test_teacher_session_protocol_and_usability() {
+  local dir
+  dir="$TMP_ROOT/teacher-session-protocol"
+  make_fake_browser_tools "$dir" >/dev/null
+  mkdir -p "$dir/browser"
+  node --input-type=module - "$ROOT/bin/fm-browser-qa.sh" "$dir" <<'NODE' || fail "actual async teacher-session protocol checks failed"
+import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [wrapper, dir] = process.argv.slice(2);
+const source = fs.readFileSync(wrapper, 'utf8');
+const fn = source.match(/cat <<'TEACHER_SESSION_JS'\n([\s\S]*?)\nTEACHER_SESSION_JS/)[1];
+const { evaluate } = await import(pathToFileURL(`${dir}/teacher-context.mjs`));
+const good = { teacher_id: 42, role: 'teacher', active: 1, name: '', classes: [], sso_token: 'SSO-DO-NOT-PERSIST' };
+const base = 'https://teachers-feature-student-nav-order.typing.com/dashboard';
+let checked = 0;
+async function check(cfg, status, reason, href = base, expectFetch = true, language = 'en') {
+  fs.writeFileSync(`${dir}/browser/teacher-session.json`, JSON.stringify(cfg));
+  fs.rmSync(`${dir}/browser/teacher-fetch.jsonl`, { force: true });
+  const result = await evaluate(`(${fn})()`, href, 'Dashboard', `${dir}/browser`);
+  const proof = result.teacher_session;
+  if (proof.status !== status || proof.reason !== reason) throw new Error(`${JSON.stringify(cfg)}: ${JSON.stringify(proof)}`);
+  if (/TEST-JWT|SSO-DO|sso_token|Authorization|classes|name/.test(JSON.stringify(proof))) throw new Error('sensitive or unnecessary data in proof');
+  const log = `${dir}/browser/teacher-fetch.jsonl`;
+  const rows = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse) : [];
+  if (rows.length !== Number(expectFetch)) throw new Error(`unexpected request count: ${rows.length}`);
+  if (expectFetch) {
+    const request = rows[0];
+    const host = new URL(href).hostname;
+    const api = host === 'teachers.typing.com' ? 'api.typing.com' : host === 'teachers-dev.typing.com' ? 'api-dev.typing.com'
+      : host.replace(/^teachers-/, 'teachers-api-');
+    if (request.url !== `https://${api}/teachers/account/self` || request.cache !== 'no-store' || request.credentials !== 'include' || request.redirect !== 'error' || request.method !== 'GET') throw new Error('request contract drifted');
+    if (request.headers.Authorization !== 'Bearer TEST-JWT-DO-NOT-PERSIST' || request.headers.Accept !== 'application/json' || request.headers['Content-Type'] !== 'application/json' || request.headers['x-app-site'] !== 'typing' || request.headers['x-language'] !== language) throw new Error('portal headers drifted');
+  }
+  checked++;
+}
+
+await check({}, 'authenticated', 'verified');
+await check({ body: { data: good }, header: '', dialogs: ['Welcome to your empty account'] }, 'authenticated', 'verified', 'https://teachers.typing.com/dashboard');
+for (const role of ['teacher', 'school_admin', 'district_admin', 'billing_admin']) {
+  await check({ body: { data: { ...good, role } } }, 'authenticated', 'verified', 'https://teachers-dev.typing.com/dashboard');
+}
+await check({ language: 'es' }, 'authenticated', 'verified', base, true, 'es');
+await check({ language: 'br' }, 'authenticated', 'verified', base, true, 'br');
+await check({}, 'authenticated', 'verified', base.replace('/dashboard', '/en-gb/dashboard'), true, 'en-gb');
+await check({ language: 'unknown' }, 'authenticated', 'verified', base.replace('/dashboard', '/es/dashboard'), true, 'es');
+await check({ globals: { languages: { en: {}, es: {} }, defaultLanguage: 'es' } }, 'authenticated', 'verified', base, true, 'es');
+await check({ globals: null }, 'authenticated', 'verified');
+await check({ status: 401, header: 'shared.roles.undefined' }, 'unauthenticated', 'http_401');
+await check({ token: null }, 'unauthenticated', 'missing_token', base, false);
+for (const teacher_id of [0, -1, '42', 1.2, null]) await check({ body: { data: { ...good, teacher_id } } }, 'unusable', 'invalid_principal');
+await check({ body: { data: { ...good, role: 'student' } } }, 'unusable', 'invalid_role');
+await check({ body: { data: { ...good, active: 0 } } }, 'unusable', 'inactive_account');
+await check({ body: { data: { ...good, active: true } } }, 'unverified', 'unexpected_active_schema');
+for (const body of [{}, { data: [] }, { data: null }]) await check({ body }, 'unverified', 'unexpected_account_schema');
+for (const header of ['shared.roles.undefined', 'shared.roles.null']) await check({ header }, 'unusable', 'unresolved_header_role');
+for (const dialog of ['Logged Out', ' Desconectado ', 'app.logged_out_notice_title']) await check({ dialogs: [dialog] }, 'unusable', 'logged_out_dialog');
+for (const text of ['shared.roles.undefined', 'shared.roles.null']) {
+  await check({ header: { text: `Teacher ${text}`, innerText: 'Teacher' } }, 'authenticated', 'verified');
+}
+await check({ header: { text: 'shared.roles.undefined', innerText: '' } }, 'authenticated', 'verified');
+for (const text of ['Logged Out', ' Desconectado ', 'app.logged_out_notice_title']) {
+  await check({ dialogs: [{ text, innerText: '' }] }, 'authenticated', 'verified');
+}
+await check({ shell: false }, 'unverified', 'shell_not_ready');
+await check({ hidden: true }, 'unverified', 'shell_not_ready');
+for (const selector of ['#root-layout', '#root-layout-main', '#root-layout header']) await check({ missing: [selector] }, 'unverified', 'shell_not_ready');
+await check({ cssHidden: true }, 'unverified', 'shell_not_ready');
+await check({ dialogs: [{ text: 'Logged Out', hidden: true }] }, 'authenticated', 'verified');
+await check({ resources: [] }, 'unverified', 'missing_api_configuration', base, false);
+for (const resource of ['https://evil.test/teachers/account/self', 'http://teachers-api-feature-student-nav-order.typing.com/teachers/globals',
+  'https://secret@teachers-api-feature-student-nav-order.typing.com/teachers/globals', 'https://teachers-api-feature-student-nav-order.typing.com:8443/teachers/account/self']) {
+  await check({ resources: [resource] }, 'unverified', 'conflicting_api_configuration', base, false);
+}
+await check({ resources: ['https://teachers-api-feature-student-nav-order.typing.com/teachers/globals', 'https://api-dev.typing.com/teachers/account/self'] }, 'unverified', 'conflicting_api_configuration', base, false);
+await check({ resources: ['https://teachers-api-feature-student-nav-order.typing.com:443/teachers/globals'] }, 'authenticated', 'verified');
+await check({}, 'unverified', 'unsupported_api_configuration', 'https://teachers.dev.typing.com/dashboard', false);
+await check({}, 'unverified', 'unsupported_api_configuration', 'http://teachers-dev.typing.com/dashboard', false);
+await check({ timeout: true }, 'unverified', 'request_timeout');
+await check({ fetchError: true }, 'unverified', 'request_or_json_error');
+await check({ malformed: true }, 'unverified', 'request_or_json_error');
+for (const status of [403, 500]) await check({ status }, 'unverified', 'unexpected_http_status');
+await check({ drift: 'https://teachers-feature-student-nav-order.typing.com/classes' }, 'unverified', 'page_changed');
+console.log(`teacher session executable protocol cases: ${checked}`);
+NODE
+  pass "fm-browser-qa.sh: fresh API, language, principal, active usability, DOM, timeout and secret boundaries"
+}
+
+test_teacher_session_protected_route_eligibility() {
+  node - "$ROOT/bin/fm-browser-qa.sh" <<'NODE' || fail "teacher session route eligibility drifted"
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const hostCheck = source.match(/target_supports_auto_login\(\) \{\n  node[^\n]*\n([\s\S]*?)\nNODE/)[1];
+const routeCheck = source.match(/target_requires_teacher_session\(\) \{[\s\S]*?node[^\n]*\n([\s\S]*?)\nNODE/)[1];
+const eligible = raw => [hostCheck, routeCheck].every(script => {
+  let code;
+  vm.runInNewContext(script, { URL, process: { argv: ['node', '-', raw], exit: value => { code = value; } } });
+  return code === 0;
+});
+const base = 'https://teachers-dev.typing.com';
+for (const family of ['dashboard', 'account', 'settings', 'orders', 'resources', 'reports', 'schools', 'school', 'teachers', 'classes', 'pending-joins', 'students', 'live-activity', 'assignments', 'curriculum']) {
+  for (const suffix of [`/${family}`, `/${family}/17`, `/es/${family}/17`]) {
+    if (!eligible(base + suffix)) throw new Error(`missing protected route ${suffix}`);
+  }
+}
+for (const locale of ['en', 'en-gb', 'es', 'br']) if (!eligible(`${base}/${locale}/dashboard`)) throw new Error(`missing locale ${locale}`);
+for (const suffix of ['/login', '/logout', '/join', '/invited', '/password/reset', '/signup', '/signup/welcome', '/oauth', '/oauth/google/callback', '/demo', '/addon', '/es/signup', '/dashboard-extra', '/missing/dashboard']) {
+  if (eligible(base + suffix)) throw new Error(`public/unknown target requires session: ${suffix}`);
+}
+for (const raw of ['ftp://teachers.typing.com/dashboard', 'https://example.test/dashboard', 'https://teachers.typing.com.evil.test/dashboard']) {
+  if (eligible(raw)) throw new Error(`generic target requires session: ${raw}`);
+}
+if (!eligible('http://teachers.dev.typing.com/dashboard')) throw new Error('unsupported protected teacher should still require proof and fail unverified');
+NODE
+  pass "fm-browser-qa.sh: session eligibility covers protected families and preserves public/generic targets"
+}
+
+test_teacher_public_target_skips_session_and_login() {
+  local dir fakebin helper
+  dir="$TMP_ROOT/teacher-public-target"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  write_page "$dir/browser" 1 "https://teachers-dev.typing.com/signup/welcome" "Welcome"
+  printf '%s\n' '{"status":401,"header":"shared.roles.undefined"}' > "$dir/browser/teacher-session.json"
+  FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
+    --url "https://teachers-dev.typing.com/signup/welcome" --out "$dir/evidence" >/dev/null
+  assert_absent "$dir/browser/teacher-fetch.jsonl" "public target should not request session API"
+  assert_absent "$dir/browser/login-helper.log" "public target should not submit login"
+  assert_absent "$dir/evidence/teacher-session.json" "public evidence should not certify a teacher session"
+  assert_grep '"teacher_session_required": false' "$dir/evidence/identity.json" "public identity should retain generic inspection contract"
+  pass "fm-browser-qa.sh: public teacher inspection does not trigger authentication"
+}
+
+test_teacher_session_login_recovery_and_sanitized_evidence() {
+  local dir fakebin helper
+  dir="$TMP_ROOT/teacher-session-recovery"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  write_page "$dir/browser" 1 "https://teachers-dev.typing.com/dashboard" "Dashboard"
+  printf '%s\n' '{"status":401,"header":"shared.roles.undefined"}' > "$dir/browser/teacher-session.json"
+  printf '%s\n' '{"body":{"data":{"teacher_id":42,"role":"teacher","active":1,"name":"","classes":[],"sso_token":"SSO-DO-NOT-PERSIST"}},"dialogs":["Welcome"]}' > "$dir/browser/after-login-session.json"
+
+  FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
+    --url "https://teachers-dev.typing.com" --out "$dir/evidence" > "$dir/out"
+
+  [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] || fail "session recovery should log in once"
+  assert_grep "https://teachers-dev.typing.com/dashboard" "$dir/browser/newpage.log" "recovery must navigate to resolved target"
+  node - "$dir/evidence" "$dir/browser/teacher-fetch.jsonl" <<'NODE' || fail "sanitized session receipt should prove a fresh empty-account recovery"
+const fs = require('fs');
+const [dir, fetchFile] = process.argv.slice(2);
+const receipt = JSON.parse(fs.readFileSync(`${dir}/teacher-session.json`, 'utf8'));
+const identity = JSON.parse(fs.readFileSync(`${dir}/identity.json`, 'utf8'));
+if (receipt.schema !== 1 || receipt.status !== 'authenticated' || !receipt.active || !receipt.shell_ready || !receipt.principal_valid || !receipt.role_valid || receipt.http_status !== 200) process.exit(1);
+if (receipt.active_url !== identity.active_url || receipt.resolved_url !== identity.resolved_url || receipt.requested_url !== identity.requested_url || receipt.page_id !== identity.page_id || !receipt.checked_at) process.exit(1);
+if (fs.readFileSync(fetchFile, 'utf8').trim().split('\n').length !== 2) process.exit(1);
+for (const file of fs.readdirSync(dir)) if (/TEST-JWT|SSO-DO|sso_token|Authorization/.test(fs.readFileSync(`${dir}/${file}`, 'utf8'))) process.exit(1);
+NODE
+  assert_grep "Teacher session: authenticated" "$dir/evidence/report.md" "report must include verified session"
+  assert_absent "$dir/evidence/FAILED.md" "fresh verified recovery should clear old failure"
+  pass "fm-browser-qa.sh: one session login recovers a usable empty account with sanitized evidence"
+}
+
+test_teacher_session_unverified_and_async_drift_block() {
+  local dir fakebin helper scenario out status requested
+  for scenario in config timeout drift selection-drift unsupported helper-unusable; do
+    dir="$TMP_ROOT/teacher-session-block-$scenario"
+    fakebin=$(make_fake_browser_tools "$dir")
+    helper=$(make_fake_login_helper "$dir/browser")
+    requested="https://teachers-dev.typing.com"
+    [ "$scenario" != unsupported ] || requested="https://teachers.dev.typing.com"
+    write_page "$dir/browser" 1 "$requested/dashboard" "Dashboard"
+    case "$scenario" in
+      config) printf '%s\n' '{"resources":["https://evil.test/teachers/account/self"]}' > "$dir/browser/teacher-session.json" ;;
+      timeout) printf '%s\n' '{"timeout":true}' > "$dir/browser/teacher-session.json" ;;
+      drift) printf '%s\n' '{"drift":"https://teachers-dev.typing.com/classes"}' > "$dir/browser/teacher-session.json" ;;
+      selection-drift)
+        write_page "$dir/browser" 2 "https://example.test/other" "Other"
+        printf '1 3 2\n' > "$dir/browser/switch_selection_after_eval"
+        : > "$dir/browser/copy_identity_on_selection_switch"
+        ;;
+      unsupported) printf '%s\n' '{}' > "$dir/browser/teacher-session.json" ;;
+      helper-unusable)
+        printf '%s\n' '{"status":401}' > "$dir/browser/teacher-session.json"
+        printf '%s\n' '{"header":"shared.roles.undefined"}' > "$dir/browser/after-login-session.json"
+        ;;
+    esac
+    set +e
+    out=$(FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence")
+    status=$?
+    set -e
+    expect_code 1 "$status" "unverified or drifting teacher session must block"
+    if [ "$scenario" = helper-unusable ]; then
+      assert_contains "$out" "login helper returned success" "successful login must not certify an unusable shell"
+      assert_contains "$out" "unresolved_header_role" "unusable shell should be distinguished from failed backend authentication"
+      [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] || fail "unusable post-login session must not repeat login"
+    else
+      assert_absent "$dir/browser/login-helper.log" "unknown/readiness/identity failure must not attempt credentials"
+    fi
+    assert_absent "$dir/evidence/report.md" "unverified session must not produce a report"
+    [[ "$out" != *"authenticated browser session expired"* ]] || fail "unknown proof must not diagnose expired credentials"
+    assert_grep "Stage: teacher-session" "$dir/evidence/FAILED.md" "async proof should bind failure to session stage"
+    if [ "$scenario" = config ] || [ "$scenario" = unsupported ]; then
+      assert_absent "$dir/browser/teacher-fetch.jsonl" "wrong backend must not receive token"
+    elif [ "$scenario" = drift ]; then
+      assert_contains "$out" "URL mismatch" "drift during await must fail exact identity"
+      assert_grep '"active_url": "https://teachers-dev.typing.com/classes"' "$dir/evidence/identity.json" "drift should preserve observed URL"
+    fi
+  done
+  pass "fm-browser-qa.sh: unverified backend/timeout and async page drift fail closed without login"
+}
+
 test_teacher_roots_resolve_before_navigation() {
   local dir fakebin requested resolved index=0 out
+  mkdir -p "$TMP_ROOT"
+  node - "$ROOT/bin/fm-browser-qa.sh" "$TMP_ROOT/root-resolver.sh" <<'NODE' || fail "actual root resolver behavior drifted"
+const fs = require('fs');
+const { spawnSync } = require('child_process');
+const [wrapper, driver] = process.argv.slice(2);
+const source = fs.readFileSync(wrapper, 'utf8');
+const functions = ['normalize_url', 'target_supports_auto_login', 'resolve_target_url'].map(name => {
+  const match = source.match(new RegExp(`^${name}\\(\\) \{\n[\\s\\S]*?^\}\n(?=\n)`, 'm'));
+  if (!match) throw new Error(`missing actual resolver function ${name}`);
+  return match[0];
+}).join('\n');
+fs.writeFileSync(driver, `#!/usr/bin/env bash\nset -eu\n${functions}\nfor requested in "$@"; do\n  TARGET_URL=$requested\n  ROOT_RESOLVED=0\n  resolve_target_url\n  printf '%s\\t%s\\t%s\\n' "$TARGET_URL" "$RESOLVED_URL" "$ROOT_RESOLVED"\ndone\n`);
+const roots = [
+  'https://teachers.typing.com', 'https://teachers.typing.com/',
+  'https://teachers.dev.typing.com', 'https://teachers.dev.typing.com/',
+  'https://teachers.feature.typing.com', 'https://teachers.feature.typing.com/',
+  'https://teachers-dev.typing.com', 'https://teachers-dev.typing.com/',
+  'https://teachers-feature-student-nav-order.typing.com', 'https://teachers-feature-student-nav-order.typing.com/',
+  'http://teachers.dev.typing.com:8080', 'http://teachers.dev.typing.com:8080/',
+  'https://teachers-written-prompt-rich-text-report.dev.typing.com',
+];
+const unchanged = ['https://teachers.typing.com/dashboard', 'https://teachers.typing.com/en/',
+  'https://teachers.typing.com/?tab=classes', 'https://teachers.typing.com/#classes',
+  'https://teachers.typing.com/?', 'https://teachers.typing.com/#', 'https://teachers.typing.com?', 'https://teachers.typing.com#',
+  'https://example.test/', 'https://students.typing.com/', 'https://teachers.typing.com.example.test/', 'ftp://teachers.typing.com/'];
+const result = spawnSync('bash', [driver, ...roots, ...unchanged], { encoding: 'utf8' });
+if (result.status !== 0) throw new Error(result.stderr);
+const rows = result.stdout.trim().split('\n').map(row => row.split('\t'));
+if (rows.length !== roots.length + unchanged.length) throw new Error('resolver omitted a case');
+for (const [requested, resolved, changed] of rows) {
+  const expected = roots.includes(requested) ? `${requested.replace(/\/$/, '')}/dashboard` : new URL(requested).href;
+  if (resolved !== expected || changed !== String(Number(roots.includes(requested)))) throw new Error(`unexpected resolution ${requested}: ${resolved}`);
+}
+console.log(`executable root resolver cases: ${rows.length}`);
+NODE
   for requested in \
-    "https://teachers.typing.com" "https://teachers.typing.com/" \
-    "https://teachers.dev.typing.com" "https://teachers.dev.typing.com/" \
-    "https://teachers.feature.typing.com" "https://teachers.feature.typing.com/" \
-    "https://teachers-dev.typing.com" "https://teachers-dev.typing.com/" \
-    "https://teachers-feature-student-nav-order.typing.com" "https://teachers-feature-student-nav-order.typing.com/" \
-    "http://teachers.dev.typing.com:8080" "http://teachers.dev.typing.com:8080/" \
-    "https://teachers-written-prompt-rich-text-report.dev.typing.com"; do
+    "https://teachers.typing.com" \
+    "https://teachers-dev.typing.com/" \
+    "https://teachers-feature-student-nav-order.typing.com"; do
     index=$((index + 1))
     dir="$TMP_ROOT/teacher-root-$index"
     fakebin=$(make_fake_browser_tools "$dir")
@@ -555,7 +882,7 @@ test_teacher_roots_resolve_before_navigation() {
 
     out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" \
       run_qa "$fakebin" "$dir/browser" --url "$requested" --out "$dir/evidence") \
-      || fail "teacher root should resolve to dashboard: $out"
+      || fail "teacher root should resolve to a verified dashboard: $out"
 
     assert_grep "$resolved" "$dir/browser/newpage.log" "teacher root should navigate to dashboard"
     assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "$requested" "$resolved" "$resolved" 0
@@ -590,7 +917,7 @@ test_teacher_root_startup_uses_dashboard() {
   local dir fakebin requested resolved
   dir="$TMP_ROOT/teacher-root-startup"
   fakebin=$(make_fake_browser_tools "$dir")
-  requested="https://teachers.dev.typing.com"
+  requested="https://teachers-dev.typing.com"
   resolved="$requested/dashboard"
   write_page "$dir/browser" 1 "$resolved" "Dashboard"
   : > "$dir/browser/browser_down"
@@ -608,7 +935,7 @@ test_teacher_root_login_retries_only_dashboard() {
   dir="$TMP_ROOT/teacher-root-login"
   fakebin=$(make_fake_browser_tools "$dir")
   helper=$(make_fake_login_helper "$dir/browser")
-  requested="https://teachers-written-prompt-rich-text-report.dev.typing.com/"
+  requested="https://teachers-written-prompt-rich-text-report.typing.com/"
   resolved="${requested%/}/dashboard"
   printf '%s\t%s\n' "${requested%/}/login" "Login | Typing.com Teacher Portal" > "$dir/browser/newpage_redirect"
   : > "$dir/browser/root_login_redirect"
@@ -631,8 +958,8 @@ NODE
 test_explicit_and_non_teacher_urls_are_unchanged() {
   local dir fakebin requested resolved index=0
   for requested in \
-    "https://teachers.typing.com/dashboard" "https://teachers.dev.typing.com/classes/17/students/29" \
-    "https://teachers.feature.typing.com/reports/written-prompt" "https://teachers.typing.com/en/" \
+    "https://teachers.typing.com/dashboard" "https://teachers-dev.typing.com/classes/17/students/29" \
+    "https://teachers-feature.typing.com/reports/written-prompt" "https://teachers.typing.com/en/" \
     "https://teachers.typing.com/?tab=classes" "https://teachers.typing.com/#classes" \
     "https://teachers.typing.com/?" "https://teachers.typing.com/#" \
     "https://teachers.typing.com?" "https://teachers.typing.com#" \
@@ -3149,6 +3476,12 @@ if [ "$#" -gt 0 ]; then
 fi
 
 test_requires_url_and_out
+test_teacher_dashboard_unauthenticated_shell_blocks
+test_teacher_session_protocol_and_usability
+test_teacher_session_protected_route_eligibility
+test_teacher_public_target_skips_session_and_login
+test_teacher_session_login_recovery_and_sanitized_evidence
+test_teacher_session_unverified_and_async_drift_block
 test_missing_chrome_devtools_axi_blocks
 test_missing_node_blocks_and_records_ledger
 test_pinned_mcp_compatibility_cache_is_installed_once
