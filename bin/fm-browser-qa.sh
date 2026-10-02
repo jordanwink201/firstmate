@@ -20,18 +20,30 @@
 # settings, orders, resources, reports, schools, school, teachers, classes,
 # pending-joins, students, live-activity, assignments, and curriculum. Public,
 # unknown, nonteacher, non-HTTP(S), and attachment targets retain page inspection.
-# Bootstrap account/self or globals resource URLs must prove the HTTPS API host:
+# Proof requires an HTTPS page and resource entries with the exact pathname
+# /teachers/account/self or /teachers/globals to establish the HTTPS API host:
 # teachers -> api, teachers-dev -> api-dev, teachers-<slug> -> teachers-api-<slug>,
-# all under typing.com with no userinfo or nondefault port. Unsupported/missing
-# or conflicting configuration blocks before transmitting the stored bearer token.
-# The no-cache, five-second request uses the portal language and requires HTTP200,
-# a positive numeric teacher_id, a known teacher/admin role, and integer active=1.
-# Visible layout/main/header, unresolved header roles, and logged-out dialogs
-# determine UI readiness; empty accounts and unrelated dialogs remain valid.
+# all under typing.com; every matching API URL must have no userinfo or nondefault
+# port. Unsupported/missing or conflicting configuration blocks before token use.
+# localStorage teacher_jwt_token stays in page context for the fresh five-second
+# GET /teachers/account/self, with cache no-store, credentials include, redirects
+# rejected, JSON Accept/Content-Type, x-app-site typing, and bearer authorization.
+# x-language uses tc:language then the first URL segment if listed in
+# FTWGLOBALS_BE_API.languages, otherwise FTWGLOBALS_BE_API.defaultLanguage or en.
+# HTTP200 JSON data must have a positive safe-integer teacher_id, role teacher,
+# school_admin, district_admin, or billing_admin, and integer active=1.
+# Integer active=0 is authenticated-but-inactive (unusable), not a login trigger.
+# The mounted shell requires visible #root-layout, #root-layout-main, and
+# #root-layout header, with no shared.roles.undefined/null in that header and no
+# visible modal h2 exactly Logged Out, Desconectado, or app.logged_out_notice_title
+# (case-insensitive, whitespace-normalized). Empty accounts, blank names, and
+# unrelated dialogs remain valid; no populated classes/students are required.
 # teacher-session.json publishes only allowlisted proof metadata, never tokens or
 # raw account data. Unknown, timeout, and readiness failures remain unverified.
-# At most one teaching-verify login attempt follows a same-host /login landing or
-# explicit unauthenticated self proof (FM_BROWSER_QA_LOGIN_HELPER overrides it).
+# At most one teaching-verify login attempt follows a same-host /login or /login/*
+# landing, HTTP401 self response, or missing token on a protected target
+# (FM_BROWSER_QA_LOGIN_HELPER overrides it); then resolved-route navigation,
+# exact page identity, and fresh session proof must all pass again.
 # Helper success does not prove navigation success: a remaining Sign In page
 # or a different final URL blocks verification without diagnosing expired
 # credentials. Cloudflare Access retains its human-sign-in authentication blocker.
@@ -49,7 +61,7 @@
 # not completion; check the run outcome and FAILED.md before accepting evidence.
 # Current URL-QA identities mark teacher_session_required; required success also
 # has schema-1 teacher-session.json with matching page_id, requested/resolved/active
-# URLs and checked_at, status authenticated/reason verified, HTTP200 and true
+# URLs, a checked_at timestamp, status authenticated/reason verified, HTTP200 and true
 # principal_valid, role_valid, active, shell_ready, plus the trusted api_origin.
 # The run ledger keeps url plus resolved_url. Reports and failure diagnostics
 # distinguish requested, resolved, and observed URLs and announce root resolution.
