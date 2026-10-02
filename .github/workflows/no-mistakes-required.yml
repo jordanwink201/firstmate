@@ -38,46 +38,12 @@ jobs:
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
             exit 0
           fi
-          # Current no-mistakes emits a structured comment instead of the footer.
-          # This checks provenance shape, not pipeline completion or current HEAD:
-          # the PR/CI steps can still be running and fixes can advance the head.
-          if python3 - <<'PY'
-          import json
-          import os
-          import re
-          import sys
-
-          body = os.environ.get("PR_BODY", "")
-          for payload in re.findall(r"<!-- no-mistakes-pipeline-attestation:v1 (.*?) -->", body, re.DOTALL):
-              try:
-                  attestation = json.loads(payload)
-              except ValueError:
-                  continue
-              if not isinstance(attestation, dict):
-                  continue
-              head = attestation.get("head_sha")
-              steps = attestation.get("steps")
-              if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head):
-                  continue
-              if isinstance(steps, list) and steps and all(
-                  isinstance(step, dict) and all(
-                      isinstance(step.get(key), str) and step[key].strip()
-                      for key in ("step", "status")
-                  ) for step in steps
-              ):
-                  sys.exit(0)
-          sys.exit(1)
-          PY
-          then
-            echo "Found no-mistakes attestation in PR #${PR_NUMBER} body."
-            exit 0
-          fi
           {
             echo "::error::This PR was not raised through no-mistakes."
             echo
             echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline writes a no-mistakes-pipeline-attestation:v1 JSON comment"
-            echo "into the PR body. Older versions write a '## Pipeline' section containing:"
+            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
+            echo "deterministic '## Pipeline' section into the PR body containing:"
             echo
             echo "    $marker"
             echo
