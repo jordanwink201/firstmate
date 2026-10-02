@@ -34,9 +34,11 @@
 # school_admin, district_admin, or billing_admin, and integer active=1.
 # Integer active=0 is authenticated-but-inactive (unusable), not a login trigger.
 # The mounted shell requires visible #root-layout, #root-layout-main, and
-# #root-layout header, with no shared.roles.undefined/null in that header and no
-# visible modal h2 exactly Logged Out, Desconectado, or app.logged_out_notice_title
-# (case-insensitive, whitespace-normalized). Empty accounts, blank names, and
+# #root-layout header, with no shared.roles.undefined/null in its rendered text
+# and no visible modal h2 with rendered text exactly Logged Out, Desconectado, or
+# app.logged_out_notice_title (case-insensitive, whitespace-normalized).
+# These text checks use innerText only, even when empty, without a textContent
+# fallback that would include hidden descendants. Empty accounts, blank names, and
 # unrelated dialogs remain valid; no populated classes/students are required.
 # teacher-session.json publishes only allowlisted proof metadata, never tokens or
 # raw account data. Unknown, timeout, and readiness failures remain unverified.
