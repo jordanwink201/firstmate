@@ -139,6 +139,10 @@ export async function evaluate(expr, href, title, dir, id = '1') {
       : /^teachers-[a-z0-9-]+\.typing\.com$/.test(location.hostname)
         ? location.hostname.replace(/^teachers-/, 'teachers-api-') : '';
   const visible = (value = '') => ({ textContent: typeof value === 'object' ? value?.text ?? '' : value,
+    // Hidden descendants can contribute textContent without rendered text.
+    // Preserve an explicitly empty innerText instead of falling back to them.
+    innerText: value && typeof value === 'object' && Object.hasOwn(value, 'innerText')
+      ? value.innerText : typeof value === 'object' ? value?.text ?? '' : value,
     getClientRects: () => cfg.hidden || value?.hidden ? [] : [{}] });
   const header = visible(cfg.header ?? 'Teacher');
   const document = {
@@ -675,6 +679,13 @@ await check({ body: { data: { ...good, active: true } } }, 'unverified', 'unexpe
 for (const body of [{}, { data: [] }, { data: null }]) await check({ body }, 'unverified', 'unexpected_account_schema');
 for (const header of ['shared.roles.undefined', 'shared.roles.null']) await check({ header }, 'unusable', 'unresolved_header_role');
 for (const dialog of ['Logged Out', ' Desconectado ', 'app.logged_out_notice_title']) await check({ dialogs: [dialog] }, 'unusable', 'logged_out_dialog');
+for (const text of ['shared.roles.undefined', 'shared.roles.null']) {
+  await check({ header: { text: `Teacher ${text}`, innerText: 'Teacher' } }, 'authenticated', 'verified');
+}
+await check({ header: { text: 'shared.roles.undefined', innerText: '' } }, 'authenticated', 'verified');
+for (const text of ['Logged Out', ' Desconectado ', 'app.logged_out_notice_title']) {
+  await check({ dialogs: [{ text, innerText: '' }] }, 'authenticated', 'verified');
+}
 await check({ shell: false }, 'unverified', 'shell_not_ready');
 await check({ hidden: true }, 'unverified', 'shell_not_ready');
 for (const selector of ['#root-layout', '#root-layout-main', '#root-layout header']) await check({ missing: [selector] }, 'unverified', 'shell_not_ready');

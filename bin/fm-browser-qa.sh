@@ -1521,9 +1521,9 @@ async () => {
     const header = document.querySelector('#root-layout header');
     proof.shell_ready = ['#root-layout', '#root-layout-main'].every(selector => visible(document.querySelector(selector))) && !!visible(header);
     if (!proof.shell_ready) return finish('unverified', 'shell_not_ready');
-    if (/shared\.roles\.(?:undefined|null)\b/.test(header.textContent || '')) return finish('unusable', 'unresolved_header_role');
+    if (/shared\.roles\.(?:undefined|null)\b/.test(header.innerText || '')) return finish('unusable', 'unresolved_header_role');
     const loggedOut = [...document.querySelectorAll('[data-modal-panel] h2, [role="dialog"] h2')].some(node => visible(node) &&
-      /^(?:logged out|desconectado|app\.logged_out_notice_title)$/i.test((node.textContent || '').trim().replace(/\s+/g, ' ')));
+      /^(?:logged out|desconectado|app\.logged_out_notice_title)$/i.test((node.innerText || '').trim().replace(/\s+/g, ' ')));
     if (loggedOut) return finish('unusable', 'logged_out_dialog');
     return finish('authenticated', 'verified');
   } catch { return finish('unverified', 'browser_state_unavailable'); }
