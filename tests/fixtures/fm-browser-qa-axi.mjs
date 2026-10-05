@@ -102,18 +102,25 @@ export async function run() {
       select_page: ['selectpage', String(args.pageId)],
       evaluate_script: ['eval', `(${args.function})()`],
       new_page: ['newpage', args.url],
+      navigate_page: ['navigate', args.url],
     };
     const command = commands[name];
     if (!command) throw new Error(`unexpected MCP tool: ${name}`);
     const dir = process.env.FM_FAKE_BROWSER_DIR;
     let raw;
     try {
-      const output = execFileSync(path.resolve(dir, '../fakebin/chrome-devtools-axi'), command, { encoding: 'utf8' });
-      if (name === 'evaluate_script') {
-        const value = JSON.parse(JSON.parse(output.match(/^result: ([^\n]+)\n/)[1]));
-        raw = `Script ran on page and returned:\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
+      if (name === 'navigate_page' && fs.existsSync(path.join(dir, 'navigate_failure'))) {
+        raw = `${fs.readFileSync(path.join(dir, 'navigate_failure'), 'utf8').trim()}\n${await callTool('list_pages')}`;
+        fs.writeFileSync(path.join(dir, 'failed-navigation.json'), JSON.stringify({ args, raw,
+          pageId: fs.readFileSync(path.join(dir, 'selected'), 'utf8').trim() }));
       } else {
-        raw = name === 'list_pages' ? output : await callTool('list_pages');
+        const output = execFileSync(path.resolve(dir, '../fakebin/chrome-devtools-axi'), command, { encoding: 'utf8' });
+        if (name === 'evaluate_script') {
+          const value = JSON.parse(JSON.parse(output.match(/^result: ([^\n]+)\n/)[1]));
+          raw = `Script ran on page and returned:\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``;
+        } else {
+          raw = name === 'list_pages' ? output : await callTool('list_pages');
+        }
       }
     } catch (error) {
       raw = `${error.stdout || ''}${error.stderr || error.message}`;

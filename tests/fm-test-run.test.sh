@@ -396,8 +396,10 @@ test_ci_and_docs_call_the_owner() {
     || fail "Herdr CI job must use bounded lab cleanup"
   grep -Fq 'tests-timing-aggregate:' "$CI" \
     || fail "CI must aggregate per-lane timing artifacts"
-  grep -Fq 'timeout-minutes: 20' "$CI" \
-    || fail "portable serial hang tripwire must be timeout-minutes: 20"
+  ruby -ryaml -e '
+workflow = YAML.safe_load(File.read(ARGV.fetch(0)))
+abort unless workflow.fetch("jobs").fetch("tests-portable-serial").fetch("timeout-minutes") == 30
+' "$CI" || fail "portable serial hang tripwire must be timeout-minutes: 30"
   grep -Fq 'timeout-minutes: 10' "$CI" \
     || fail "portable parallel shards must keep a hang tripwire (10m)"
   # Interim full-suite 25m portable timeout must not remain after sharding.

@@ -14,11 +14,42 @@
 # Diagnostics: blocked runs leave FAILED.md after the evidence directory exists,
 # and every exit best-effort appends JSONL to FM_BROWSER_QA_LEDGER or the default
 # $HOME/.local/share/fm-browser-qa/runs.jsonl when either path is available.
-# Auth: URL-based QA makes at most one teaching-verify login attempt for a
-# same-host /login or /login/* landing on a recognized teacher host when no
-# exact target tab exists (FM_BROWSER_QA_LOGIN_HELPER overrides the helper).
-# Helper success does not prove navigation success: a remaining Sign In page
-# or a different final URL blocks verification without diagnosing expired
+# Auth: protected HTTP(S) teacher-route QA requires a fresh account/self response
+# and a visible usable portal shell after exact page identity verification.
+# Protected top-level routes (optionally prefixed en/en-gb/es/br) are dashboard, account,
+# settings, orders, resources, reports, schools, school, teachers, classes,
+# pending-joins, students, live-activity, assignments, and curriculum. Public,
+# unknown, nonteacher, non-HTTP(S), and attachment targets retain page inspection.
+# Proof requires an HTTPS page and resource entries with the exact pathname
+# /teachers/account/self or /teachers/globals to establish the HTTPS API host:
+# teachers -> api, teachers-dev -> api-dev, teachers-<slug> -> teachers-api-<slug>,
+# all under typing.com; every matching API URL must have no userinfo or nondefault
+# port. Unsupported/missing or conflicting configuration blocks before token use.
+# localStorage teacher_jwt_token stays in page context for the fresh five-second
+# GET /teachers/account/self, with cache no-store, credentials include, redirects
+# rejected, JSON Accept/Content-Type, x-app-site typing, and bearer authorization.
+# x-language uses tc:language then the first URL segment if listed in
+# FTWGLOBALS_BE_API.languages, otherwise FTWGLOBALS_BE_API.defaultLanguage or en.
+# HTTP200 JSON data must have a positive safe-integer teacher_id, role teacher,
+# school_admin, district_admin, or billing_admin, and integer active=1.
+# Integer active=0 is authenticated-but-inactive (unusable), not a login trigger.
+# The mounted shell requires visible #root-layout, #root-layout-main, and
+# #root-layout header, with no shared.roles.undefined/null in its rendered text
+# and no visible modal h2 with rendered text exactly Logged Out, Desconectado, or
+# app.logged_out_notice_title (case-insensitive, whitespace-normalized).
+# These text checks use innerText only, even when empty, without a textContent
+# fallback that would include hidden descendants. Empty accounts, blank names, and
+# unrelated dialogs remain valid; no populated classes/students are required.
+# teacher-session.json publishes only allowlisted proof metadata, never tokens or
+# raw account data. Unknown, timeout, and readiness failures remain unverified.
+# At most one teaching-verify login attempt follows a same-host /login or /login/*
+# landing, HTTP401 self response, or missing token on a protected target
+# (FM_BROWSER_QA_LOGIN_HELPER overrides it); then resolved-route navigation,
+# exact page identity, and fresh session proof must all pass again.
+# Recovery from unauthenticated session proof reuses the identified page.
+# Helper success does not prove navigation success: a navigation tool error blocks
+# even if the unchanged page inventory still matches the target. A remaining
+# Sign In page or a different final URL also blocks without diagnosing expired
 # credentials. Cloudflare Access retains its human-sign-in authentication blocker.
 # Target URLs: HTTP(S) teachers[.-]*.typing.com roots, with or without a trailing
 # slash and without any query or fragment delimiter, select the same origin's
@@ -32,8 +63,13 @@
 # (canonical target), and active_url (observed page, which must exactly match the
 # resolved target for success). A failure identity records the observed page,
 # not completion; check the run outcome and FAILED.md before accepting evidence.
+# Current URL-QA identities mark teacher_session_required; required success also
+# has schema-1 teacher-session.json with matching page_id, requested/resolved/active
+# URLs, a checked_at timestamp, status authenticated/reason verified, HTTP200 and true
+# principal_valid, role_valid, active, shell_ready, plus the trusted api_origin.
 # The run ledger keeps url plus resolved_url. Reports and failure diagnostics
 # distinguish requested, resolved, and observed URLs and announce root resolution.
+# Starting or failing URL QA removes a wrapper-owned report.md from a prior run.
 # Usage:
 #   fm-browser-qa.sh --url <exact-url> --out <dir> [--browser-url <url>] [--session <name>] [--start-if-needed]
 #   fm-browser-qa.sh --select-identity <identity.json> --axi-session <session> [--out <dir>]
@@ -57,6 +93,8 @@ RESOLVED_URL=
 OBSERVED_URL=
 ROOT_RESOLVED=0
 AUTH_CHECK_MODE=
+LOGIN_ATTEMPTED=0
+TEACHER_SESSION_REQUIRED=0
 OUT_DIR=
 BROWSER_URL=http://127.0.0.1:9222
 BROWSER_URL_SET=0
@@ -98,6 +136,12 @@ route when known. Navigation and identity verification use the resolved target;
 evidence preserves requested_url, resolved_url, and observed active_url, and the
 ledger preserves url plus resolved_url. Success requires exact active_url match.
 
+Protected teacher URL QA requires a fresh authenticated, active account and a usable
+portal shell, with sanitized proof in teacher-session.json. Explicit unauthenticated
+proof or an app login redirect permits one login attempt, followed by fresh URL
+and session verification. Missing/unsupported API configuration, timeouts, and
+unready UI block as unverified; see the script header for the proof contract.
+
 Root resolution applies only to --url QA; attachment targets the receipt's
 active_url exactly and remains compatible with receipts without resolved_url.
 EOF
@@ -128,6 +172,7 @@ stream_detail() {
 # has to be inferred from which artifacts are missing.
 write_failure_marker() {
   [ -n "${OUT_DIR:-}" ] && [ -d "${OUT_DIR:-}" ] || return 0
+  [ "$MODE" != qa ] || rm -f "$OUT_DIR/report.md"
   {
     echo "# Browser QA FAILED"
     echo
@@ -191,6 +236,18 @@ try {
 } catch {
   process.exit(1);
 }
+NODE
+}
+
+target_requires_teacher_session() {
+  target_supports_auto_login "$1" || return 1
+  node - "$1" <<'NODE'
+const url = new URL(process.argv[2]);
+const segments = url.pathname.split('/').slice(1);
+if (['en', 'en-gb', 'es', 'br'].includes(segments[0])) segments.shift();
+const protectedRoutes = ['dashboard', 'account', 'settings', 'orders', 'resources', 'reports', 'schools', 'school',
+  'teachers', 'classes', 'pending-joins', 'students', 'live-activity', 'assignments', 'curriculum'];
+process.exit(/^https?:$/.test(url.protocol) && protectedRoutes.includes(segments[0]) ? 0 : 1);
 NODE
 }
 
@@ -465,7 +522,9 @@ BROWSER_URL=${BROWSER_URL%/}
 [ -z "$OUT_DIR" ] || mkdir -p "$OUT_DIR" || blocked "could not create evidence directory: $OUT_DIR"
 
 if [ "$MODE" = qa ]; then
+  rm -f "$OUT_DIR/report.md" "$OUT_DIR/teacher-session.json"
   resolve_target_url
+  if target_requires_teacher_session "$RESOLVED_URL"; then TEACHER_SESSION_REQUIRED=1; fi
   if [ -n "$SESSION_INPUT" ]; then
     LOGICAL_SESSION_NAME="fmqa-$(sanitize_token "$SESSION_INPUT")"
   else
@@ -861,20 +920,25 @@ if (!value || typeof value !== 'object' || typeof value.href !== 'string') {
 fs.writeFileSync(output, JSON.stringify({
   href: value.href,
   title: typeof value.title === 'string' ? value.title : '',
+  ...(value.teacher_session ? { teacher_session: Object.fromEntries(
+    ['status', 'reason', 'api_origin', 'http_status', 'principal_valid', 'role_valid', 'active', 'shell_ready']
+      .filter(key => ['string', 'number', 'boolean'].includes(typeof value.teacher_session[key]))
+      .map(key => [key, value.teacher_session[key]])) } : {}),
   ...(bindingFile && fs.existsSync(bindingFile) ? { browser_target_ids: JSON.parse(fs.readFileSync(bindingFile, 'utf8')) } : {}),
 }, null, 2) + '\n');
 NODE
 }
 
 write_identity() {
-  node - "$1" "$2" "$BROWSER_URL" "$LOGICAL_SESSION_NAME" "$AXI_SESSION_NAME" "$TARGET_URL" "$RESOLVED_URL" "$OUT_DIR/identity.json" <<'NODE'
+  node - "$1" "$2" "$BROWSER_URL" "$LOGICAL_SESSION_NAME" "$AXI_SESSION_NAME" "$TARGET_URL" "$RESOLVED_URL" "$OUT_DIR/identity.json" "$TEACHER_SESSION_REQUIRED" <<'NODE'
 const fs = require('fs');
-const [identityFile, pageId, browserUrl, logicalSessionName, axiSessionName, requestedUrl, resolvedUrl, output] = process.argv.slice(2);
+const [identityFile, pageId, browserUrl, logicalSessionName, axiSessionName, requestedUrl, resolvedUrl, output, sessionRequired] = process.argv.slice(2);
 const identity = JSON.parse(fs.readFileSync(identityFile, 'utf8'));
 fs.writeFileSync(output, JSON.stringify({
   page_id: pageId,
   requested_url: requestedUrl,
   resolved_url: resolvedUrl,
+  teacher_session_required: sessionRequired === '1',
   active_url: identity.href,
   title: identity.title,
   browser_url: browserUrl,
@@ -944,6 +1008,8 @@ if (pagesFile) {
   raw = result.result;
 }
 if (typeof raw !== 'string') throw new Error('AXI bridge did not return an MCP result');
+const navigationFailure = name === 'navigate_page' && raw.match(/^Unable to (?:navigate|reload)\b[^\r\n]*/m);
+if (navigationFailure) throw new Error(navigationFailure[0]);
 if (/^Note: the browser was restarted or reconnected since the last call\./m.test(raw) ||
     /^Note: the previously selected page (?:was closed|is no longer listed)\./m.test(raw)) {
   throw new Error('MCP browser context changed during page probe');
@@ -1073,7 +1139,9 @@ NODE
 }
 
 probe_page() {
-  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file binding_file attempts_left=2
+  local page_id=$1 out_json=$2 safe_id err_file evaluated_json pages_file binding_file eval_args attempts_left=2
+  eval_args=${3:-}
+  [ -n "$eval_args" ] || eval_args='{"function":"() => ({href: location.href, title: document.title})"}'
   safe_id=$(safe_page_id "$page_id")
   err_file="$TMP_DIR/probe-$safe_id.err"
   evaluated_json="$TMP_DIR/probe-evaluated-$safe_id.json"
@@ -1082,7 +1150,7 @@ probe_page() {
   mcp_call select_page "{\"pageId\":$page_id}" > "$TMP_DIR/select-$safe_id.out" 2> "$err_file" || return 1
   while [ "$attempts_left" -gt 0 ]; do
     attempts_left=$((attempts_left - 1))
-    mcp_call evaluate_script '{"function":"() => ({href: location.href, title: document.title})"}' > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
+    mcp_call evaluate_script "$eval_args" > "$TMP_DIR/eval-$safe_id.out" 2> "$err_file" || return 1
     parse_eval_identity "$TMP_DIR/eval-$safe_id.out" "$evaluated_json" "$binding_file" 2> "$err_file" || return 1
     page_inventory > "$pages_file" 2> "$err_file" || return 1
     if [ "$(inventory_lookup "$pages_file" selected-identity "$evaluated_json" "$page_id")" = "$page_id" ]; then
@@ -1380,13 +1448,121 @@ try {
 NODE
 }
 
+teacher_session_function() {
+  cat <<'TEACHER_SESSION_JS'
+async () => {
+  const initial = { href: location.href, title: document.title };
+  const proof = { status: 'unverified', reason: 'browser_state_unavailable' };
+  const finish = (status, reason) => {
+    proof.status = status;
+    proof.reason = reason;
+    if (location.href !== initial.href || document.title !== initial.title) {
+      proof.status = 'unverified';
+      proof.reason = 'page_changed';
+    }
+    return { href: location.href, title: document.title, teacher_session: proof };
+  };
+  try {
+    const page = new URL(initial.href);
+    const host = page.hostname;
+    const apiHost = host === 'teachers.typing.com' ? 'api.typing.com'
+      : host === 'teachers-dev.typing.com' ? 'api-dev.typing.com'
+        : /^teachers-[a-z0-9-]+\.typing\.com$/.test(host) ? host.replace(/^teachers-/, 'teachers-api-') : '';
+    if (page.protocol !== 'https:' || !apiHost) return finish('unverified', 'unsupported_api_configuration');
+    const candidates = performance.getEntriesByType('resource').flatMap(entry => {
+      try {
+        const url = new URL(entry.name);
+        return ['/teachers/account/self', '/teachers/globals'].includes(url.pathname) ? [url] : [];
+      } catch { return []; }
+    });
+    if (!candidates.length) return finish('unverified', 'missing_api_configuration');
+    if (candidates.some(url => url.protocol !== 'https:' || url.username || url.password || url.port || url.hostname !== apiHost)) {
+      return finish('unverified', 'conflicting_api_configuration');
+    }
+    proof.api_origin = `https://${apiHost}`;
+    const token = localStorage.getItem('teacher_jwt_token');
+    if (typeof token !== 'string' || !token.trim()) return finish('unauthenticated', 'missing_token');
+    const globals = window.FTWGLOBALS_BE_API;
+    const languages = globals?.languages;
+    const known = key => typeof key === 'string' && languages && Object.prototype.hasOwnProperty.call(languages, key);
+    const stored = localStorage.getItem('tc:language');
+    const segment = page.pathname.split('/')[1];
+    const language = known(stored) ? stored : known(segment) ? segment : globals?.defaultLanguage ?? 'en';
+    const controller = new AbortController();
+    let timer;
+    let response, body;
+    try {
+      const expired = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          const error = new Error(); error.name = 'AbortError'; reject(error);
+        }, 5000);
+      });
+      const request = async () => {
+        response = await fetch(`${proof.api_origin}/teachers/account/self`, {
+          method: 'GET', cache: 'no-store', credentials: 'include', redirect: 'error', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'x-app-site': 'typing',
+            'x-language': language, Authorization: `Bearer ${token}` },
+        });
+        proof.http_status = response.status;
+        if (response.status === 200) body = await response.json();
+      };
+      await Promise.race([request(), expired]);
+    } catch (error) {
+      return finish('unverified', error?.name === 'AbortError' ? 'request_timeout' : 'request_or_json_error');
+    } finally { clearTimeout(timer); }
+    if (response.status === 401) return finish('unauthenticated', 'http_401');
+    if (response.status !== 200) return finish('unverified', 'unexpected_http_status');
+    const data = body?.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return finish('unverified', 'unexpected_account_schema');
+    proof.principal_valid = Number.isSafeInteger(data.teacher_id) && data.teacher_id > 0;
+    proof.role_valid = ['teacher', 'school_admin', 'district_admin', 'billing_admin'].includes(data.role);
+    if (!proof.principal_valid) return finish('unusable', 'invalid_principal');
+    if (!proof.role_valid) return finish('unusable', 'invalid_role');
+    if (data.active !== 0 && data.active !== 1) return finish('unverified', 'unexpected_active_schema');
+    proof.active = data.active === 1;
+    if (!proof.active) return finish('unusable', 'inactive_account');
+    const visible = node => node && node.getClientRects().length > 0 &&
+      !['hidden', 'collapse'].includes(getComputedStyle(node).visibility) && getComputedStyle(node).display !== 'none';
+    const header = document.querySelector('#root-layout header');
+    proof.shell_ready = ['#root-layout', '#root-layout-main'].every(selector => visible(document.querySelector(selector))) && !!visible(header);
+    if (!proof.shell_ready) return finish('unverified', 'shell_not_ready');
+    if (/shared\.roles\.(?:undefined|null)\b/.test(header.innerText || '')) return finish('unusable', 'unresolved_header_role');
+    const loggedOut = [...document.querySelectorAll('[data-modal-panel] h2, [role="dialog"] h2')].some(node => visible(node) &&
+      /^(?:logged out|desconectado|app\.logged_out_notice_title)$/i.test((node.innerText || '').trim().replace(/\s+/g, ' ')));
+    if (loggedOut) return finish('unusable', 'logged_out_dialog');
+    return finish('authenticated', 'verified');
+  } catch { return finish('unverified', 'browser_state_unavailable'); }
+}
+TEACHER_SESSION_JS
+}
+
+write_teacher_session() {
+  node - "$FINAL_IDENTITY" "$PAGE_ID" "$TARGET_URL" "$RESOLVED_URL" "$OUT_DIR/teacher-session.json" <<'NODE'
+const fs = require('fs');
+const [file, pageId, requestedUrl, resolvedUrl, output] = process.argv.slice(2);
+const identity = JSON.parse(fs.readFileSync(file, 'utf8'));
+const proof = identity.teacher_session || {};
+if (!['authenticated', 'unauthenticated', 'unusable', 'unverified'].includes(proof.status) ||
+    (proof.status === 'authenticated' && (proof.reason !== 'verified' || proof.http_status !== 200 ||
+      !['principal_valid', 'role_valid', 'active', 'shell_ready'].every(key => proof[key] === true)))) {
+  proof.status = 'unverified'; proof.reason = 'unsupported_session_proof';
+}
+fs.writeFileSync(output, JSON.stringify({ schema: 1, page_id: pageId, requested_url: requestedUrl,
+  resolved_url: resolvedUrl, active_url: identity.href, checked_at: new Date().toISOString(),
+  ...proof }, null, 2) + '\n');
+NODE
+}
+
 run_login_helper() {
   local login_url helper_status=0
+  [ "$LOGIN_ATTEMPTED" -eq 0 ] || blocked "teacher portal auto-login was already attempted once"
+  LOGIN_ATTEMPTED=1
   [ -f "$LOGIN_HELPER" ] \
-    || blocked "app login page detected but the auto-login helper is missing: $LOGIN_HELPER"
+    || blocked "teacher portal requires authentication but the auto-login helper is missing: $LOGIN_HELPER"
   login_url=$(node -e 'process.stdout.write(new URL(process.argv[1]).origin + "/login")' "$RESOLVED_URL") \
     || blocked "could not derive a login URL from: $RESOLVED_URL"
-  echo "app login page detected; logging in with teaching-verify credentials" >&2
+  echo "teacher portal requires authentication; logging in with teaching-verify credentials" >&2
   node "$LOGIN_HELPER" --browser-url "$BROWSER_URL" --login-url "$login_url" \
     > "$TMP_DIR/login-helper.out" 2> "$TMP_DIR/login-helper.err" || helper_status=$?
   case "$helper_status" in
@@ -1415,7 +1591,7 @@ record_navigation_identity() {
 check_navigation_auth() {
   local href=$1 title=$2
   if is_auth_blocked "$href" "$title"; then
-    if target_supports_auto_login "$RESOLVED_URL" && is_app_login_page "$href" &&
+    if [ "$TEACHER_SESSION_REQUIRED" -eq 1 ] && is_app_login_page "$href" &&
        ! is_auth_blocked "$href" "$title" cloudflare-only; then
       return 0
     fi
@@ -1424,10 +1600,19 @@ check_navigation_auth() {
 }
 
 open_target_page() {
-  local landing_identity=$1
-  local args
-  args=$(node -e 'console.log(JSON.stringify({url: process.argv[1]}))' "$RESOLVED_URL")
-  if ! mcp_call new_page "$args" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
+  local landing_identity=$1 existing_page_id=${2:-}
+  local args tool=new_page
+  if [ -n "$existing_page_id" ]; then
+    if ! probe_page "$existing_page_id" "$TMP_DIR/recovery-page-identity.json"; then
+      blocked "could not prove browser page $existing_page_id identity before recovery navigation: $(probe_error "$existing_page_id")"
+    fi
+    tool=navigate_page
+  fi
+  args=$(node -e 'console.log(JSON.stringify({url: process.argv[1], ...(process.argv[2] === "navigate_page" ? {type: "url"} : {})}))' "$RESOLVED_URL" "$tool")
+  if ! mcp_call "$tool" "$args" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
+    if [ -n "$existing_page_id" ]; then
+      blocked "login helper returned success, but navigation verification failed: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
+    fi
     blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
@@ -1462,9 +1647,10 @@ MATCHES="$SCAN_DIR/matches.tsv"
 MATCH_COUNT=$(count_lines "$MATCHES")
 
 navigate_target_page() {
+  local existing_page_id=${1:-}
   LANDING_IDS=
   LANDING_IDENTITY="$TMP_DIR/newpage-identity.json"
-  open_target_page "$LANDING_IDENTITY"
+  open_target_page "$LANDING_IDENTITY" "$existing_page_id"
   record_navigation_identity "$LANDING_IDENTITY"
   if is_auth_blocked "$(json_field "$LANDING_IDENTITY" href)" "$(json_field "$LANDING_IDENTITY" title)"; then
     check_navigation_auth "$(json_field "$LANDING_IDENTITY" href)" "$(json_field "$LANDING_IDENTITY" title)"
@@ -1483,6 +1669,9 @@ navigate_target_page() {
     if ! LANDING_PAGE_ID=$(landing_page_id "$LANDING_IDENTITY"); then
       blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/pages-after-open.err" "$TMP_DIR/pages-after-open.txt")"
     fi
+  fi
+  if [ -n "$existing_page_id" ] && [ "$LANDING_PAGE_ID" != "$existing_page_id" ]; then
+    blocked "browser page changed during recovery navigation: expected $existing_page_id got $LANDING_PAGE_ID"
   fi
   AUTHORITATIVE_IDENTITY="$TMP_DIR/newpage-authoritative-identity.json"
   if ! probe_page "$LANDING_PAGE_ID" "$AUTHORITATIVE_IDENTITY"; then
@@ -1510,6 +1699,10 @@ navigate_target_page() {
           AUTHORITATIVE_TITLE=$post_title
         fi
       fi
+      continue
+    fi
+    if [ -n "$existing_page_id" ]; then
+      LANDING_IDS="$LANDING_IDS $page_id"
       continue
     fi
     known=0
@@ -1546,6 +1739,9 @@ navigate_target_page() {
   SCAN_DIR="$TMP_DIR/scan-after-open"
   scan_pages "$SCAN_DIR" "$FALLBACK_IDS" tolerate
   MATCHES="$SCAN_DIR/matches.tsv"
+  if [ -n "$existing_page_id" ] && [ "$AUTHORITATIVE_HREF" != "$NORM_TARGET_URL" ]; then
+    blocked "login helper returned success, but navigation verification failed: $RESOLVED_URL"
+  fi
   if [ "$AUTHORITATIVE_HREF" = "$NORM_TARGET_URL" ]; then
     printf '%s\t%s\n' "$LANDING_PAGE_ID" "$AUTHORITATIVE_IDENTITY" >> "$MATCHES"
   fi
@@ -1555,7 +1751,7 @@ navigate_target_page() {
 if [ "$MATCH_COUNT" -eq 0 ]; then
   navigate_target_page
   if [ "$MATCH_COUNT" -eq 0 ] && is_app_login_page "$AUTHORITATIVE_HREF" &&
-     target_supports_auto_login "$RESOLVED_URL"; then
+     [ "$TEACHER_SESSION_REQUIRED" -eq 1 ]; then
     STAGE=auto-login
     run_login_helper
     STAGE=page-scan
@@ -1576,31 +1772,68 @@ if [ "$MATCH_COUNT" -gt 1 ]; then
   blocked "multiple tabs match the exact QA URL; close duplicates and retry: $RESOLVED_URL"
 fi
 
-STAGE=identity
-MATCH_LINE=$(sed -n '1p' "$MATCHES")
-PAGE_ID=$(printf '%s\n' "$MATCH_LINE" | cut -f1)
-FINAL_IDENTITY="$TMP_DIR/final-identity.json"
-if ! probe_page "$PAGE_ID" "$FINAL_IDENTITY"; then
-  blocked "could not prove browser page $PAGE_ID identity: $(probe_error "$PAGE_ID")"
-fi
-FINAL_HREF=$(json_field "$FINAL_IDENTITY" href)
-FINAL_TITLE=$(json_field "$FINAL_IDENTITY" title)
-OBSERVED_URL=$FINAL_HREF
-write_identity "$FINAL_IDENTITY" "$PAGE_ID"
-
-if is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE"; then
-  auth_blocked
-fi
-
-if [ "$AUTH_CHECK_MODE" = cloudflare-only ] && is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE" all; then
-  blocked "login helper returned success, but the selected page still requires sign-in; navigation verification failed: $FINAL_HREF"
-fi
-
-if [ "$FINAL_HREF" != "$RESOLVED_URL" ]; then
-  if [ "$AUTH_CHECK_MODE" = cloudflare-only ]; then
-    blocked "selected browser tab URL mismatch; login helper returned success, but navigation verification failed: expected $RESOLVED_URL got $FINAL_HREF"
+verify_final_identity() {
+  MATCH_LINE=$(sed -n '1p' "$MATCHES")
+  PAGE_ID=$(printf '%s\n' "$MATCH_LINE" | cut -f1)
+  FINAL_IDENTITY="$TMP_DIR/final-identity.json"
+  if ! probe_page "$PAGE_ID" "$FINAL_IDENTITY" "${1:-}"; then
+    blocked "could not prove browser page $PAGE_ID identity: $(probe_error "$PAGE_ID")"
   fi
-  blocked "selected browser tab URL mismatch: expected $RESOLVED_URL got $FINAL_HREF"
+  FINAL_HREF=$(json_field "$FINAL_IDENTITY" href)
+  FINAL_TITLE=$(json_field "$FINAL_IDENTITY" title)
+  OBSERVED_URL=$FINAL_HREF
+  write_identity "$FINAL_IDENTITY" "$PAGE_ID"
+
+  if is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE"; then
+    auth_blocked
+  fi
+
+  if [ "$AUTH_CHECK_MODE" = cloudflare-only ] && is_auth_blocked "$FINAL_HREF" "$FINAL_TITLE" all; then
+    blocked "login helper returned success, but the selected page still requires sign-in; navigation verification failed: $FINAL_HREF"
+  fi
+
+  if [ "$FINAL_HREF" != "$RESOLVED_URL" ]; then
+    if [ "$AUTH_CHECK_MODE" = cloudflare-only ]; then
+      blocked "selected browser tab URL mismatch; login helper returned success, but navigation verification failed: expected $RESOLVED_URL got $FINAL_HREF"
+    fi
+    blocked "selected browser tab URL mismatch: expected $RESOLVED_URL got $FINAL_HREF"
+  fi
+}
+
+STAGE=identity
+verify_final_identity
+
+if [ "$TEACHER_SESSION_REQUIRED" -eq 1 ]; then
+  SESSION_ARGS=$(teacher_session_function | node -e 'let functionText=""; process.stdin.on("data", chunk => functionText += chunk); process.stdin.on("end", () => console.log(JSON.stringify({function:functionText})))')
+  while :; do
+    STAGE=teacher-session
+    verify_final_identity "$SESSION_ARGS"
+    write_teacher_session
+    SESSION_STATUS=$(json_field "$OUT_DIR/teacher-session.json" status)
+    SESSION_REASON=$(json_field "$OUT_DIR/teacher-session.json" reason)
+    case "$SESSION_STATUS" in
+      authenticated) break ;;
+      unauthenticated)
+        if [ "$LOGIN_ATTEMPTED" -eq 0 ]; then
+          STAGE=auto-login
+          run_login_helper
+          STAGE=page-scan
+          INITIAL_SCAN_DIR="$TMP_DIR/scan-before-session-login"
+          INITIAL_IDS=$(list_page_ids before-session-login)
+          scan_pages "$INITIAL_SCAN_DIR" "$INITIAL_IDS" tolerate
+          navigate_target_page "$PAGE_ID"
+          [ "$MATCH_COUNT" -gt 0 ] || blocked "login helper returned success, but navigation verification failed: $RESOLVED_URL"
+          [ "$MATCH_COUNT" -eq 1 ] || blocked "multiple tabs match the exact QA URL after teacher portal auto-login: $RESOLVED_URL"
+          STAGE=identity
+          verify_final_identity
+          continue
+        fi
+        ;;
+    esac
+    HELPER_DETAIL=
+    [ "$LOGIN_ATTEMPTED" -eq 0 ] || HELPER_DETAIL="login helper returned success, but "
+    blocked "${HELPER_DETAIL}usable teacher session verification failed ($SESSION_STATUS: $SESSION_REASON); see teacher-session.json"
+  done
 fi
 
 STAGE=snapshot
@@ -1654,6 +1887,9 @@ rm -f "$OUT_DIR/FAILED.md"
   echo "- Active URL: $FINAL_HREF"
   echo "- Title: $FINAL_TITLE"
   echo "- Page ID: $PAGE_ID"
+  if [ -f "$OUT_DIR/teacher-session.json" ]; then
+    echo "- Teacher session: authenticated, active account and usable portal shell verified"
+  fi
   echo "- Browser endpoint: $BROWSER_URL"
   echo "- Logical evidence session: $LOGICAL_SESSION_NAME"
   echo "- AXI bridge session: $AXI_SESSION_NAME"
@@ -1661,6 +1897,7 @@ rm -f "$OUT_DIR/FAILED.md"
   echo "## Evidence"
   echo
   echo "- identity.json"
+  [ ! -f "$OUT_DIR/teacher-session.json" ] || echo "- teacher-session.json"
   echo "- snapshot.txt"
   echo "- screenshot.png"
   echo "- console.txt"
