@@ -361,7 +361,7 @@ NODE
       done < "$dir/mutate_page_after_eval_$id"
     fi
     ;;
-  newpage)
+  newpage|navigate)
     url=${1:?}
     : > "$dir/newpage_started"
     if [ -e "$dir/root_login_redirect" ] && node -e 'process.exit(new URL(process.argv[1]).pathname === "/" ? 0 : 1)' "$url"; then
@@ -373,7 +373,10 @@ NODE
       href=$url
       title=${FM_FAKE_BROWSER_TITLE:-QA Target}
     fi
-    if [ -e "$dir/newpage_reuses_page" ]; then
+    if [ "$cmd" = navigate ]; then
+      id=$(cat "$dir/selected")
+      [ -f "$(page_file "$id")" ] || { echo "no selected page" >&2; exit 1; }
+    elif [ -e "$dir/newpage_reuses_page" ]; then
       id=$(cat "$dir/newpage_reuses_page")
     else
       id=$(next_id)
@@ -384,7 +387,14 @@ NODE
       IFS='	' read -r mutate_id mutate_href mutate_title < "$dir/newpage_mutates_page"
       printf '%s\t%s\n' "$mutate_href" "$mutate_title" > "$(page_file "$mutate_id")"
     fi
-    printf '%s\n' "$url" >> "$dir/newpage.log"
+    if [ "$cmd" = navigate ]; then
+      printf '%s\t%s\n' "$id" "$url" >> "$dir/navigate.log"
+      if [ -e "$dir/navigate_switch_selection" ]; then
+        cat "$dir/navigate_switch_selection" > "$dir/selected"
+      fi
+    else
+      printf '%s\n' "$url" >> "$dir/newpage.log"
+    fi
     printf 'page:\n  title: %s\n' "$title"
     ;;
   snapshot)
@@ -762,14 +772,14 @@ test_teacher_session_login_recovery_and_sanitized_evidence() {
   fakebin=$(make_fake_browser_tools "$dir")
   helper=$(make_fake_login_helper "$dir/browser")
   write_page "$dir/browser" 1 "https://teachers-dev.typing.com/dashboard" "Dashboard"
+  write_page "$dir/browser" 2 "https://example.test/other" "Other"
   printf '%s\n' '{"status":401,"header":"shared.roles.undefined"}' > "$dir/browser/teacher-session.json"
   printf '%s\n' '{"body":{"data":{"teacher_id":42,"role":"teacher","active":1,"name":"","classes":[],"sso_token":"SSO-DO-NOT-PERSIST"}},"dialogs":["Welcome"]}' > "$dir/browser/after-login-session.json"
 
-  FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
+  FM_FAKE_BROWSER_TITLE=Dashboard FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
     --url "https://teachers-dev.typing.com" --out "$dir/evidence" > "$dir/out"
 
   [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] || fail "session recovery should log in once"
-  assert_grep "https://teachers-dev.typing.com/dashboard" "$dir/browser/newpage.log" "recovery must navigate to resolved target"
   node - "$dir/evidence" "$dir/browser/teacher-fetch.jsonl" <<'NODE' || fail "sanitized session receipt should prove a fresh empty-account recovery"
 const fs = require('fs');
 const [dir, fetchFile] = process.argv.slice(2);
@@ -782,7 +792,86 @@ for (const file of fs.readdirSync(dir)) if (/TEST-JWT|SSO-DO|sso_token|Authoriza
 NODE
   assert_grep "Teacher session: authenticated" "$dir/evidence/report.md" "report must include verified session"
   assert_absent "$dir/evidence/FAILED.md" "fresh verified recovery should clear old failure"
-  pass "fm-browser-qa.sh: one session login recovers a usable empty account with sanitized evidence"
+
+  FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
+    --url "https://teachers-dev.typing.com" --out "$dir/repeated" > "$dir/repeated.out" \
+    || fail "recovered dashboard must support a subsequent QA run"
+  run_qa "$fakebin" "$dir/browser" --select-identity "$dir/evidence/identity.json" \
+    --axi-session recovered --out "$dir/attached" > "$dir/attached.out" \
+    || fail "recovered dashboard must support attachment using its saved identity"
+
+  node - "$dir" <<'NODE' || fail "recovery, repeated QA, and attachment must reuse the identified page without duplicate URLs"
+const fs = require('fs');
+const dir = process.argv[2];
+const requested = 'https://teachers-dev.typing.com';
+const target = `${requested}/dashboard`;
+for (const file of ['evidence/identity.json', 'evidence/teacher-session.json', 'repeated/identity.json', 'repeated/teacher-session.json', 'attached/attached-identity.json']) {
+  const identity = JSON.parse(fs.readFileSync(`${dir}/${file}`, 'utf8'));
+  if (identity.page_id !== '1' || identity.active_url !== target) process.exit(1);
+  if (!file.startsWith('attached/') && (identity.requested_url !== requested || identity.resolved_url !== target)) process.exit(1);
+}
+const pages = fs.readdirSync(`${dir}/browser`).filter(file => /^page_\d+$/.test(file));
+if (pages.length !== 2 || pages.filter(file => fs.readFileSync(`${dir}/browser/${file}`, 'utf8').split('\t')[0] === target).length !== 1) process.exit(1);
+if (fs.readFileSync(`${dir}/browser/page_2`, 'utf8') !== 'https://example.test/other\tOther\n') process.exit(1);
+if (fs.readFileSync(`${dir}/browser/navigate.log`, 'utf8') !== `1\t${target}\n`) process.exit(1);
+if (fs.readFileSync(`${dir}/browser/teacher-fetch.jsonl`, 'utf8').trim().split('\n').length !== 3) process.exit(1);
+if (fs.readFileSync(`${dir}/browser/selected`, 'utf8').trim() !== '1') process.exit(1);
+NODE
+  [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] || fail "repeated QA and attachment must not repeat login"
+  assert_absent "$dir/browser/newpage.log" "session recovery must not create another dashboard tab"
+  assert_present "$dir/repeated/report.md" "subsequent QA should publish success"
+  assert_present "$dir/attached/attached-report.md" "attachment should publish success"
+  pass "fm-browser-qa.sh: session recovery reuses its page for subsequent QA and attachment"
+}
+
+test_teacher_session_recovery_navigation_blocks() {
+  local dir fakebin helper scenario observed out status
+  for scenario in wrong-host wrong-route selection-drift; do
+    dir="$TMP_ROOT/teacher-session-navigation-$scenario"
+    fakebin=$(make_fake_browser_tools "$dir")
+    helper=$(make_fake_login_helper "$dir/browser")
+    write_page "$dir/browser" 1 "https://teachers-dev.typing.com/dashboard" "Dashboard"
+    printf '%s\n' '{"status":401}' > "$dir/browser/teacher-session.json"
+    printf '%s\n' '{}' > "$dir/browser/after-login-session.json"
+    case "$scenario" in
+      wrong-host|wrong-route)
+        observed="https://teachers.typing.com/dashboard"
+        [ "$scenario" != wrong-route ] || observed="https://teachers-dev.typing.com/classes"
+        printf '%s\t%s\n' "$observed" "Dashboard" > "$dir/browser/after_login_redirect"
+        write_page "$dir/browser" 2 "https://example.test/other" "Other"
+        printf '%s\t%s\t%s\n' 2 "https://teachers-dev.typing.com/dashboard" "Dashboard" > "$dir/browser/newpage_mutates_page"
+        ;;
+      selection-drift)
+        write_page "$dir/browser" 2 "https://example.test/other" "Other"
+        printf '%s\t%s\t%s\n' 2 "https://teachers-dev.typing.com/dashboard" "Dashboard" > "$dir/browser/newpage_mutates_page"
+        printf '2\n' > "$dir/browser/navigate_switch_selection"
+        ;;
+    esac
+
+    set +e
+    out=$(FM_FAKE_BROWSER_TITLE=Dashboard FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
+      --url "https://teachers-dev.typing.com" --out "$dir/evidence")
+    status=$?
+    set -e
+    expect_code 1 "$status" "recovery must reject a different host, route, or selected page"
+    if [ "$scenario" = selection-drift ]; then
+      assert_contains "$out" "browser page changed during recovery navigation: expected 1 got 2" "recovery must retain its identified page"
+    else
+      assert_contains "$out" "login helper returned success, but navigation verification failed" "helper success must not certify the wrong route"
+      node - "$dir/evidence/identity.json" "$observed" <<'NODE' || fail "failed recovery must preserve the observed URL and original page"
+const fs = require('fs');
+const identity = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (identity.page_id !== '1' || identity.active_url !== process.argv[3] ||
+    identity.requested_url !== 'https://teachers-dev.typing.com' || identity.resolved_url !== 'https://teachers-dev.typing.com/dashboard') process.exit(1);
+NODE
+    fi
+    [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] || fail "failed recovery must not repeat login"
+    assert_absent "$dir/browser/newpage.log" "failed recovery must not open a replacement tab"
+    assert_absent "$dir/evidence/report.md" "failed recovery must not publish success"
+    assert_present "$dir/evidence/FAILED.md" "failed recovery must publish failure evidence"
+    assert_not_contains "$out" "authenticated browser session expired" "navigation failure must not diagnose expired credentials"
+  done
+  pass "fm-browser-qa.sh: session recovery retains strict host, route, and page identity"
 }
 
 test_teacher_session_unverified_and_async_drift_block() {
@@ -3481,6 +3570,7 @@ test_teacher_session_protocol_and_usability
 test_teacher_session_protected_route_eligibility
 test_teacher_public_target_skips_session_and_login
 test_teacher_session_login_recovery_and_sanitized_evidence
+test_teacher_session_recovery_navigation_blocks
 test_teacher_session_unverified_and_async_drift_block
 test_missing_chrome_devtools_axi_blocks
 test_missing_node_blocks_and_records_ledger

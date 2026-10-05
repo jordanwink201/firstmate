@@ -102,6 +102,7 @@ export async function run() {
       select_page: ['selectpage', String(args.pageId)],
       evaluate_script: ['eval', `(${args.function})()`],
       new_page: ['newpage', args.url],
+      navigate_page: ['navigate', args.url],
     };
     const command = commands[name];
     if (!command) throw new Error(`unexpected MCP tool: ${name}`);

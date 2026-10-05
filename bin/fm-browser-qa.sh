@@ -1596,10 +1596,16 @@ check_navigation_auth() {
 }
 
 open_target_page() {
-  local landing_identity=$1
-  local args
-  args=$(node -e 'console.log(JSON.stringify({url: process.argv[1]}))' "$RESOLVED_URL")
-  if ! mcp_call new_page "$args" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
+  local landing_identity=$1 existing_page_id=${2:-}
+  local args tool=new_page
+  if [ -n "$existing_page_id" ]; then
+    if ! probe_page "$existing_page_id" "$TMP_DIR/recovery-page-identity.json"; then
+      blocked "could not prove browser page $existing_page_id identity before recovery navigation: $(probe_error "$existing_page_id")"
+    fi
+    tool=navigate_page
+  fi
+  args=$(node -e 'console.log(JSON.stringify({url: process.argv[1], ...(process.argv[2] === "navigate_page" ? {type: "url"} : {})}))' "$RESOLVED_URL" "$tool")
+  if ! mcp_call "$tool" "$args" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
     blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"
@@ -1634,9 +1640,10 @@ MATCHES="$SCAN_DIR/matches.tsv"
 MATCH_COUNT=$(count_lines "$MATCHES")
 
 navigate_target_page() {
+  local existing_page_id=${1:-}
   LANDING_IDS=
   LANDING_IDENTITY="$TMP_DIR/newpage-identity.json"
-  open_target_page "$LANDING_IDENTITY"
+  open_target_page "$LANDING_IDENTITY" "$existing_page_id"
   record_navigation_identity "$LANDING_IDENTITY"
   if is_auth_blocked "$(json_field "$LANDING_IDENTITY" href)" "$(json_field "$LANDING_IDENTITY" title)"; then
     check_navigation_auth "$(json_field "$LANDING_IDENTITY" href)" "$(json_field "$LANDING_IDENTITY" title)"
@@ -1655,6 +1662,9 @@ navigate_target_page() {
     if ! LANDING_PAGE_ID=$(landing_page_id "$LANDING_IDENTITY"); then
       blocked "could not prove browser landing page identity: $(stream_detail "$TMP_DIR/pages-after-open.err" "$TMP_DIR/pages-after-open.txt")"
     fi
+  fi
+  if [ -n "$existing_page_id" ] && [ "$LANDING_PAGE_ID" != "$existing_page_id" ]; then
+    blocked "browser page changed during recovery navigation: expected $existing_page_id got $LANDING_PAGE_ID"
   fi
   AUTHORITATIVE_IDENTITY="$TMP_DIR/newpage-authoritative-identity.json"
   if ! probe_page "$LANDING_PAGE_ID" "$AUTHORITATIVE_IDENTITY"; then
@@ -1682,6 +1692,10 @@ navigate_target_page() {
           AUTHORITATIVE_TITLE=$post_title
         fi
       fi
+      continue
+    fi
+    if [ -n "$existing_page_id" ]; then
+      LANDING_IDS="$LANDING_IDS $page_id"
       continue
     fi
     known=0
@@ -1718,6 +1732,9 @@ navigate_target_page() {
   SCAN_DIR="$TMP_DIR/scan-after-open"
   scan_pages "$SCAN_DIR" "$FALLBACK_IDS" tolerate
   MATCHES="$SCAN_DIR/matches.tsv"
+  if [ -n "$existing_page_id" ] && [ "$AUTHORITATIVE_HREF" != "$NORM_TARGET_URL" ]; then
+    blocked "login helper returned success, but navigation verification failed: $RESOLVED_URL"
+  fi
   if [ "$AUTHORITATIVE_HREF" = "$NORM_TARGET_URL" ]; then
     printf '%s\t%s\n' "$LANDING_PAGE_ID" "$AUTHORITATIVE_IDENTITY" >> "$MATCHES"
   fi
@@ -1797,7 +1814,7 @@ if [ "$TEACHER_SESSION_REQUIRED" -eq 1 ]; then
           INITIAL_SCAN_DIR="$TMP_DIR/scan-before-session-login"
           INITIAL_IDS=$(list_page_ids before-session-login)
           scan_pages "$INITIAL_SCAN_DIR" "$INITIAL_IDS" tolerate
-          navigate_target_page
+          navigate_target_page "$PAGE_ID"
           [ "$MATCH_COUNT" -gt 0 ] || blocked "login helper returned success, but navigation verification failed: $RESOLVED_URL"
           [ "$MATCH_COUNT" -eq 1 ] || blocked "multiple tabs match the exact QA URL after teacher portal auto-login: $RESOLVED_URL"
           STAGE=identity
