@@ -1006,6 +1006,8 @@ if (pagesFile) {
   raw = result.result;
 }
 if (typeof raw !== 'string') throw new Error('AXI bridge did not return an MCP result');
+const navigationFailure = name === 'navigate_page' && raw.match(/^Unable to (?:navigate|reload)\b[^\r\n]*/m);
+if (navigationFailure) throw new Error(navigationFailure[0]);
 if (/^Note: the browser was restarted or reconnected since the last call\./m.test(raw) ||
     /^Note: the previously selected page (?:was closed|is no longer listed)\./m.test(raw)) {
   throw new Error('MCP browser context changed during page probe');
@@ -1606,6 +1608,9 @@ open_target_page() {
   fi
   args=$(node -e 'console.log(JSON.stringify({url: process.argv[1], ...(process.argv[2] === "navigate_page" ? {type: "url"} : {})}))' "$RESOLVED_URL" "$tool")
   if ! mcp_call "$tool" "$args" > "$TMP_DIR/newpage.out" 2> "$TMP_DIR/newpage.err"; then
+    if [ -n "$existing_page_id" ]; then
+      blocked "login helper returned success, but navigation verification failed: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
+    fi
     blocked "could not open exact QA URL in authenticated browser: $(stream_detail "$TMP_DIR/newpage.err" "$TMP_DIR/newpage.out")"
   fi
   sleep "${FM_BROWSER_QA_OPEN_SETTLE:-1}"

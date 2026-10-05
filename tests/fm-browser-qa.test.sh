@@ -824,6 +824,50 @@ NODE
   pass "fm-browser-qa.sh: session recovery reuses its page for subsequent QA and attachment"
 }
 
+test_teacher_session_failed_navigation_blocks_unchanged_dashboard() {
+  local dir fakebin helper out status
+  dir="$TMP_ROOT/teacher-session-navigation-failure"
+  fakebin=$(make_fake_browser_tools "$dir")
+  helper=$(make_fake_login_helper "$dir/browser")
+  write_page "$dir/browser" 1 "https://teachers-dev.typing.com/dashboard" "Dashboard"
+  printf '%s\n' '{"status":401}' > "$dir/browser/teacher-session.json"
+  printf '%s\n' '{}' > "$dir/browser/after-login-session.json"
+  printf '%s\n' 'Unable to navigate in the selected page: Navigation timeout of 10000 ms exceeded.' > "$dir/browser/navigate_failure"
+
+  set +e
+  out=$(FM_BROWSER_QA_LEDGER="$dir/runs.jsonl" FM_BROWSER_QA_LOGIN_HELPER="$helper" run_qa "$fakebin" "$dir/browser" \
+    --url "https://teachers-dev.typing.com" --out "$dir/evidence")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "failed navigation must block even when the original dashboard remains usable"
+  assert_contains "$out" "login helper returned success, but navigation verification failed" "navigation failure must be distinguished from login success"
+  assert_contains "$out" "Unable to navigate in the selected page" "navigation failure must preserve the MCP diagnostic"
+  assert_not_contains "$out" "authenticated browser session expired" "navigation timeout must not diagnose expired credentials"
+  assert_absent "$dir/evidence/report.md" "failed navigation must not publish a success report"
+  assert_absent "$dir/evidence/screenshot.png" "failed navigation must stop before collecting success evidence"
+  assert_present "$dir/evidence/FAILED.md" "failed navigation must publish failure evidence"
+  assert_absent "$dir/browser/newpage.log" "failed navigation must not create a replacement tab"
+  [ "$(wc -l < "$dir/browser/login-helper.log" | tr -d '[:space:]')" -eq 1 ] || fail "failed navigation must not repeat login"
+  assert_url_evidence "$dir/evidence" "$dir/runs.jsonl" "https://teachers-dev.typing.com" \
+    "https://teachers-dev.typing.com/dashboard" "https://teachers-dev.typing.com/dashboard" 1
+  node - "$dir" <<'NODE' || fail "navigation failure must leave the original page intact without publishing authenticated session proof"
+const fs = require('fs');
+const dir = process.argv[2];
+const read = file => fs.readFileSync(`${dir}/${file}`, 'utf8');
+const navigation = JSON.parse(read('browser/failed-navigation.json'));
+if (navigation.pageId !== '1' || navigation.args.type !== 'url' || navigation.args.url !== 'https://teachers-dev.typing.com/dashboard') process.exit(1);
+if (!navigation.raw.includes('## Pages\n1: Dashboard (https://teachers-dev.typing.com/dashboard) [selected]')) process.exit(1);
+if (read('browser/page_1') !== 'https://teachers-dev.typing.com/dashboard\tDashboard\n') process.exit(1);
+if ((JSON.parse(read('browser/teacher-session.json')).status ?? 200) !== 200) process.exit(1);
+if (read('browser/teacher-fetch.jsonl').trim().split('\n').length !== 1) process.exit(1);
+const receipt = JSON.parse(read('evidence/teacher-session.json'));
+if (receipt.page_id !== '1' || receipt.status !== 'unauthenticated' || receipt.reason !== 'http_401' || receipt.http_status !== 401) process.exit(1);
+if (JSON.parse(read('evidence/identity.json')).page_id !== '1') process.exit(1);
+NODE
+  pass "fm-browser-qa.sh: failed recovery navigation blocks an unchanged usable dashboard"
+}
+
 test_teacher_session_recovery_navigation_blocks() {
   local dir fakebin helper scenario observed out status
   for scenario in wrong-host wrong-route selection-drift; do
@@ -3570,6 +3614,7 @@ test_teacher_session_protocol_and_usability
 test_teacher_session_protected_route_eligibility
 test_teacher_public_target_skips_session_and_login
 test_teacher_session_login_recovery_and_sanitized_evidence
+test_teacher_session_failed_navigation_blocks_unchanged_dashboard
 test_teacher_session_recovery_navigation_blocks
 test_teacher_session_unverified_and_async_drift_block
 test_missing_chrome_devtools_axi_blocks
