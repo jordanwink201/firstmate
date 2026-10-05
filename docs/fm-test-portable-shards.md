@@ -92,11 +92,7 @@ The workflow in `.github/workflows/ci.yml` owns the exact artifact names and agg
 
 ## Timeouts
 
-| Job | timeout-minutes | Rationale |
-|---|---:|---|
-| portable parallel 1/2 | 10 | Measured shard sum ~1 min; hang tripwire with margin |
-| portable serial | 20 | Measured ~13 min remainder; reduced from interim 25m full-portable slack after sharding |
-| Herdr | 40 | Unchanged hang tripwire for the real-Herdr lane |
+The [CI workflow](../.github/workflows/ci.yml) owns current per-job timeout values and their rationale; [runner regression tests](../tests/fm-test-run.test.sh) verify the serial job's timeout semantically.
 
 Timeouts remain hang tripwires, not expected healthy ends of green suites.
 Do not raise them as a substitute for green results, retries, or weaker assertions.

@@ -46,8 +46,10 @@
 # landing, HTTP401 self response, or missing token on a protected target
 # (FM_BROWSER_QA_LOGIN_HELPER overrides it); then resolved-route navigation,
 # exact page identity, and fresh session proof must all pass again.
-# Helper success does not prove navigation success: a remaining Sign In page
-# or a different final URL blocks verification without diagnosing expired
+# Recovery from unauthenticated session proof reuses the identified page.
+# Helper success does not prove navigation success: a navigation tool error blocks
+# even if the unchanged page inventory still matches the target. A remaining
+# Sign In page or a different final URL also blocks without diagnosing expired
 # credentials. Cloudflare Access retains its human-sign-in authentication blocker.
 # Target URLs: HTTP(S) teachers[.-]*.typing.com roots, with or without a trailing
 # slash and without any query or fragment delimiter, select the same origin's
